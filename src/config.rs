@@ -21,6 +21,9 @@ pub struct Config {
     pub tui_backend: String,
     #[serde(default = "default_true")]
     pub enable_preview: bool,
+    /// v0.4.1：事件模式下每次捕获子进程的超时秒数（防止病态读挂起长期占用）
+    #[serde(default = "default_capture_timeout")]
+    pub capture_timeout_secs: u64,
 }
 
 fn default_max_items() -> usize {
@@ -41,6 +44,9 @@ fn default_true() -> bool {
 fn default_backend() -> String {
     "auto".to_string()
 }
+fn default_capture_timeout() -> u64 {
+    5
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -53,6 +59,7 @@ impl Default for Config {
             pinned_on_top: true,
             tui_backend: "auto".to_string(),
             enable_preview: true,
+            capture_timeout_secs: 5,
         }
     }
 }
