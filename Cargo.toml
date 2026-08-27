@@ -1,6 +1,6 @@
 [package]
 name = "niri-clip"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "为 niri + Wayland 设计的高性能开箱即用剪贴板历史 - 单进程 fzf + track + reload"
 authors = ["lishengshang"]
