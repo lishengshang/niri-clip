@@ -186,6 +186,15 @@ pub fn should_ignore(text: &str, cfg: &Config) -> bool {
 }
 
 pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
+    // 统一空白语义：所有捕获路径（watch 管道 / try_system_capture / native
+    // 轮询）必须在同一 hash 口径下去重。此前仅 try_system_capture 做 trim，
+    // 同一次剪贴板变化的竞态双触发会以"原文版 + trim 版"两份入库（真实库
+    // 可见 ts 仅差 40ms、长度差首尾空白的成对条目），TUI Enter 复制后即
+    // 表现为多出一条"带 ↵/空格"的孪生记录。
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Ok(false);
+    }
     let cfg = Config::load();
     if should_ignore(&text, &cfg) {
         return Ok(false);
@@ -471,6 +480,23 @@ mod tests {
                 .filter(|c| c.text.contains("dup-entry-a"))
                 .count();
             assert_eq!(hits, 1, "相同文本应只占一行");
+        });
+    }
+
+    #[test]
+    fn insert_trims_whitespace_and_dedups_variants() {
+        with_env(|_| {
+            clear_db();
+            // 带首尾空白与纯净版视为同一 hash：消除 watch 管道与
+            // try_system_capture 的 trim 语义分歧导致的孪生条目
+            assert!(insert("dup-entry-x\n".into(), None).unwrap());
+            assert!(!insert("dup-entry-x".into(), None).unwrap());
+            assert!(!insert("  dup-entry-x  ".into(), None).unwrap());
+            let all = list(100).unwrap();
+            let hits = all.iter().filter(|c| c.text == "dup-entry-x").count();
+            assert_eq!(hits, 1, "空白变体应只占一行且入库为 trim 后文本");
+            // 纯空白不入库
+            assert!(!insert("   \n\t ".into(), None).unwrap());
         });
     }
 
