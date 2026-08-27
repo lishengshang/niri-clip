@@ -240,7 +240,7 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         .context("wl-copy")?;
     wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
     wl.wait()?;
-    println!("pasted {}", id);
+    println!("copied {}", id);
     Ok(())
 }
 
