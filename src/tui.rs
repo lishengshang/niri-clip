@@ -33,9 +33,54 @@ fn menu_clips(cfg: &Config) -> Result<Vec<store::Clip>> {
     store::list(cfg.max_items.min(store::TUI_LIMIT))
 }
 
+/// fzf 的全屏 UI 依赖控制终端（/dev/tty）。niri `spawn` 拉起的进程
+/// 没有控制终端，fzf 会直接报 "inappropriate ioctl for device" 退出。
+fn has_controlling_tty() -> bool {
+    std::fs::File::open("/dev/tty").is_ok()
+}
+
+/// 无 TTY 时用于承载 fzf 的终端模拟器及其透传参数前缀（按序探测）
+fn terminal_wrap() -> Option<(&'static str, &'static [&'static str])> {
+    for (term, prefix) in [
+        ("foot", &[] as &[&str]),
+        ("alacritty", &["-e"]),
+        ("kitty", &[]),
+        ("wezterm", &["start", "--"]),
+        ("ghostty", &["-e"]),
+    ] {
+        if has_bin(term) {
+            return Some((term, prefix));
+        }
+    }
+    None
+}
+
 pub fn run() -> Result<()> {
     let cfg = Config::load();
     let be = backend(&cfg);
+    // 无控制终端（如 niri spawn 裸拉起）时 fzf 无法运行：
+    // 包一层终端模拟器重跑自己；没有终端则回退 fuzzel（无需 TTY）
+    if be == "fzf" && !has_controlling_tty() {
+        if let Some((term, prefix)) = terminal_wrap() {
+            let exe = std::env::current_exe()?;
+            Command::new(term)
+                .args(prefix)
+                .arg(exe)
+                .arg("tui")
+                .spawn()
+                .context("spawn terminal to host fzf")?;
+            return Ok(());
+        }
+        if has_bin("fuzzel") {
+            eprintln!("[niri-clip tui] 无可用终端承载 fzf，回退 fuzzel");
+            return run_fuzzel(&cfg);
+        }
+        let _ = notify_rust::Notification::new()
+            .summary("niri-clip")
+            .body("fzf 需要 TTY：请安装 foot/alacritty/kitty 等终端，或安装 fuzzel")
+            .show();
+        anyhow::bail!("no controlling tty and no terminal emulator / fuzzel available");
+    }
     eprintln!("[niri-clip tui] backend={} db={:?}", be, Config::db_path());
     match be {
         "fzf" => run_fzf(&cfg),
