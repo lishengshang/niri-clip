@@ -20,8 +20,10 @@ enum Commands {
     Daemon,
     /// 打开 TUI (Mod+V) - 自动选 fzf/fuzzel，支持 --track 不跳顶
     Tui,
-    /// 从 stdin 读取并入库 (供 wl-paste --watch 调用)
+    /// 从 stdin 读取并入库 (v0.4.1 主捕获链路：wl-paste --watch 管道直灌)
     Store,
+    /// 安装 systemd user 单元到 ~/.config/systemd/user/（随后 enable --now 即可托管）
+    InstallService,
     /// 列出历史 (供 fzf reload 调用)
     #[command(name = "list-raw")]
     ListRaw,
@@ -46,6 +48,14 @@ async fn main() -> Result<()> {
         Some(Commands::Daemon) => daemon::run().await?,
         Some(Commands::Tui) => tui::run()?,
         Some(Commands::Store) => daemon::store_from_stdin()?,
+        Some(Commands::InstallService) => {
+            let path = daemon::install_service()?;
+            println!("已写入 {}", path.display());
+            println!("下一步执行：");
+            println!("  systemctl --user daemon-reload");
+            println!("  systemctl --user enable --now niri-clip.service");
+            println!("查看日志： journalctl --user -u niri-clip -f");
+        }
         Some(Commands::ListRaw) => tui::list_raw()?,
         Some(Commands::Preview { id }) => tui::preview_id(id)?,
         Some(Commands::Pin { id }) => {
