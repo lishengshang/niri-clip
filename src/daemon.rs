@@ -30,7 +30,7 @@ pub const SERVICE_UNIT: &str = include_str!(concat!(
 
 /// 组装主模式的 shell 命令串。单列出来以便单元测试覆盖超时边界语义。
 fn watch_shell_command(exe: &std::path::Path, timeout_secs: u64) -> String {
-    format!("exec timeout {timeout_secs}s {}", exe.display())
+    format!("exec timeout {timeout_secs}s {} store", exe.display())
 }
 
 /// `niri-clip store` : 入库一段剪贴板载荷。
@@ -302,7 +302,7 @@ mod tests {
     fn watch_command_bounds_each_capture_with_timeout() {
         use std::path::Path;
         let cmd = watch_shell_command(Path::new("/usr/bin/niri-clip"), 7);
-        assert_eq!(cmd, "exec timeout 7s /usr/bin/niri-clip");
+        assert_eq!(cmd, "exec timeout 7s /usr/bin/niri-clip store");
         assert!(
             cmd.starts_with("exec timeout ") && cmd.contains("s /usr/bin"),
             "每次捕获必须被 timeout 划界"
@@ -310,7 +310,7 @@ mod tests {
         // 路径含空格时依赖 display 的字面量——shell 层由外层 sh -c 整体接收，
         // 这里只锁定格式契约
         let spaced = watch_shell_command(Path::new("/opt/my tools/niri-clip"), 2);
-        assert_eq!(spaced, "exec timeout 2s /opt/my tools/niri-clip");
+        assert_eq!(spaced, "exec timeout 2s /opt/my tools/niri-clip store");
     }
 
     #[test]
