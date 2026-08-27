@@ -39,7 +39,7 @@ hash 去重（事务化原子 upsert），pinned DESC/ ts DESC 排序，
 
 ## 4. 功能 (v1.0 独立)
 
-- `daemon` 原生 500ms 轮询 + flock 单实例 + 探测单次化，双写已移除
+- `daemon` wl-paste --watch 事件驱动捕获（每捕获 timeout 划界）+ flock 单实例，双写已移除
 - `store` 双写已移除，`wipe` 不清 cliphist，多进程并发安全（busy_timeout）
 - `tui` 直查 menu_clips，Mod+V 唯一入口，图片预览按 clip id 关联
 - `migrate` 仍保留，之后可删

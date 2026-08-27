@@ -10,3 +10,5 @@ ignore_regex = "(?i)password|secret|token|otp|auth"
 pinned_on_top = true
 tui_backend = "auto"      # auto | fzf | fuzzel
 enable_preview = true
+# v0.4.1：事件驱动捕获下每次子进程的超时秒数（防病态读挂起）
+capture_timeout_secs = 5

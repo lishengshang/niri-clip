@@ -225,6 +225,7 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
 ///   图片误判重的问题（两张等大 PNG 只会收录第一张）
 /// - 二进制写 `images/{id}.bin` 并把路径记入 clips.image_path，预览按条目精确读取
 /// - 重复内容返回 None：仅刷新时间戳，文件与关联不变
+///
 /// 注意：图片不做 ignore_regex 内容过滤（无法对二进制语义扫描）；上限裁剪共用。
 pub fn insert_image(mime: &str, bytes: &[u8]) -> Result<Option<InsertedImage>> {
     let cfg = Config::load();

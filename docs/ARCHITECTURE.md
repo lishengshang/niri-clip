@@ -10,8 +10,8 @@
 └────────────────┬────────────────────────────────────────┘
                  │ Wayland 协议
         ┌────────▼──────────┐ daemon.lock 单实例 flock
-        │ daemon (Rust)     │ wl-clipboard-rs 500ms 轮询
-        │ tokio + notify    │──────┐
+        │ daemon (Rust)     │ wl-paste --watch 事件源(轮询兜底)
+        │ tokio + notify    │──────┘
         └────────┬──────────┘      │ hash(ignore_regex) dedup
                  │ insert / insert_image
                  ▼
@@ -38,27 +38,29 @@
 v0.3 及之前位于 `~/.cache/niri-clip/`；连接时检测旧库并用 `VACUUM INTO`
 做一致性快照自动搬迁，旧库保留为备份。目录权限 0700 / 库文件 0600。
 
-## 2. Daemon - 原生 Wayland
+## 2. Daemon - 事件驱动捕获
 
+- **主模式（v0.4.1 起，默认）**：
+  `wl-paste --watch sh -c 'exec timeout ${capture_timeout_secs}s niri-clip store'`
+  selection 变化时 wl-paste 把载荷直灌子进程 stdin——零空闲往返、无需进程内
+  Wayland 会话轮询。每次捕获被 `timeout` 划界（默认 5s，可配置），个别来源应用
+  的病态读挂起会被秒级回收。**该结构不存在"daemon 存活但捕获停滞"的形态**
+  （issue #2 复盘的根因即纯轮询中 read_to_end 无限阻塞且无错误输出）
+- **store 子命令（热点路径）**：stdin 非空且为 UTF-8 → 直接走 `ignore_regex`
+  过滤 + 事务化 upsert 入库，全程不触碰本进程 Wayland 连接；
+  非 UTF-8 载荷显式忽略并记日志；stdin 为空（手动调用兼容）→ 先 Text 探测，
+  再按 `enable_image_preview` 尝试 image/png|jpeg|webp 显式 MIME 抓取
+- **回退模式（native 轮询）**：仅当系统缺失 `wl-paste` 二进制时启用。
+  单次 get_contents 探测通过（Ok 或 ClipboardEmpty/NoMimeType/NoSeats 三类良性错误）
+  后进入 500ms 轮询循环。已知取舍须文档明示：<500ms 连续复制的丢帧窗口、
+  空闲 Wayland 往返功耗、read_to_end 长阻塞风险——生产部署应安装 wl-clipboard
+- **反模式备忘**：禁止改回"两次调用 + 第二次 unwrap_err()"的探测写法——
+  剪贴板恰在两次之间变为可用会 panic，systemd Restart 下表现为周期崩启
 - **单实例**：启动即对 `state_dir/daemon.lock` 加 `flock(LOCK_EX|LOCK_NB)`，
   双开报错退出；进程崩溃内核自动释放锁，无陈锁残留
-- **探测**：单次 `paste::get_contents(Text)` 判定原生通道——`Ok` 或三类良性错误
-  （`ClipboardEmpty`/`NoMimeType`/`NoSeats`）均视为可用，其余错误回退。
-  （勿复制旧版"调用两次 + 第二次 unwrap_err()"的写法：剪贴板恰在两次调用之间
-  变为可用会 panic，systemd Restart 下表现为周期崩启）
-- **轮询**：每 500ms `get_contents` 文本；`ClipboardEmpty/NoMimeType/NoSeats` 忽略。
-  已知取舍：<500ms 连续复制的丢帧窗口与空闲往返开销；
-  v0.5 将改 data-control `SelectionChanged` 事件驱动，轮询降级为兜底配置
-- **去重短路**：文本用 `store::hash_text`（与入库同源），图片用
-  `store::image_content_key`（FNV1a64+mime+len，跨进程稳定）；
-  比对 `last_hash` 相同则跳过入库
-- **文本入库**：`store::insert`，失败显式记录 stderr 日志，不静默吞错
-- **图片入库**：`store::insert_image(mime, bytes)`——行先入 `clips`（mime 前缀条目），
-  二进制写 `images/{id}.bin` 后回填 `image_path`；等长不同内容的图片因 FNV
-  内容指纹不再误判重；重复拷贝仅刷新 ts，文件与关联不变
-- **回退**：native 探测失败时 `spawn wl-paste --watch niri-clip store`
-- **常驻**：`niri: spawn-at-startup "niri-clip daemon"` 或 systemd user unit
-  （二选一，单实例锁兜底）
+- **常驻托管**：推荐 `niri-clip install-service` 安装内置单元后
+  `systemctl --user enable --now niri-clip`；与 niri `spawn-at-startup` 同时配置也安全
+  （flock 兜底）。日志经 stderr 进入 journald：`journalctl --user -u niri-clip -f`
 
 ## 3. Store - SQLite WAL
 

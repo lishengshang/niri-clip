@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.4.1 - 2026-08-27
+
+> 分支 `fix/issue-2-daemon-reliable-capture`（堆叠于 PR #1 分支之上）。
+> 事故：daemon 进程存活但捕获停摆 19 分钟——轮询 `read_to_end` 对个别
+> 来源应用永久阻塞且无错误输出。
+
+### Fixed
+- 捕获架构重构为**事件驱动优先**：`wl-paste --watch` 在 selection 变化时
+  把载荷直灌 `niri-clip store` 的 stdin；每次捕获子进程经
+  `timeout ${capture_timeout_secs}s` 划界，任何病态读挂起都会按秒级回收。
+  该故障形态在机制上被消除（不再存在常驻循环等待单一阻塞读的结构）
+- 非 UTF-8 剪贴板载荷不再以 lossy 形式污染文本库（显式跳过并记日志）
+
+### Changed
+- native 500ms 轮询降级为**回退模式**：仅在系统缺失 `wl-paste` 时启用；
+  其文档明确标注丢帧窗口/空闲开销/长阻塞风险三项取舍
+- 图片抓取从轮询循环迁移到 `store` 的空 stdin 探测分支
+  （文本失败→受开关约束的图片 MIME 探测），同样受 timeout 边界保护
+
+### Added
+- `delete --force/-f`：跳过星标 GUI 确认的无头删除路径；无 fuzzel 的环境下
+  交互式删除星标不再静默空转，改为显式提示并指引使用 --force（PR #2 评审项：
+  CI smoke 的 pin→delete 断言即因此失败）
+- 新配置项 `capture_timeout_secs`（默认 5s）
+- `niri-clip install-service` 一键安装内置 systemd user 单元模板并给出启用指引；
+  单元文件补充 Documentation 与 flock 双开说明
+- GitHub Actions CI 五道门禁：fmt check / clippy -D warnings / test --locked /
+  release build --locked / XDG 隔离 CLI 冒烟（store/list/pin/delete/wipe 断言）
+
 ## v0.4.0 - 2026-08-27
 
 > 分支 `fix/issue-1-p0-correctness-store-daemon`：全面评估报告 P0 问题闭环。

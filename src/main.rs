@@ -20,8 +20,10 @@ enum Commands {
     Daemon,
     /// 打开 TUI (Mod+V) - 自动选 fzf/fuzzel，支持 --track 不跳顶
     Tui,
-    /// 从 stdin 读取并入库 (供 wl-paste --watch 调用)
+    /// 从 stdin 读取并入库 (v0.4.1 主捕获链路：wl-paste --watch 管道直灌)
     Store,
+    /// 安装 systemd user 单元到 ~/.config/systemd/user/（随后 enable --now 即可托管）
+    InstallService,
     /// 列出历史 (供 fzf reload 调用)
     #[command(name = "list-raw")]
     ListRaw,
@@ -29,8 +31,12 @@ enum Commands {
     Preview { id: i64 },
     /// 切换固定
     Pin { id: i64 },
-    /// 删除指定 id
-    Delete { id: i64 },
+    /// 删除指定条目（--force/-f 跳过星标确认，供脚本与无头环境使用）
+    Delete {
+        id: i64,
+        #[arg(short, long)]
+        force: bool,
+    },
     /// 清空历史
     Wipe,
     /// 从 cliphist 迁移
@@ -46,6 +52,14 @@ async fn main() -> Result<()> {
         Some(Commands::Daemon) => daemon::run().await?,
         Some(Commands::Tui) => tui::run()?,
         Some(Commands::Store) => daemon::store_from_stdin()?,
+        Some(Commands::InstallService) => {
+            let path = daemon::install_service()?;
+            println!("已写入 {}", path.display());
+            println!("下一步执行：");
+            println!("  systemctl --user daemon-reload");
+            println!("  systemctl --user enable --now niri-clip.service");
+            println!("查看日志： journalctl --user -u niri-clip -f");
+        }
         Some(Commands::ListRaw) => tui::list_raw()?,
         Some(Commands::Preview { id }) => tui::preview_id(id)?,
         Some(Commands::Pin { id }) => {
@@ -61,10 +75,18 @@ async fn main() -> Result<()> {
                 .show();
             println!("{} {}", msg, id);
         }
-        Some(Commands::Delete { id }) => {
-            // 星标二次确认在 TUI 层已处理，这里直接删
-            // 但为安全，若 pinned 则弹 fuzzel 确认
-            if store::is_pinned(id).unwrap_or(false) {
+        Some(Commands::Delete { id, force }) => {
+            // 星标条目默认要求 GUI 确认；--force 供脚本/CI 等无头场景。
+            // 无头环境的 CI 已由 smoke job 用 -f 覆盖（issue #2 评审项）
+            if !force && store::is_pinned(id).unwrap_or(false) {
+                let has_fuzzel = which::which("fuzzel").is_ok();
+                if !has_fuzzel {
+                    eprintln!(
+                        "[niri-clip] 星标条目需要确认但 fuzzel 不可用，已取消；无头环境请使用 delete --force"
+                    );
+                    println!("cancelled");
+                    return Ok(());
+                }
                 let choice = std::process::Command::new("fuzzel")
                     .args(["--dmenu", "--lines=2", "--width=18", "--prompt=删除星标? "])
                     .stdin(std::process::Stdio::piped())

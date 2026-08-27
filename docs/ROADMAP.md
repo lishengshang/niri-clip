@@ -63,10 +63,28 @@
 - [x] 新增 6 个单元测试（去重原子性/busy_timeout/图片关联与判重/旧库搬迁/
       pin 排序/min_length 过滤），XDG 环境变量隔离临时目录
 
-## v0.5 - Event-driven & UX（规划中）
+## v0.4.1 - Reliable Capture ✅ 已交付
 
-- [ ] daemon 改 data-control `SelectionChanged` 事件驱动捕获，消除 500ms 轮询的
-      空闲往返与 <500ms 连续复制丢帧窗口；轮询降级为 `polling_fallback=true` 兜底
+> 分支 `fix/issue-2-daemon-reliable-capture`（堆叠于 issue-1 分支）。
+> 线上事故复盘（issue #2）：用户复制内容后历史不再更新——纯轮询实现中
+> `read_to_end` 对个别来源应用无限阻塞且不报错，进程存活、捕获停死
+> （实测最后一条停在事发前 19 分钟，直至人工介入才被发现）。
+
+- [x] **捕获主路径改事件驱动**：`wl-paste --watch -> sh -c 'exec timeout Ns niri-clip store'`
+      —— selection 变化才触发；零空闲往返；每次捕获子进程被 `timeout`
+      （新配置 `capture_timeout_secs`，默认 5s）划界，病态挂起秒级回收，
+      该故障形态从机制上不可能复现。native 500ms 轮询降级为无 wl-paste 环境兜底
+- [x] **图片捕获迁入 store 子命令**：stdin 空时先文本后图片 MIME 探测，
+      与 timeout 边界共同生效；非 UTF-8 载荷显式忽略不污染文本库
+- [x] **一键 systemd 托管**：新增 `install-service` 子命令写入内置单元模板，
+      配合 flock 双实例兜底与 `journalctl --user -u niri-clip -f` 日志链路
+- [x] **CI 门禁落地**（GitHub Actions）：fmt --check / clippy -D warnings /
+      cargo test --locked / release build --locked / XDG 隔离 CLI 冒烟五道工序
+
+## v0.5 - UX Polish（规划中）
+
+- [ ] ~~事件驱动捕获~~ → 已随 v0.4.1 以外部事件源形态落地；
+      剩余可选项：进程内 data-control `SelectionChanged` 直连监听（去 sh 依赖）
 - [ ] PRIMARY selection 支持（`ClipboardType::Primary`）
 - [ ] `max_clip_bytes` 超大条目上限（当前无尺寸防护，read_to_end 全内存直通入库）
 - [ ] 图片磁盘配额 GC（LRU 清理孤儿 images/*.bin）；`notify_enabled` 通知开关
