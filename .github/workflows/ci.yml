@@ -64,7 +64,7 @@ jobs:
           "$B" pin "$first" >/dev/null 2>&1
           "$B" list-raw | head -n1 | grep -q '★'
 
-          after=$("$B" delete "$first" >/dev/null 2>&1; "$B" list-raw | wc -l)
+          after=$("$B" delete -f "$first" >/dev/null 2>&1; "$B" list-raw | wc -l)
           [ "$after" -eq 2 ]
 
           test -f "$XDG_STATE_HOME/niri-clip/db.sqlite"

@@ -126,7 +126,7 @@ niri-clip store       # 从 stdin 入库 (供 wl-paste --watch)
 niri-clip list-raw    # 供 fzf reload
 niri-clip preview <id>
 niri-clip pin <id>    # 切换固定
-niri-clip delete <id>
+niri-clip delete <id> [-f]   # -f 跳过星标确认（脚本/无头环境）
 niri-clip wipe
 niri-clip migrate     # 从 cliphist 导入
 niri-clip install-service

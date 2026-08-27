@@ -20,6 +20,9 @@
   （文本失败→受开关约束的图片 MIME 探测），同样受 timeout 边界保护
 
 ### Added
+- `delete --force/-f`：跳过星标 GUI 确认的无头删除路径；无 fuzzel 的环境下
+  交互式删除星标不再静默空转，改为显式提示并指引使用 --force（PR #2 评审项：
+  CI smoke 的 pin→delete 断言即因此失败）
 - 新配置项 `capture_timeout_secs`（默认 5s）
 - `niri-clip install-service` 一键安装内置 systemd user 单元模板并给出启用指引；
   单元文件补充 Documentation 与 flock 双开说明
