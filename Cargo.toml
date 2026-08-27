@@ -1,0 +1,29 @@
+[package]
+name = "niri-clip"
+version = "0.1.0"
+edition = "2021"
+description = "为 niri + Wayland 设计的高性能开箱即用剪贴板历史 - 单进程 fzf + track + reload"
+authors = ["mio"]
+license = "MIT"
+repository = "https://github.com/mio/niri-clip"
+keywords = ["niri", "wayland", "clipboard", "wl-clipboard", "cliphist"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+dirs = "5"
+notify-rust = "4"
+wl-clipboard-rs = "0.9"
+chrono = "0.4"
+regex = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

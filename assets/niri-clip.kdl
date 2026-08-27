@@ -1,0 +1,7 @@
+// niri-clip binds - include this in your niri config.kdl
+// include "niri-clip/niri-clip.kdl"
+binds {
+    Mod+V hotkey-overlay-title="剪贴板 (niri-clip)" {
+        spawn "niri-clip" "tui";
+    }
+}
