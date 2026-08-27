@@ -84,10 +84,9 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         "echo {4..}".to_string()
     };
 
-    // A+B: 1-9 快选 + Space jump + / 和 Ctrl-F 搜索 (简化：1-9 始终 pos+accept 直接退出)
+    // A+B: Alt+1..9 快选 + Space jump + / 和 Ctrl-F 搜索 (裸数字留给搜索输入)
     let mut binds: Vec<String> = Vec::new();
     for n in 1..=9 {
-        binds.push(format!("{n}:pos({n})+accept"));
         binds.push(format!("alt-{n}:pos({n})+accept"));
     }
     binds.push("space:jump".into());
@@ -103,7 +102,7 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         .arg("--border")
         .arg("--info=inline")
         .arg("--prompt=剪贴板> ")
-        .arg("--header=1-9快选 · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出")
+        .arg("--header=Alt+1..9快选 · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出")
         .arg("--track")
         .arg("--id-nth=3")
         .arg("--no-input")
