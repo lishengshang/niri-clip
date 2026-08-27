@@ -3,7 +3,7 @@
 > 为 `niri` 合成器打造的 **全新、高性能、开箱即用** Wayland 剪贴板历史管理器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.0-blue)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.4.1-blue)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/Wayland-niri-4a90e2)](https://github.com/YaLTeR/niri)
 [![AUR](https://img.shields.io/badge/AUR-niri--clip-blue)](https://aur.archlinux.org/packages/niri-clip)
@@ -16,7 +16,7 @@
 
 - **不跳顶**：`fzf --track --id-nth` 单进程 `reload-sync`，删除/固定后光标停在 **下一个**，删末尾停在 **上一个**
 - **高性能**：`Rust + SQLite WAL`（`busy_timeout=5000` + 事务化去重，多进程并发安全），菜单直查 `300` 条，`10k` 条 `list <11ms` / `sqlite <4ms`
-- **原生 Wayland**：`wl-clipboard-rs` 轮询 `500ms` + `wl-paste --watch` 自动回退；data-control 事件驱动捕获列入 v0.5
+- **事件驱动捕获**：`wl-paste --watch` 主路径，selection 变化才入库、零空闲轮询；每次捕获子进程受 `capture_timeout_secs` 时间边界保护，从机制上杜绝"进程活着但捕获停摆"；原生 500ms 轮询仅为无 wl-paste 环境兜底
 - **数据持久安全**：历史库位于 `~/.local/state/niri-clip/`（XDG state 规范，不会被系统清理工具误删），旧 `~/.cache` 库自动快照搬迁；目录 0700 / 库文件 0600 权限收紧
 - **图片预览**：`chafa` / `kitty icat`，`enable_image_preview=true` 时 `image/png/jpeg/webp` 终端渲染
 - **安全**：`ignore_regex` 默认过滤 `password|secret|token|otp`，`min_store_length` 可配
@@ -96,6 +96,7 @@ ignore_regex = "(?i)password|secret|token|otp|auth"
 pinned_on_top = true
 tui_backend = "auto"  # auto|fzf|fuzzel
 enable_preview = true
+capture_timeout_secs = 5   # v0.4.1 每次捕获子进程超时
 ```
 
 ---
@@ -105,7 +106,7 @@ enable_preview = true
 | 层 | 技术 | 说明 |
 |---|---|---|
 | 语言 | Rust 1.75+, Tokio | 异步 daemon, 无 GC |
-| Wayland | wl-clipboard-rs 0.9 | ext-data-control 轮询 |
+| Wayland | wl-paste --watch 事件源 + wl-clipboard-rs | 变化即捕获；轮询仅兜底 |
 | 存储 | rusqlite + SQLite WAL | 单文件 `~/.local/state/niri-clip/db.sqlite`，`PRAGMA user_version` 版本化迁移（FTS5 全文搜索列入 v1.0 应用内搜索一并实现） |
 | 去重 | 文本 DefaultHasher+len / 图片 FNV1a64+mime+len | 图片指纹跨进程稳定；文本 hash 计划随 v1.0 统一到稳定算法 |
 | TUI | fzf 0.44+ / fuzzel | --track --id-nth 不跳顶 |
@@ -128,7 +129,18 @@ niri-clip pin <id>    # 切换固定
 niri-clip delete <id>
 niri-clip wipe
 niri-clip migrate     # 从 cliphist 导入
+niri-clip install-service
+                      # 一键安装 systemd user 单元
 niri-clip status
+```
+
+### 🧩 systemd 托管（推荐）
+
+```bash
+niri-clip install-service
+systemctl --user daemon-reload
+systemctl --user enable --now niri-clip.service
+journalctl --user -u niri-clip -f      # 日志
 ```
 
 ---
@@ -146,7 +158,8 @@ cargo clippy --all-targets     # lint 门禁（零警告基线）
 ### 🗺️ 路线
 
 - **v0.3 ✅** 原生 daemon + 300 缓存 + chafa
-- **v1.0** AUR 正式、waybar、man、CI
+- **v0.4.x ✅** P0 修复（并发/图片/panic/state 迁移）+ 事件驱动捕获 + systemd 托管 + CI
+- **v1.0** AUR 正式、waybar、man、CI 深化
 
 ---
 
