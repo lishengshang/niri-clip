@@ -298,7 +298,7 @@ pub fn list_raw() -> Result<()> {
     for (idx, c) in clips.iter().enumerate() {
         let num = idx + 1;
         let star = if c.pinned { "★" } else { " " };
-        let preview = crate::preview::preview_text(&c, cfg.preview_width);
+        let preview = crate::preview::preview_text(c, cfg.preview_width);
         if writeln!(out, "{}\t{}\t{}\t{}", num, star, c.id, preview).is_err() {
             break;
         }
