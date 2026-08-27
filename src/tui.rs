@@ -53,13 +53,14 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         return Ok(());
     }
 
-    // 生成 fzf 输入：★\t{id}\t{preview}
+    // 生成 fzf 输入：序号\t★\t{id}\t{preview}  (序号用于 1-9 快选定位)
     let mut input = String::new();
-    for c in &clips {
+    for (idx, c) in clips.iter().enumerate() {
+        let num = idx + 1;
         let star = if c.pinned { "★" } else { " " };
         let preview = crate::preview::preview_text(c, cfg.preview_width);
-        // fzf 需要 tab 分隔，注意 preview 中的 tab/换行已在 preview_text 处理
-        input.push_str(&format!("{}\t{}\t{}\n", star, c.id, preview));
+        // 显示序号 1-99，fzf 用 with-nth 1,2,4.. 展示序号、星标、预览
+        input.push_str(&format!("{}\t{}\t{}\t{}\n", num, star, c.id, preview));
     }
 
     // 临时脚本目录
@@ -72,53 +73,48 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // 构建 fzf 参数：单进程 reload-sync + track + id-nth
     // 注意：reload 命令需要重新从 DB 读取，所以用 `niri-clip list-raw` 子命令
     let reload_cmd = format!("{} list-raw", exe);
-    let pin_cmd = format!("{} pin {{2}}", exe);
-    let del_cmd = format!("{} delete {{2}}", exe);
+    let pin_cmd = format!("{} pin {{3}}", exe);
+    let del_cmd = format!("{} delete {{3}}", exe);
     let wipe_cmd = format!("{} wipe", exe);
 
     let preview_cmd = if cfg.enable_preview {
-        if cfg.enable_image_preview {
-            // chafa 图片预览：preview 子命令会自行判断 mime
-            format!("{} preview {{2}}", exe)
-        } else {
-            format!("{} preview {{2}}", exe)
-        }
+        // id 在第 3 列 (序号、星标、id、预览)
+        format!("{} preview {{3}}", exe)
     } else {
-        "echo {3..}".to_string()
+        "echo {4..}".to_string()
     };
 
     // A+B: 1-9 快选 + Space jump + / 和 Ctrl-F 搜索
     let mut binds: Vec<String> = Vec::new();
-    // 数字 1-9：未输入时 pos+accept，有输入时 put(数字)
+    // 数字 1-9：未输入时 pos+accept 直接退出，有输入时 put(数字)
     for n in 1..=9 {
         binds.push(format!(
             "{n}:transform:if [ \"$FZF_INPUT_STATE\" = \"hidden\" ]; then echo \"pos({n})+accept\"; else echo \"put({n})\"; fi"
         ));
-        // Alt+数字 始终快选（备用）
         binds.push(format!("alt-{n}:pos({n})+accept"));
     }
     binds.push("space:jump".into());
-    binds.push("ctrl-y:execute-silent(niri-clip copy {2})".into());
+    binds.push("ctrl-y:execute-silent(niri-clip copy {3})".into());
 
     let mut fzf = Command::new("fzf")
         .arg("--no-sort")
         .arg("--delimiter=\t")
-        .arg("--with-nth=1,3..")
+        .arg("--with-nth=1,2,4..")
         .arg("--tabstop=1")
         .arg("--height=100%")
         .arg("--layout=reverse")
         .arg("--border")
         .arg("--info=inline")
         .arg("--prompt=剪贴板> ")
-        .arg("--header=1-9快选(空输入) · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y复制不退出")
+        .arg("--header=1-9序号快选(按数字直接退出) · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出 · Esc退出")
         .arg("--track")
-        .arg("--id-nth=2")
+        .arg("--id-nth=3")
         .arg("--no-input")
         .arg(format!("--preview={}", preview_cmd))
         .arg("--preview-window=down:5:wrap:border-rounded")
         .arg("--bind=/:show-input+clear-query")
         .arg("--bind=ctrl-f:show-input+clear-query")
-        .arg("--bind=esc:hide-input+clear-query")
+        .arg("--bind=esc:transform:if [ \"$FZF_INPUT_STATE\" = \"hidden\" ]; then echo \"abort\"; else echo \"hide-input+clear-query\"; fi")
         .arg(format!(
             "--bind=ctrl-p:execute-silent({})+reload-sync({})",
             pin_cmd, reload_cmd
@@ -150,10 +146,10 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // 可能包含多个? 只取第一行
     let line = selected.lines().next().unwrap_or("");
     let parts: Vec<&str> = line.split('\t').collect();
-    if parts.len() < 2 {
+    if parts.len() < 3 {
         return Ok(());
     }
-    let id: i64 = parts[1].parse().unwrap_or(0);
+    let id: i64 = parts[2].parse().unwrap_or(0);
     if id == 0 {
         return Ok(());
     }
@@ -175,10 +171,11 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
         return Ok(());
     }
     let mut input = String::new();
-    for c in &clips {
+    for (idx, c) in clips.iter().enumerate() {
+        let num = idx + 1;
         let star = if c.pinned { "★ " } else { "" };
         let preview = crate::preview::preview_text(c, cfg.preview_width);
-        input.push_str(&format!("{}{} {}\n", star, c.id, preview));
+        input.push_str(&format!("{}. {}{} {}\n", num, star, c.id, preview));
     }
     // fuzzel dmenu 简单实现：选中后粘贴，不支持原地 reload，按 Enter 后退出
     // v0.2 fuzzel 模式为兜底，v1.0 再做 fuzzel 原地刷新
@@ -219,11 +216,11 @@ pub fn list_raw() -> Result<()> {
     use std::io::{self, Write};
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    for c in clips {
+    for (idx, c) in clips.iter().enumerate() {
+        let num = idx + 1;
         let star = if c.pinned { "★" } else { " " };
         let preview = crate::preview::preview_text(&c, cfg.preview_width);
-        // 忽略 Broken pipe (head -n5 提前关闭)
-        if writeln!(out, "{}\t{}\t{}", star, c.id, preview).is_err() {
+        if writeln!(out, "{}\t{}\t{}\t{}", num, star, c.id, preview).is_err() {
             break;
         }
     }
