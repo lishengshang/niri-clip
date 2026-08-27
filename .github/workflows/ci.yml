@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: fmt + clippy (-D warnings)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --locked (XDG-isolated temp envs)
+        run: cargo test --locked
+      - name: release build (--locked)
+        run: cargo build --release --locked && test -x target/release/niri-clip
+
+  smoke:
+    name: CLI smoke (store/list/pin/delete/wipe)
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Exercise core CRUD without a real Wayland session
+        run: |
+          set -euo pipefail
+          B=target/debug/niri-clip
+          cargo build --locked
+          export XDG_STATE_HOME="$PWD/.smoke/state"
+          export XDG_CONFIG_HOME="$PWD/.smoke/config"
+          export XDG_CACHE_HOME="$PWD/.smoke/cache"
+          mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME"
+
+          "$B" wipe >/dev/null 2>&1 || true
+          for i in 1 2 3; do printf 'ci-entry-%s\n' "$i" | "$B" store >/dev/null 2>&1; done
+
+          n=$("$B" list-raw | wc -l)
+          echo "rows=$n"; [ "$n" -eq 3 ]
+
+          first=$("$B" list-raw | head -n1 | cut -f2)
+          "$B" pin "$first" >/dev/null 2>&1
+          "$B" list-raw | head -n1 | grep -q '★'
+
+          after=$("$B" delete "$first" >/dev/null 2>&1; "$B" list-raw | wc -l)
+          [ "$after" -eq 2 ]
+
+          test -f "$XDG_STATE_HOME/niri-clip/db.sqlite"
+          echo "SMOKE OK"
