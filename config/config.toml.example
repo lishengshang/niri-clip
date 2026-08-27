@@ -1,5 +1,6 @@
-# niri-clip v0.2 配置
+# niri-clip v0.4 配置
 # 复制到 ~/.config/niri-clip/config.toml 后生效
+# 数据库位于 ~/.local/state/niri-clip/db.sqlite（v0.4 起自动从旧 cache 位置搬迁）
 
 max_items = 750
 preview_width = 100

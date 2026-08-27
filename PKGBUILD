@@ -1,19 +1,21 @@
 # Maintainer: lishengshang <3490017805@qq.com>
 pkgname=niri-clip
-pkgver=0.2.0
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="为 niri 打造的全新高性能 Wayland 剪贴板历史 - Rust + SQLite + fzf 不跳顶"
 arch=('x86_64' 'aarch64')
 url="https://github.com/lishengshang/niri-clip"
 license=('MIT')
-depends=('wl-clipboard' 'fzf' 'fuzzel' 'sqlite')
+depends=('wl-clipboard' 'fzf')
 makedepends=('cargo' 'git')
 optdepends=(
-  'kitty: fzf TUI 终端'
-  'nirius: niri focus-or-spawn'
-  'chafa: 图片预览'
+  'fuzzel: 后备选择器（无 fzf 环境自动回退）'
+  'kitty: kitty icat 图片预览'
+  'chafa: 图形终端图片预览'
   'cliphist: 可选, 一次性迁移旧数据'
 )
+# NOTE: 提交 AUR 正式包前需用 updpkgsums / makepkg -g 替换为真实校验值；
+# SKIP 仅适用于 *-git 包。入库的 Cargo.lock 保证 --locked 可复现构建。
 source=("$pkgname-$pkgver.tar.gz::https://github.com/lishengshang/niri-clip/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 

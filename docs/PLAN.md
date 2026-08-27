@@ -23,29 +23,30 @@
 |---|---|---|
 | 语言 | Rust + Tokio | 无 GC，异步 daemon |
 | Wayland | wl-clipboard-rs 0.9 | 原生 ext-data-control 轮询 |
-| 存储 | rusqlite WAL + FTS5 | 单文件，WAL 不锁 |
+| 存储 | rusqlite WAL（FTS5 待 v1.0 搜索） | 单文件，WAL 不锁 |
 | TUI | fzf --track | 不跳顶唯一解 |
 | 预览 | chafa | 图片终端 |
 
-## 3. 数据模型 (v1.0)
+## 3. 数据模型 (v0.4)
 
 ```sql
-clips(id PK, hash UNIQUE, text, blob, mime, ts, pinned, size)
-idx_hash, idx_pinned_ts, clips_fts
+clips(id PK, hash UNIQUE, text, mime, ts, pinned, size, image_path)
+idx_hash, idx_pinned_ts
 ```
 
-`hash` 去重，`pinned DESC, ts DESC` 排序，`TUI_LIMIT 300` + 200ms 缓存。
+hash 去重（事务化原子 upsert），pinned DESC/ ts DESC 排序，
+菜单直查 min(max_items,300)，无缓存层；schema 由 PRAGMA user_version 版本化迁移。
 
 ## 4. 功能 (v1.0 独立)
 
-- `daemon` 原生 500ms 轮询，双写已移除
-- `store` 双写已移除，`wipe` 不清 cliphist
-- `tui` 独立 `list_tui`，`Mod+V` 唯一入口
+- `daemon` 原生 500ms 轮询 + flock 单实例 + 探测单次化，双写已移除
+- `store` 双写已移除，`wipe` 不清 cliphist，多进程并发安全（busy_timeout）
+- `tui` 直查 menu_clips，Mod+V 唯一入口，图片预览按 clip id 关联
 - `migrate` 仍保留，之后可删
 
 ## 5. 性能
 
-`list 300 <11ms`, `sqlite 10k <4ms`, `daemon <1% CPU`
+`list 300 <11ms`, `sqlite 10k <4ms`; 大文本 reload 走 O(width) 廉价截断。
 
 ## 6. 发布
 

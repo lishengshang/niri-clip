@@ -9,60 +9,101 @@
 │ niri (Wayland, ext-data-control / wlr-data-control)     │
 └────────────────┬────────────────────────────────────────┘
                  │ Wayland 协议
-        ┌────────▼────────┐
-        │ daemon (Rust)   │  wl-clipboard-rs 500ms 轮询
-        │ tokio + notify  │──────┐
-        └────────┬────────┘      │ hash(ignore_regex) dedup
-                 │ insert        ▼
-        ┌────────▼────────┐  ┌─────────────┐
-        │ store (SQLite)  │  │ FTS5        │
-        │ WAL  clips      │◄─┤ clips_fts   │
-        │ idx_hash, idx_pinned_ts│         │
-        └────────┬────────┘  └─────────────┘
-                 │ list_tui 300 + 200ms cache (OnceLock)
-        ┌────────▼────────┐  --track --id-nth 2
-        │ tui (fzf)       │  execute-silent + reload-sync
-        │ fuzzel 回退     │  chafa 预览
-        └────────┬────────┘
-                 │ copy (wl-clipboard-rs)
-        ┌────────▼────────┐
-        │ Wayland clipboard│
-        └─────────────────┘
+        ┌────────▼──────────┐ daemon.lock 单实例 flock
+        │ daemon (Rust)     │ wl-clipboard-rs 500ms 轮询
+        │ tokio + notify    │──────┐
+        └────────┬──────────┘      │ hash(ignore_regex) dedup
+                 │ insert / insert_image
+                 ▼
+        ┌───────────────────────────────┐
+        │ store (SQLite WAL)            │ BEGIN IMMEDIATE + busy_timeout=5000
+        │ clips(hash UNIQUE, image_path)│ PRAGMA user_version 版本化迁移
+        │ idx_hash, idx_pinned_ts       │
+        └────────┬──────────────────────┘
+                 │ list(min(max_items, TUI_LIMIT)) 直查（无缓存层）
+        ┌────────▼─────────┐  --track --id-nth 2
+        │ tui (fzf)        │  execute-silent + reload-sync
+        │ fuzzel 回退      │  chafa 预览 ← images/{id}.bin 按 clip id 关联
+        └────────┬─────────┘
+                 │ copy (wl-copy)
+        ┌────────▼──────────┐
+        │ Wayland clipboard │
+        └───────────────────┘
 ```
 
-**独立性：** 单一真相源 `~/.cache/niri-clip/db.sqlite`，不读写 `~/.cache/cliphist/db`，`migrate` 仅一次性导入。
+**独立性：** 单一真相源，不读写 `~/.cache/cliphist/db`，`migrate` 仅一次性导入。
+
+**数据位置：** `~/.local/state/niri-clip/`——`db.sqlite`、`images/`（图片数据文件，
+内容不可再生所以随库同置于 state）、`daemon.lock`。
+v0.3 及之前位于 `~/.cache/niri-clip/`；连接时检测旧库并用 `VACUUM INTO`
+做一致性快照自动搬迁，旧库保留为备份。目录权限 0700 / 库文件 0600。
 
 ## 2. Daemon - 原生 Wayland
 
-- **轮询**：`paste::get_contents(Regular, Unspecified, Text)` 每 500ms，`ClipboardEmpty/NoMimeType` 忽略
-- **去重**：`hash(len+DefaultHasher(text))` 与 `last_hash` 比对，变化才 `store::insert`
-- **图片**：若 `enable_image_preview`，尝 `image/png/jpeg/webp` → `placeholder + blob` 缓存到 `~/.cache/niri-clip/images/{ts}.bin`
-- **回退**：若 `native` 探测失败 (`NoSeats` 外错误)，`spawn wl-paste --watch niri-clip store`
-- **常驻**：`niri: spawn-at-startup "niri-clip daemon"` + `systemd user: WantedBy=niri.service`
+- **单实例**：启动即对 `state_dir/daemon.lock` 加 `flock(LOCK_EX|LOCK_NB)`，
+  双开报错退出；进程崩溃内核自动释放锁，无陈锁残留
+- **探测**：单次 `paste::get_contents(Text)` 判定原生通道——`Ok` 或三类良性错误
+  （`ClipboardEmpty`/`NoMimeType`/`NoSeats`）均视为可用，其余错误回退。
+  （勿复制旧版"调用两次 + 第二次 unwrap_err()"的写法：剪贴板恰在两次调用之间
+  变为可用会 panic，systemd Restart 下表现为周期崩启）
+- **轮询**：每 500ms `get_contents` 文本；`ClipboardEmpty/NoMimeType/NoSeats` 忽略。
+  已知取舍：<500ms 连续复制的丢帧窗口与空闲往返开销；
+  v0.5 将改 data-control `SelectionChanged` 事件驱动，轮询降级为兜底配置
+- **去重短路**：文本用 `store::hash_text`（与入库同源），图片用
+  `store::image_content_key`（FNV1a64+mime+len，跨进程稳定）；
+  比对 `last_hash` 相同则跳过入库
+- **文本入库**：`store::insert`，失败显式记录 stderr 日志，不静默吞错
+- **图片入库**：`store::insert_image(mime, bytes)`——行先入 `clips`（mime 前缀条目），
+  二进制写 `images/{id}.bin` 后回填 `image_path`；等长不同内容的图片因 FNV
+  内容指纹不再误判重；重复拷贝仅刷新 ts，文件与关联不变
+- **回退**：native 探测失败时 `spawn wl-paste --watch niri-clip store`
+- **常驻**：`niri: spawn-at-startup "niri-clip daemon"` 或 systemd user unit
+  （二选一，单实例锁兜底）
 
 ## 3. Store - SQLite WAL
 
 ```sql
-PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;
-CREATE TABLE clips(id PK, hash UNIQUE, text, blob, mime, ts, pinned, size);
+PRAGMA journal_mode=WAL;
+PRAGMA synchronous=NORMAL;
+PRAGMA busy_timeout=5000;            -- 多进程并发（daemon vs TUI/reload 子进程）
+CREATE TABLE clips(
+    id PK, hash UNIQUE, text, mime, ts, pinned, size,
+    image_path TEXT                   -- v2 新增：图片数据文件关联
+);
 CREATE INDEX idx_hash ON clips(hash);
 CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
-CREATE VIRTUAL TABLE clips_fts USING fts5(text, content='clips');
+-- FTS5 占位表已删除：从未参与查询且需 trigger 才能正确同步；
+-- 待 v1.0 应用内搜索功能一并以正确姿势重建
 ```
 
-- **插入**：`ignore_regex` 过滤 → `hash` 查重 → `INSERT + FTS` → `invalidate_cache()` → `count>max_items` 删最旧 `pinned=0`
-- **TUI**：`TUI_LIMIT=300`，`list_tui()` 用 `OnceLock<Mutex<CachedList>>` 200ms 缓存，`bench_10k` 10k <50ms
-- **固定**：`toggle_pin` 翻转 `pinned` + `invalidate_cache`
+- **schema 迁移**：`PRAGMA user_version` 驱动。0→1 建基表并清理 FTS 占位；
+  1→2 补 `image_path` 列。此后 schema 变更必须新增版本号与迁移步骤
+- **插入原子性**：SELECT 去重检查 + INSERT 包在 `BEGIN IMMEDIATE` 事务里。
+  否则多进程并发（典型：fzf 选中旧条目 → wl-copy 写回 → daemon 同时捕获）
+  双双通过检查后一方撞 UNIQUE 报错被静默吞掉
+- **上限裁剪**：超出 `max_items` 时删除最旧的非 pinned 条目（抽成
+  `enforce_max_items`，文本/图片共用）
+- **菜单直查**：`list(min(max_items, TUI_LIMIT))`，TUI_LIMIT=300。
+  进程内缓存层已移除——fzf 每次 reload-sync spawn 全新 `list-raw` 进程，
+  OnceLock 缓存在该路径从未生效；实测 list 300 <11ms 无需缓存
 
 ## 4. TUI - 不跳顶
 
-- **fzf**：`list_tui() -> "★\tid\tpreview"` → `fzf --track --id-nth 2 --with-nth 1,3.. --preview 'niri-clip preview {2}' --bind 'ctrl-x:execute-silent(niri-clip delete {2})+reload-sync(niri-clip list-raw)'`
-- **fuzzel**：`tui_backend=auto` 无 `kitty/fzf` 时 `fuzzel --dmenu`
-- **预览**：`preview_id` 判 `mime image/*` → `chafa --format symbols --size 60x20` 或 `kitty icat`，文本则截断 100 行
+- **后端选择**：`tui_backend=auto` 时**只检测 fzf 是否存在即启用 fzf**
+  （fzf 运行于任意终端；kitty/chafa 仅影响图片预览渲染，不参与门控），
+  缺失回退 fuzzel。菜单取数统一 `menu_clips() -> "★\tid\tpreview"`
+- **fzf**：`fzf --track --id-nth 2 --with-nth 1,3.. --preview 'niri-clip preview {2}' --bind 'ctrl-x:execute-silent(niri-clip delete {2})+reload-sync(niri-clip list-raw)'`
+- **fuzzel**：`tui_backend=auto` 无 `fzf` 时 `fuzzel --dmenu`
+- **预览**：`preview_id` 判 `mime image/*` → 读取该条目自己的
+  `clips.image_path` → `chafa --format symbols --size 60x20`（或 kitty 提示路径）；
+  文本则廉价截断（O(width)）+ 单行化，不整串扫描
 
 ## 5. 配置
 
-`~/.config/niri-clip/config.toml` `serde(default)` 热重载，每次 `load()` 读，缺字段回退 `Default`。
+`~/.config/niri-clip/config.toml`，`serde(default)` 容错缺字段。
+读取时机：每个子命令入口 / 入库时各读一次（daemon 轮询循环内亦每 tick 读取，
+成本为一次小文件 IO）；基于 mtime 监听的真正热重载列入选型 backlog，
+当前语义是"改动即刻生效于下一次调用"。
 
 ## 6. 打包
 
