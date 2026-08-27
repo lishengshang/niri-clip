@@ -8,7 +8,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "niri-clip", version, about = "高性能 niri 剪贴板历史 - v0.2 Rust")]
+#[command(name = "niri-clip", version, about = "高性能 niri 剪贴板历史")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -50,8 +50,15 @@ async fn main() -> Result<()> {
         Some(Commands::Preview { id }) => tui::preview_id(id)?,
         Some(Commands::Pin { id }) => {
             let pinned = store::toggle_pin(id)?;
-            let msg = if pinned { "已固定" } else { "已取消固定" };
-            let _ = notify_rust::Notification::new().summary("niri-clip").body(&format!("{} {}", msg, id)).show();
+            let msg = if pinned {
+                "已固定"
+            } else {
+                "已取消固定"
+            };
+            let _ = notify_rust::Notification::new()
+                .summary("niri-clip")
+                .body(&format!("{} {}", msg, id))
+                .show();
             println!("{} {}", msg, id);
         }
         Some(Commands::Delete { id }) => {
@@ -66,7 +73,11 @@ async fn main() -> Result<()> {
                     .ok()
                     .and_then(|mut c| {
                         use std::io::Write;
-                        let _ = c.stdin.as_mut().unwrap().write_all("取消\n确认\n".as_bytes());
+                        let _ = c
+                            .stdin
+                            .as_mut()
+                            .unwrap()
+                            .write_all("取消\n确认\n".as_bytes());
                         c.wait_with_output().ok()
                     })
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -89,12 +100,21 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Status) => {
             let cfg = config::Config::load();
-            println!("niri-clip v{} - {:?}", env!("CARGO_PKG_VERSION"), config::Config::db_path());
+            println!(
+                "niri-clip v{} - {:?}",
+                env!("CARGO_PKG_VERSION"),
+                config::Config::db_path()
+            );
             println!("config: {:?}", cfg);
             let clips = store::list(5)?;
             println!("recent {} clips:", clips.len());
             for c in clips {
-                println!("  {} {} {}", if c.pinned { "★" } else { " " }, c.id, preview::preview_text(&c, 60));
+                println!(
+                    "  {} {} {}",
+                    if c.pinned { "★" } else { " " },
+                    c.id,
+                    preview::preview_text(&c, 60)
+                );
             }
         }
         None => {

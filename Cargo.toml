@@ -2,7 +2,7 @@
 name = "niri-clip"
 version = "0.4.0"
 edition = "2021"
-description = "为 niri + Wayland 设计的高性能开箱即用剪贴板历史 - 单进程 fzf + track + reload"
+description = "为 niri + Wayland 设计的高性能开箱即用剪贴板历史管理器"
 authors = ["lishengshang"]
 license = "MIT"
 repository = "https://github.com/lishengshang/niri-clip"
@@ -23,6 +23,7 @@ wl-clipboard-rs = "0.9"
 chrono = "0.4"
 regex = "1"
 which = "6"
+libc = "0.2"
 
 [profile.release]
 lto = true

@@ -86,9 +86,10 @@ end=$(date +%s%N)
 elapsed_ms=$(( (end-start)/1000000 ))
 echo "list-raw (300 limit) took ${elapsed_ms}ms"
 # 全量 10k 列表测试
-echo "full list via sqlite:"
-sqlite3 ~/.cache/niri-clip/db.sqlite "SELECT count(*) FROM clips;" 2>&1 | head
-time sqlite3 ~/.cache/niri-clip/db.sqlite "SELECT id, text FROM clips ORDER BY pinned DESC, ts DESC LIMIT 10000;" >/dev/null 2>&1 || echo "sqlite bench done"
+DB_PATH="${XDG_STATE_HOME:-$HOME/.local/state}/niri-clip/db.sqlite"
+echo "full list via sqlite ($DB_PATH):"
+sqlite3 "$DB_PATH" "SELECT count(*) FROM clips;" 2>&1 | head
+time sqlite3 "$DB_PATH" "SELECT id, text FROM clips ORDER BY pinned DESC, ts DESC LIMIT 10000;" >/dev/null 2>&1 || echo "sqlite bench done"
 
 if [[ "$elapsed_ms" -gt 50 ]]; then
   echo "WARN: list-raw >50ms ($elapsed_ms), consider cache"

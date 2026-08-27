@@ -9,23 +9,28 @@ fn has_bin(name: &str) -> bool {
     which::which(name).is_ok()
 }
 
-/// 选择后端：auto 时优先 fzf+kitty，缺失则 fuzzel
+/// 选择后端：auto 时优先 fzf（任意终端均可运行），缺失则 fuzzel。
+/// v0.4 修复：旧实现要求 `fzf && kitty` 同时存在才启用 fzf，导致
+/// foot/alacritty 等用户被误降到功能残缺的 fuzzel。kitty/chafa 仅
+/// 影响图片预览渲染能力，不应决定整个后端选择。
 fn backend(cfg: &Config) -> &'static str {
     match cfg.tui_backend.as_str() {
         "fuzzel" => "fuzzel",
         "fzf" => "fzf",
         _ => {
-            if has_bin("fzf") && has_bin("kitty") {
-                "fzf"
-            } else if has_bin("fuzzel") {
-                "fuzzel"
-            } else if has_bin("fzf") {
+            if has_bin("fzf") {
                 "fzf"
             } else {
                 "fuzzel"
             }
         }
     }
+}
+
+/// v0.4：菜单取数统一入口——直查 min(max_items, TUI_LIMIT) 条，
+/// 不再区分缓存/非缓存分支（缓存层已移除）
+fn menu_clips(cfg: &Config) -> Result<Vec<store::Clip>> {
+    store::list(cfg.max_items.min(store::TUI_LIMIT))
 }
 
 pub fn run() -> Result<()> {
@@ -39,12 +44,7 @@ pub fn run() -> Result<()> {
 }
 
 fn run_fzf(cfg: &Config) -> Result<()> {
-    // v0.3: 懒加载 300 条 + 缓存，10k 压测 <50ms
-    let clips = if cfg.max_items > store::TUI_LIMIT {
-        store::list_tui()?
-    } else {
-        store::list(cfg.max_items)?
-    };
+    let clips = menu_clips(cfg)?;
     if clips.is_empty() {
         let _ = notify_rust::Notification::new()
             .summary("niri-clip")
@@ -97,15 +97,24 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         .arg("--border")
         .arg("--info=inline")
         .arg("--prompt=剪贴板> ")
-        .arg("--header=Enter粘贴 · ^P固定 · ^X删除 · Alt-X清空 · ^R刷新")
+        .arg("--header=Enter复制 · ^P固定 · ^X删除 · Alt-X清空 · ^R刷新")
         .arg("--track")
         .arg("--id-nth=2")
         .arg(format!("--preview={}", preview_cmd))
         .arg("--preview-window=down:5:wrap:border-rounded")
-        .arg(format!("--bind=ctrl-p:execute-silent({})+reload-sync({})", pin_cmd, reload_cmd))
-        .arg(format!("--bind=ctrl-x:execute-silent({})+reload-sync({})", del_cmd, reload_cmd))
+        .arg(format!(
+            "--bind=ctrl-p:execute-silent({})+reload-sync({})",
+            pin_cmd, reload_cmd
+        ))
+        .arg(format!(
+            "--bind=ctrl-x:execute-silent({})+reload-sync({})",
+            del_cmd, reload_cmd
+        ))
         .arg(format!("--bind=ctrl-r:reload-sync({})", reload_cmd))
-        .arg(format!("--bind=alt-x:execute({})+reload-sync({})", wipe_cmd, reload_cmd))
+        .arg(format!(
+            "--bind=alt-x:execute({})+reload-sync({})",
+            wipe_cmd, reload_cmd
+        ))
         .arg("--bind=ctrl-f:accept")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -134,7 +143,10 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     }
     let clip = store::get(id)?;
     // wl-copy
-    let mut wl = Command::new("wl-copy").stdin(Stdio::piped()).spawn().context("wl-copy")?;
+    let mut wl = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("wl-copy")?;
     wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
     wl.wait()?;
     println!("pasted {}", id);
@@ -142,11 +154,7 @@ fn run_fzf(cfg: &Config) -> Result<()> {
 }
 
 fn run_fuzzel(cfg: &Config) -> Result<()> {
-    let clips = if cfg.max_items > store::TUI_LIMIT {
-        store::list_tui()?
-    } else {
-        store::list(cfg.max_items)?
-    };
+    let clips = menu_clips(cfg)?;
     if clips.is_empty() {
         return Ok(());
     }
@@ -172,7 +180,11 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
         return Ok(());
     }
     // 解析 id：格式 "★ 123 preview" 或 "123 preview"
-    let id_str = sel.trim_start_matches('★').trim().split_whitespace().next().unwrap_or("0");
+    let id_str = sel
+        .trim_start_matches('★')
+        .split_whitespace()
+        .next()
+        .unwrap_or("0");
     let id: i64 = id_str.parse().unwrap_or(0);
     if id == 0 {
         return Ok(());
@@ -184,14 +196,10 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// 子命令辅助：list-raw 供 fzf reload 调用 (v0.3 懒加载 300 + 缓存)
+/// 子命令辅助：list-raw 供 fzf reload 调用
 pub fn list_raw() -> Result<()> {
     let cfg = Config::load();
-    let clips = if cfg.max_items > store::TUI_LIMIT {
-        store::list_tui()?
-    } else {
-        store::list(cfg.max_items)?
-    };
+    let clips = menu_clips(&cfg)?;
     use std::io::{self, Write};
     let stdout = io::stdout();
     let mut out = stdout.lock();
