@@ -11,40 +11,43 @@
 
 **niri-clip Plan B 解决：** 单 `fzf` 进程 `reload-sync + --track --id-nth`，删除后光标停在 **下一个**，删最后一行停在 **上一个**，搜索词/滚动不丢失。
 
-## 2. 快速开始 (v0.1 - Bash 实现，零依赖迁移)
+## 2. 快速开始 (v0.2 - Rust)
 
 ```bash
-# 已为 mio 部署到 ~/.config/niri/scripts/
-# 直接 Mod+V 体验新版
-# 手动测试：
-bash ~/.config/niri/scripts/clipboard-history-tui.sh
+# 安装
+cargo install --path ~/Projects/niri-clip --force
+# 配置
+cat ~/.config/niri-clip/config.toml
+# 状态
+niri-clip status
+# 迁移旧数据
+niri-clip migrate
+# TUI (Mod+V)
+niri-clip tui  # fzf --track 不跳顶，缺 kitty 自动 fuzzel
 
-# 回滚旧版：
+# 兼容：旧 bash Plan B 仍在 ~/.config/niri/scripts/clipboard-history-tui.sh
+# 回滚：
 git -C ~/dotfiles diff home/.config/niri/scripts/clipboard-history-tui.sh
 ```
 
-依赖：`cliphist`, `fzf>=0.44`, `fuzzel`, `wl-clipboard`, `kitty`, `nirius`
+依赖：`fzf>=0.44` 或 `fuzzel`, `wl-clipboard`, `kitty` (可选), `nirius`
 
 ## 3. 项目结构
 
 ```
-niri-clip/
-├── scripts/                  # v0.1 Bash 实现 (已部署到 niri)
-│   └── clipboard-history-tui.sh  # Plan B 单进程 fzf
-├── src/                      # v1.0 Rust 高性能实现 (规划中)
-│   ├── main.rs               # CLI: daemon / tui / wipe / status
-│   ├── daemon/               # wl-clipboard-rs watcher
-│   ├── store/                # SQLite WAL + FTS5
-│   └── tui/                  # ratatui / fzf --listen
-├── config/
-│   └── config.toml           # max_items, ignore_regex
-├── assets/
-│   ├── niri-clip.kdl         # binds.kdl include
-│   └── niri-clip.service     # systemd user service
-└── docs/
-    ├── PLAN.md
-    ├── ARCHITECTURE.md
-    └── ROADMAP.md
+niri-clip/ (v0.2 Rust)
+├── src/
+│   ├── main.rs       # daemon/tui/store/list-raw/preview/pin/delete/wipe/migrate/status
+│   ├── config.rs     # ~/.config/niri-clip/config.toml
+│   ├── store.rs      # SQLite WAL + FTS5 + hash去重
+│   ├── daemon.rs     # wl-paste --watch niri-clip store
+│   ├── tui.rs        # fzf --track --id-nth + fuzzel 回退
+│   └── preview.rs    # 截断 + 图片预留
+├── scripts/          # legacy Bash Plan B (已部署)
+│   └── clipboard-history-tui.sh
+├── config/config.toml.example
+├── assets/{niri-clip.kdl,niri-clip.service}
+└── docs/{PLAN,ARCHITECTURE,ROADMAP,CHANGELOG}.md
 ```
 
 ## 4. Plan B 原理
@@ -61,10 +64,10 @@ niri-clip/
 
 ## 5. 路线图
 
-- **v0.1 (已完成)** – Bash Plan B，修复跳顶，支持 `★` 置顶、预览
-- **v0.2** – 配置化、图片预览、性能优化 (limit + 懒加载)
-- **v1.0** – Rust 重写：Daemon 常驻 <40MB，SQLite FTS5 10k条 <50ms，支持安全过滤
-- **v1.5** – AUR, waybar 模块, SSH OSC52
+- **v0.1 ✅** – Bash Plan B，修复跳顶 (`Mod+V` 不跳了)
+- **v0.2 ✅** – Rust：SQLite + fzf不跳顶 + fuzzel回退 + config + daemon
+- **v0.3** – 原生 `wl-clipboard-rs`、性能压测
+- **v1.0** – AUR、waybar、man、CI
 
 ## 6. 开发
 
