@@ -95,6 +95,9 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     let mut fzf = Command::new("fzf")
         .arg("--no-sort")
         .arg("--delimiter=\t")
+        // 匹配只作用于 preview 列：隐藏的序号/id 列不参与搜索，
+        // 否则查询 "1" 会命中所有序号/id 含 1 的行，数字搜索被污染
+        .arg("--nth=4..")
         .arg("--with-nth=1,2,4..")
         .arg("--tabstop=1")
         .arg("--height=100%")
