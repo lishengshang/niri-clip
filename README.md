@@ -109,7 +109,7 @@ capture_timeout_secs = 5   # v0.4.1 每次捕获子进程超时
 | Wayland | wl-paste --watch 事件源 + wl-clipboard-rs | 变化即捕获；轮询仅兜底 |
 | 存储 | rusqlite + SQLite WAL | 单文件 `~/.local/state/niri-clip/db.sqlite`，`PRAGMA user_version` 版本化迁移（FTS5 全文搜索列入 v1.0 应用内搜索一并实现） |
 | 去重 | 文本 DefaultHasher+len / 图片 FNV1a64+mime+len | 图片指纹跨进程稳定；文本 hash 计划随 v1.0 统一到稳定算法 |
-| TUI | fzf 0.44+ / fuzzel | --track --id-nth 不跳顶 |
+| TUI | fzf 0.71+ / fuzzel | --track --id-nth 不跳顶；低于 0.71 自动回退 fuzzel |
 | 预览 | chafa, kitty icat | 图片终端渲染 |
 | 打包 | PKGBUILD, systemd user | AUR |
 

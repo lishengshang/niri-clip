@@ -9,6 +9,28 @@ fn has_bin(name: &str) -> bool {
     which::which(name).is_ok()
 }
 
+/// fzf 功能地板：`--no-input`/`show-input` 需 0.59，`--id-nth` 需 0.71。
+/// 低于地板时 fzf 参数解析直接失败，必须主动回退 fuzzel。
+const FZF_MIN: (u32, u32) = (0, 71);
+
+/// 解析 `fzf --version` 输出（如 "0.74.4 (c0252b6)"）为 (major, minor)
+fn parse_version(s: &str) -> Option<(u32, u32)> {
+    let head = s.split_whitespace().next()?;
+    let mut it = head.split('.');
+    let major: u32 = it.next()?.parse().ok()?;
+    let minor: u32 = it.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+fn fzf_version_ok() -> bool {
+    let Ok(out) = Command::new("fzf").arg("--version").output() else {
+        return false;
+    };
+    parse_version(&String::from_utf8_lossy(&out.stdout))
+        .map(|v| v >= FZF_MIN)
+        .unwrap_or(false)
+}
+
 /// 选择后端：auto 时优先 fzf（任意终端均可运行），缺失则 fuzzel。
 /// v0.4 修复：旧实现要求 `fzf && kitty` 同时存在才启用 fzf，导致
 /// foot/alacritty 等用户被误降到功能残缺的 fuzzel。kitty/chafa 仅
@@ -57,7 +79,20 @@ fn terminal_wrap() -> Option<(&'static str, &'static [&'static str])> {
 
 pub fn run() -> Result<()> {
     let cfg = Config::load();
-    let be = backend(&cfg);
+    let mut be = backend(&cfg);
+    // fzf 版本地板：低于 0.71（--id-nth）时参数无法解析，主动回退 fuzzel
+    if be == "fzf" && !fzf_version_ok() {
+        if has_bin("fuzzel") {
+            eprintln!("[niri-clip tui] fzf 缺失或 <0.71（--id-nth 地板），回退 fuzzel");
+            be = "fuzzel";
+        } else {
+            let _ = notify_rust::Notification::new()
+                .summary("niri-clip")
+                .body("niri-clip 需要 fzf >= 0.71（或安装 fuzzel）")
+                .show();
+            anyhow::bail!("fzf missing or too old (<0.71) and fuzzel unavailable");
+        }
+    }
     // 无控制终端（如 niri spawn 裸拉起）时 fzf 无法运行：
     // 包一层终端模拟器重跑自己；没有终端则回退 fuzzel（无需 TTY）
     if be == "fzf" && !has_controlling_tty() {
@@ -296,4 +331,30 @@ pub fn preview_id(id: i64) -> Result<()> {
         println!("… ({} bytes)", c.text.len());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_version_handles_fzf_output() {
+        assert_eq!(parse_version("0.74.4 (c0252b6)"), Some((0, 74)));
+        assert_eq!(parse_version("0.71.0"), Some((0, 71)));
+        assert_eq!(parse_version("0.59.0 (deb5468)"), Some((0, 59)));
+    }
+
+    #[test]
+    fn parse_version_rejects_garbage() {
+        assert_eq!(parse_version("garbage"), None);
+        assert_eq!(parse_version(""), None);
+    }
+
+    #[test]
+    fn version_gate_matches_feature_floor() {
+        // --id-nth 地板 0.71：0.70 拦截，0.71/0.74 放行
+        assert!((0, 70) < FZF_MIN);
+        assert!((0, 71) >= FZF_MIN);
+        assert!((0, 74) >= FZF_MIN);
+    }
 }
