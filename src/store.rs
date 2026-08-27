@@ -209,13 +209,7 @@ pub fn wipe() -> Result<()> {
     conn.execute("DELETE FROM clips", [])?;
     conn.execute("DELETE FROM clips_fts", [])?;
     invalidate_cache();
-    // 兼容清空 cliphist
-    let _ = std::process::Command::new("cliphist").arg("wipe").status();
-    // 清理旧 pinned 文件
-    let pin = dirs::state_dir()
-        .unwrap_or_else(|| PathBuf::from("/home/mio/.local/state"))
-        .join("cliphist/pinned.ids");
-    let _ = std::fs::write(pin, "");
+    // v1.0 独立：不再操作 cliphist，旧数据请手动 cliphist wipe
     Ok(())
 }
 

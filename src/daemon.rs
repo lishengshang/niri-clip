@@ -26,27 +26,13 @@ pub fn store_from_stdin() -> Result<()> {
     if buf.trim().is_empty() {
         return Ok(());
     }
-    let buf_clone = buf.clone();
     let inserted = store::insert(buf, None)?;
     if inserted {
         eprintln!("[niri-clip store] inserted");
     } else {
         eprintln!("[niri-clip store] deduplicated/ignored");
     }
-    if inserted && which::which("cliphist").is_ok() {
-        let mut child = std::process::Command::new("cliphist")
-            .arg("store")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok();
-        if let Some(ref mut c) = child {
-            use std::io::Write;
-            let _ = c.stdin.as_mut().unwrap().write_all(buf_clone.as_bytes());
-            let _ = c.wait();
-        }
-    }
+    // v1.0 独立软件：不再双写 cliphist，迁移请用 niri-clip migrate 一次性导入
     Ok(())
 }
 
@@ -96,21 +82,6 @@ async fn run_native() -> Result<()> {
                 if last_hash.as_ref() != Some(&hash) {
                     last_hash = Some(hash);
                     let _ = store::insert(trimmed.to_string(), None);
-                    // 双写
-                    if which::which("cliphist").is_ok() {
-                        let mut child = std::process::Command::new("cliphist")
-                            .arg("store")
-                            .stdin(std::process::Stdio::piped())
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .spawn()
-                            .ok();
-                        if let Some(ref mut c) = child {
-                            use std::io::Write;
-                            let _ = c.stdin.as_mut().unwrap().write_all(trimmed.as_bytes());
-                            let _ = c.wait();
-                        }
-                    }
                 }
             }
         } else {

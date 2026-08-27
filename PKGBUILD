@@ -2,7 +2,7 @@
 pkgname=niri-clip
 pkgver=0.2.0
 pkgrel=1
-pkgdesc="为 niri + Wayland 设计的高性能剪贴板历史 - 单进程 fzf 不跳顶"
+pkgdesc="为 niri 打造的全新高性能 Wayland 剪贴板历史 - Rust + SQLite + fzf 不跳顶"
 arch=('x86_64' 'aarch64')
 url="https://github.com/lishengshang/niri-clip"
 license=('MIT')
@@ -12,7 +12,7 @@ optdepends=(
   'kitty: fzf TUI 终端'
   'nirius: niri focus-or-spawn'
   'chafa: 图片预览'
-  'cliphist: 旧数据迁移'
+  'cliphist: 可选, 一次性迁移旧数据'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/lishengshang/niri-clip/archive/v$pkgver.tar.gz")
 sha256sums=('SKIP')
