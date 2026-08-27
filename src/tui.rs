@@ -179,6 +179,9 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         // 否则查询 "1" 会命中所有序号/id 含 1 的行，数字搜索被污染
         .arg("--nth=4..")
         .arg("--with-nth=1,2,4..")
+        // 快选/跳转/不退出复制：binds 必须显式挂载，
+        // 否则 Alt+1..9 等于没有绑定，快选静默失效
+        .arg(format!("--bind={}", binds.join(",")))
         .arg("--tabstop=1")
         .arg("--height=100%")
         .arg("--layout=reverse")
