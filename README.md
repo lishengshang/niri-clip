@@ -3,7 +3,7 @@
 > 为 `niri` 合成器打造的 **全新、高性能、开箱即用** Wayland 剪贴板历史管理器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/Wayland-niri-4a90e2)](https://github.com/YaLTeR/niri)
 [![AUR](https://img.shields.io/badge/AUR-niri--clip-blue)](https://aur.archlinux.org/packages/niri-clip)
@@ -15,8 +15,9 @@
 ### ✨ 特性
 
 - **不跳顶**：`fzf --track --id-nth` 单进程 `reload-sync`，删除/固定后光标停在 **下一个**，删末尾停在 **上一个**
-- **高性能**：`Rust + SQLite WAL + FTS5`，`TUI 300` 懒加载 + `200ms` 缓存，`10k` 条 `list <11ms` / `sqlite <4ms`，常驻 `<40MB`
-- **原生 Wayland**：`wl-clipboard-rs` 轮询 `500ms`，不 `fork wl-paste`，`ext-data-control` / `wlr-data-control` 自动适配 `niri`
+- **高性能**：`Rust + SQLite WAL`（`busy_timeout=5000` + 事务化去重，多进程并发安全），菜单直查 `300` 条，`10k` 条 `list <11ms` / `sqlite <4ms`
+- **原生 Wayland**：`wl-clipboard-rs` 轮询 `500ms` + `wl-paste --watch` 自动回退；data-control 事件驱动捕获列入 v0.5
+- **数据持久安全**：历史库位于 `~/.local/state/niri-clip/`（XDG state 规范，不会被系统清理工具误删），旧 `~/.cache` 库自动快照搬迁；目录 0700 / 库文件 0600 权限收紧
 - **图片预览**：`chafa` / `kitty icat`，`enable_image_preview=true` 时 `image/png/jpeg/webp` 终端渲染
 - **安全**：`ignore_regex` 默认过滤 `password|secret|token|otp`，`min_store_length` 可配
 - **开箱即用**：`paru -S niri-clip` → `Mod+V` 直接可用，`fuzzel` 自动回退无 `kitty` 环境
@@ -105,8 +106,8 @@ enable_preview = true
 |---|---|---|
 | 语言 | Rust 1.75+, Tokio | 异步 daemon, 无 GC |
 | Wayland | wl-clipboard-rs 0.9 | ext-data-control 轮询 |
-| 存储 | rusqlite + SQLite WAL + FTS5 | 单文件 `~/.cache/niri-clip/db.sqlite` |
-| 去重 | blake3 / DefaultHasher | hash 去重 O(1) |
+| 存储 | rusqlite + SQLite WAL | 单文件 `~/.local/state/niri-clip/db.sqlite`，`PRAGMA user_version` 版本化迁移（FTS5 全文搜索列入 v1.0 应用内搜索一并实现） |
+| 去重 | 文本 DefaultHasher+len / 图片 FNV1a64+mime+len | 图片指纹跨进程稳定；文本 hash 计划随 v1.0 统一到稳定算法 |
 | TUI | fzf 0.44+ / fuzzel | --track --id-nth 不跳顶 |
 | 预览 | chafa, kitty icat | 图片终端渲染 |
 | 打包 | PKGBUILD, systemd user | AUR |
@@ -136,8 +137,8 @@ niri-clip status
 
 ```bash
 ./tests/manual.sh              # 20 条 pos 跟随 + 压测
-cargo test
-cargo bench
+cargo test                     # 单元测试（XDG 隔离环境）
+cargo clippy --all-targets     # lint 门禁（零警告基线）
 ```
 
 ---

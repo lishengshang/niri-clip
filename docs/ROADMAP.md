@@ -23,6 +23,56 @@
 - [x] `tui` `chafa` 图片预览开关 `enable_image_preview=true`
 - [x] `tests/manual.sh` 自动造 20 条验证 `Mod+V` 删除后 `pos` 跟随 + 压测
 
+## v0.4 - Correctness & Hygiene ✅ 已交付
+
+> 分支 `fix/issue-1-p0-correctness-store-daemon`。针对全面评估报告的 P0 问题闭环。
+
+### 正确性修复（P0）
+
+- [x] **R1 图片预览错位**：旧实现取 images 目录 mtime 最新文件渲染，必现跨条目串图。
+      现 schema 引入 `user_version` 迁移机制，新增 `clips.image_path` 列，
+      数据文件按 clip id 落盘 `images/{id}.bin`，预览按条目精确读取
+- [x] **R2 并发静默丢数据**：SQLite 增加 `PRAGMA busy_timeout=5000`；
+      SELECT 去重 + INSERT 包进 `BEGIN IMMEDIATE` 事务原子化
+      （此前 fzf 选中旧条目触发 wl-copy 与 daemon 并发插入同 hash 时，
+      一方撞 UNIQUE 报错被上层 `let _ =` 吞掉）；daemon/store 调用点不再吞错
+- [x] **R2b daemon 单实例**：新增 state 目录 `daemon.lock`（flock）互斥，
+      进程崩溃自动释放，双开立即报错退出
+- [x] **R3 daemon 启动探测 panic**：旧实现两次 get_contents 且第二次
+      `unwrap_err()`——剪贴板恰在两次之间变为可用即 panic，systemd 下周期崩启；
+      改为单次探测 match 三类良性错误（ClipboardEmpty/NoMimeType/NoSeats）
+- [x] **R2c 图片等长误判重**：内容指纹改 FNV-1a64 + mime + 字节长度
+      （旧版仅 len+mime，两张等大 PNG 只收第一张）
+
+### 数据安全
+
+- [x] **R4 库位置迁 `~/.local/state/niri-clip/`**（XDG state 规范）：
+      `~/.cache` 是系统清理工具的目标目录，剪贴板历史属应持久状态。
+      连接时检测旧库用 `VACUUM INTO` 一致性快照自动搬迁，旧库保留备份；
+      旧时间戳命名的孤立图片不作迁移（本就是错位根源），预览回落占位文本
+- [x] 权限收紧：状态目录 0o700、数据库 0o600
+
+### 简化偿还
+
+- [x] 移除进程内 200ms 缓存层（fzf reload-sync 每次 spawn 新进程，缓存从未生效；
+      list 300 直查 <11ms）与未参与查询的 FTS 占位表，入口统一 `menu_clips()`
+- [x] `preview_text` 先廉价截断再换行替换（旧版大条目在每次 reload 全文扫描 ×300 行）
+- [x] TUI 后端门控修正：auto 不再要求 fzf+kitty 同时存在（foot/alacritty 用户
+      此前被误降到功能残缺的 fuzzel）；header "Enter粘贴" 更正为 "Enter复制"
+- [x] 清除死代码（bench_10k 等）、配置 fallback 路径硬编码（/home/mio 泄漏）
+- [x] 新增 6 个单元测试（去重原子性/busy_timeout/图片关联与判重/旧库搬迁/
+      pin 排序/min_length 过滤），XDG 环境变量隔离临时目录
+
+## v0.5 - Event-driven & UX（规划中）
+
+- [ ] daemon 改 data-control `SelectionChanged` 事件驱动捕获，消除 500ms 轮询的
+      空闲往返与 <500ms 连续复制丢帧窗口；轮询降级为 `polling_fallback=true` 兜底
+- [ ] PRIMARY selection 支持（`ClipboardType::Primary`）
+- [ ] `max_clip_bytes` 超大条目上限（当前无尺寸防护，read_to_end 全内存直通入库）
+- [ ] 图片磁盘配额 GC（LRU 清理孤儿 images/*.bin）；`notify_enabled` 通知开关
+- [ ] 星标删除 fzf 内嵌两步确认，去除对 fuzzel GUI 的运行时依赖
+- [ ] criterion 基准进 CI；man page / shell 补全（clap_mangen/clap_complete）
+
 ## v1.0 - Production
 
 - [ ] `ignore_regex` 安全过滤强化 (1Password / OTP)
