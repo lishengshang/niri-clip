@@ -126,6 +126,6 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 
 ## 8. 下一步 (本周)
 
-1.  验证 v0.1 在 mio 机器：`Mod+V -> 删 5次 -> 光标是否跟随`
+1.  验证 v0.1 在 lishengshang 机器：`Mod+V -> 删 5次 -> 光标是否跟随`
 2.  收集反馈，调 `preview` 高度/`header` 文案
 3.  开 `feat/rust-daemon` 分支，搭 `tokio + rusqlite` 骨架

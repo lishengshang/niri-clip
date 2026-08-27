@@ -1,0 +1,34 @@
+# Maintainer: lishengshang <3490017805@qq.com>
+pkgname=niri-clip-git
+pkgver=0.2.0.r44.ba0bc
+pkgrel=1
+pkgdesc="为 niri + Wayland 设计的高性能剪贴板历史 - git 版"
+arch=('x86_64' 'aarch64')
+url="https://github.com/lishengshang/niri-clip"
+license=('MIT')
+depends=('wl-clipboard' 'fzf' 'fuzzel' 'sqlite')
+makedepends=('cargo' 'git')
+optdepends=('kitty: fzf TUI' 'nirius: niri focus-or-spawn' 'chafa: 图片预览' 'cliphist: 迁移')
+provides=('niri-clip')
+conflicts=('niri-clip' 'niri-clip-bin')
+source=("git+https://github.com/lishengshang/niri-clip.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "niri-clip"
+  printf "%s.r%s.%s" "$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "niri-clip"
+  cargo build --release
+}
+
+package() {
+  cd "niri-clip"
+  install -Dm755 "target/release/niri-clip" "$pkgdir/usr/bin/niri-clip"
+  install -Dm644 "config/config.toml.example" "$pkgdir/usr/share/doc/$pkgname/config.toml.example"
+  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "assets/niri-clip.kdl" "$pkgdir/usr/share/doc/$pkgname/niri-clip.kdl.example"
+  install -Dm644 "assets/niri-clip.service" "$pkgdir/usr/lib/systemd/user/niri-clip.service"
+}
