@@ -239,6 +239,11 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // wl-copy
     let mut wl = Command::new("wl-copy")
         .stdin(Stdio::piped())
+        // 关键：wl-copy 会 fork 守护进程常驻服务剪贴板，默认继承的
+        // 终端 fd 被守护进程一直占着，kitty 等 pty EOF 才关窗，
+        // 导致 TUI 退出后残留黑屏空窗口。重定向到 null 释放 pty。
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .context("wl-copy")?;
     wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;

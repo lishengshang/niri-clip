@@ -68,6 +68,10 @@ async fn main() -> Result<()> {
             let clip = store::get(id)?;
             let mut wl = std::process::Command::new("wl-copy")
                 .stdin(std::process::Stdio::piped())
+                // 同 tui.rs：wl-copy 守护进程不得持有调用方终端 fd，
+                // 否则 fzf 里 Ctrl-Y 复制后 pty 被占，终端无法正常关闭
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn()?;
             use std::io::Write;
             wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
