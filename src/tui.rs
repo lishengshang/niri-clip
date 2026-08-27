@@ -86,10 +86,10 @@ fn run_fzf(cfg: &Config) -> Result<()> {
 
     // A+B: 1-9 快选 + Space jump + / 和 Ctrl-F 搜索
     let mut binds: Vec<String> = Vec::new();
-    // 数字 1-9：未输入时 pos+accept 直接退出，有输入时 put(数字)
+    // 数字 1-9：输入框未启用时直接 pos+accept 退出，启用时则输入数字
     for n in 1..=9 {
         binds.push(format!(
-            "{n}:transform:if [ \"$FZF_INPUT_STATE\" = \"hidden\" ]; then echo \"pos({n})+accept\"; else echo \"put({n})\"; fi"
+            "{n}:transform:if [ \"$FZF_INPUT_STATE\" = \"enabled\" ]; then echo \"put({n})\"; else echo \"pos({n})+accept\"; fi"
         ));
         binds.push(format!("alt-{n}:pos({n})+accept"));
     }
@@ -106,7 +106,7 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         .arg("--border")
         .arg("--info=inline")
         .arg("--prompt=剪贴板> ")
-        .arg("--header=1-9序号快选(按数字直接退出) · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出 · Esc退出")
+        .arg("--header=1-9快选 · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出")
         .arg("--track")
         .arg("--id-nth=3")
         .arg("--no-input")
@@ -114,7 +114,7 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         .arg("--preview-window=down:5:wrap:border-rounded")
         .arg("--bind=/:show-input+clear-query")
         .arg("--bind=ctrl-f:show-input+clear-query")
-        .arg("--bind=esc:transform:if [ \"$FZF_INPUT_STATE\" = \"hidden\" ]; then echo \"abort\"; else echo \"hide-input+clear-query\"; fi")
+        .arg("--bind=esc:transform:if [ \"$FZF_INPUT_STATE\" = \"enabled\" ]; then echo \"hide-input+clear-query\"; else echo \"abort\"; fi")
         .arg(format!(
             "--bind=ctrl-p:execute-silent({})+reload-sync({})",
             pin_cmd, reload_cmd
