@@ -12,12 +12,28 @@ pub fn store_from_stdin() -> Result<()> {
     if buf.trim().is_empty() {
         return Ok(());
     }
-    // 去掉末尾换行由 cliphist 行为一致
+    let buf_clone = buf.clone();
     let inserted = store::insert(buf, None)?;
     if inserted {
         eprintln!("[niri-clip store] inserted");
     } else {
         eprintln!("[niri-clip store] deduplicated/ignored");
+    }
+    // 双写兼容：同时写入 cliphist，保持 Mod+Shift+V 旧版可见
+    // 仅在 inserted 时写入，避免重复去重逻辑干扰
+    if inserted && which::which("cliphist").is_ok() {
+        let mut child = std::process::Command::new("cliphist")
+            .arg("store")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+        if let Some(ref mut c) = child {
+            use std::io::Write;
+            let _ = c.stdin.as_mut().unwrap().write_all(buf_clone.as_bytes());
+            let _ = c.wait();
+        }
     }
     Ok(())
 }
