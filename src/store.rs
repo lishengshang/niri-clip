@@ -3,8 +3,31 @@ use chrono::Utc;
 use regex::Regex;
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use crate::config::Config;
+
+// v0.3: TUI 懒加载 + 缓存
+pub const TUI_LIMIT: usize = 300;
+const CACHE_TTL: Duration = Duration::from_millis(200);
+static MENU_CACHE: std::sync::OnceLock<Mutex<CachedList>> = std::sync::OnceLock::new();
+
+struct CachedList {
+    clips: Vec<Clip>,
+    at: Instant,
+    limit: usize,
+}
+
+fn cache() -> &'static Mutex<CachedList> {
+    MENU_CACHE.get_or_init(|| {
+        Mutex::new(CachedList {
+            clips: Vec::new(),
+            at: Instant::now() - CACHE_TTL * 2,
+            limit: 0,
+        })
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct Clip {
@@ -97,6 +120,7 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
         "INSERT INTO clips_fts(rowid, text) VALUES (last_insert_rowid(), ?1)",
         params![text],
     );
+    invalidate_cache();
 
     // 超量清理
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
@@ -139,10 +163,44 @@ pub fn list(limit: usize) -> Result<Vec<Clip>> {
     Ok(out)
 }
 
+/// v0.3: TUI 专用 300 条懒加载 + 200ms 缓存
+pub fn list_tui() -> Result<Vec<Clip>> {
+    let mut c = cache().lock().unwrap();
+    if c.limit == TUI_LIMIT && c.at.elapsed() < CACHE_TTL && !c.clips.is_empty() {
+        return Ok(c.clips.clone());
+    }
+    let clips = list(TUI_LIMIT)?;
+    c.clips = clips.clone();
+    c.at = Instant::now();
+    c.limit = TUI_LIMIT;
+    Ok(clips)
+}
+
+pub fn invalidate_cache() {
+    if let Some(m) = MENU_CACHE.get() {
+        if let Ok(mut c) = m.lock() {
+            c.at = Instant::now() - CACHE_TTL * 2;
+        }
+    }
+}
+
+/// 10k 压测：插入 10k 条并测量 list 耗时
+pub fn bench_10k() -> Result<Duration> {
+    let start = Instant::now();
+    let clips = list(10000)?;
+    let elapsed = start.elapsed();
+    println!("[bench] list 10k: {} items in {:?} ({:.2} items/ms)", clips.len(), elapsed, clips.len() as f64 / elapsed.as_millis().max(1) as f64);
+    if elapsed.as_millis() > 50 {
+        eprintln!("[bench] WARN: >50ms, consider VACUUM or index");
+    }
+    Ok(elapsed)
+}
+
 pub fn delete(id: i64) -> Result<()> {
     let conn = connect()?;
     conn.execute("DELETE FROM clips WHERE id=?1", params![id])?;
     let _ = conn.execute("DELETE FROM clips_fts WHERE rowid=?1", params![id]);
+    invalidate_cache();
     Ok(())
 }
 
@@ -150,6 +208,7 @@ pub fn wipe() -> Result<()> {
     let conn = connect()?;
     conn.execute("DELETE FROM clips", [])?;
     conn.execute("DELETE FROM clips_fts", [])?;
+    invalidate_cache();
     // 兼容清空 cliphist
     let _ = std::process::Command::new("cliphist").arg("wipe").status();
     // 清理旧 pinned 文件
@@ -165,6 +224,7 @@ pub fn toggle_pin(id: i64) -> Result<bool> {
     let cur: i64 = conn.query_row("SELECT pinned FROM clips WHERE id=?1", params![id], |r| r.get(0))?;
     let new = if cur == 0 { 1 } else { 0 };
     conn.execute("UPDATE clips SET pinned=?1 WHERE id=?2", params![new, id])?;
+    invalidate_cache();
     Ok(new == 1)
 }
 

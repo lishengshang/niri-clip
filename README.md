@@ -11,7 +11,7 @@
 
 **niri-clip Plan B 解决：** 单 `fzf` 进程 `reload-sync + --track --id-nth`，删除后光标停在 **下一个**，删最后一行停在 **上一个**，搜索词/滚动不丢失。
 
-## 2. 快速开始 (v0.2 - Rust)
+## 2. 快速开始 (v0.3 - Rust)
 
 ```bash
 # 安装
@@ -35,14 +35,14 @@ git -C ~/dotfiles diff home/.config/niri/scripts/clipboard-history-tui.sh
 ## 3. 项目结构
 
 ```
-niri-clip/ (v0.2 Rust)
+niri-clip/ (v0.3 Rust)
 ├── src/
 │   ├── main.rs       # daemon/tui/store/list-raw/preview/pin/delete/wipe/migrate/status
 │   ├── config.rs     # ~/.config/niri-clip/config.toml
-│   ├── store.rs      # SQLite WAL + FTS5 + hash去重
-│   ├── daemon.rs     # wl-paste --watch niri-clip store
-│   ├── tui.rs        # fzf --track --id-nth + fuzzel 回退
-│   └── preview.rs    # 截断 + 图片预留
+│   ├── store.rs      # SQLite WAL + FTS5 + hash去重 + 300懒加载 + 缓存
+│   ├── daemon.rs     # wl-clipboard-rs 原生轮询 500ms + 回退 wl-paste
+│   ├── tui.rs        # fzf --track --id-nth + fuzzel 回退 + chafa
+│   └── preview.rs    # 截断 + chafa/kitty 图片预览
 ├── scripts/          # legacy Bash Plan B (已部署)
 │   └── clipboard-history-tui.sh
 ├── config/config.toml.example
@@ -66,7 +66,7 @@ niri-clip/ (v0.2 Rust)
 
 - **v0.1 ✅** – Bash Plan B，修复跳顶 (`Mod+V` 不跳了)
 - **v0.2 ✅** – Rust：SQLite + fzf不跳顶 + fuzzel回退 + config + daemon
-- **v0.3** – 原生 `wl-clipboard-rs`、性能压测
+- **v0.3 ✅** – 原生 `wl-clipboard-rs` + 300懒加载 + chafa + tests/manual.sh
 - **v1.0** – AUR、waybar、man、CI
 
 ## 6. 开发

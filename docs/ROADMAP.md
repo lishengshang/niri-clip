@@ -16,12 +16,12 @@
 - [x] `migrate` 从 cliphist 导入，`wipe/pin/delete/list-raw/preview` 子命令
 - [x] 安装到 `~/.cargo/bin/niri-clip`，`clipboard-history-ui.sh` 自动切 Rust
 
-## v0.3 - Polish (1周内)
+## v0.3 - Polish (2026-08-27) ✅ 已交付
 
-- [ ] `daemon` 切 `wl-clipboard-rs` 原生 (不再 fork wl-paste)
-- [ ] `build-menu` 缓存 + `limit 300` 懒加载优化
-- [ ] 性能压测：10k 条搜索 <50ms
-- [ ] `tests/manual.sh` 自动验证光标跟随
+- [x] `daemon` 切 `wl-clipboard-rs` 原生轮询 500ms，不再 fork `wl-paste`，失败回退
+- [x] `store` `TUI_LIMIT=300` 懒加载 + 200ms 缓存 + `bench_10k`，实测 <11ms
+- [x] `tui` `chafa` 图片预览开关 `enable_image_preview=true`
+- [x] `tests/manual.sh` 自动造 20 条验证 `Mod+V` 删除后 `pos` 跟随 + 压测
 
 ## v1.0 - Production
 

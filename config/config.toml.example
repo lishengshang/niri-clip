@@ -4,7 +4,7 @@
 max_items = 750
 preview_width = 100
 min_store_length = 1
-enable_image_preview = false
+enable_image_preview = true  # v0.3 chafa/kitty icat
 ignore_regex = "(?i)password|secret|token|otp|auth"
 pinned_on_top = true
 tui_backend = "auto"      # auto | fzf | fuzzel
