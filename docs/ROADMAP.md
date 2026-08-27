@@ -81,15 +81,16 @@
 - [x] **CI 门禁落地**（GitHub Actions）：fmt --check / clippy -D warnings /
       cargo test --locked / release build --locked / XDG 隔离 CLI 冒烟五道工序
 
-## v0.5 - UX Polish（规划中）
+## v0.5 - Quick Select (进行中) — TUI 快速选中
 
-- [ ] ~~事件驱动捕获~~ → 已随 v0.4.1 以外部事件源形态落地；
-      剩余可选项：进程内 data-control `SelectionChanged` 直连监听（去 sh 依赖）
+- [x] **A+B 快选**：`1-9` 裸数字 `pos(n)+accept`（`--no-input` 下），`Alt+1..9` 备用，`Space` → `jump` 二段
+- [x] **搜索**：`/` 与 `Ctrl-F` → `show-input+clear-query`，`Esc` → `hide-input`，有输入时数字回落 `put(n)`
+- [x] **`Ctrl-Y` 复制不退出**：`execute-silent(niri-clip copy {2})` 连挑多条
 - [ ] PRIMARY selection 支持（`ClipboardType::Primary`）
-- [ ] `max_clip_bytes` 超大条目上限（当前无尺寸防护，read_to_end 全内存直通入库）
-- [ ] 图片磁盘配额 GC（LRU 清理孤儿 images/*.bin）；`notify_enabled` 通知开关
-- [ ] 星标删除 fzf 内嵌两步确认，去除对 fuzzel GUI 的运行时依赖
-- [ ] criterion 基准进 CI；man page / shell 补全（clap_mangen/clap_complete）
+- [ ] `max_clip_bytes` 超大条目上限
+- [ ] 图片磁盘配额 GC；`notify_enabled` 开关
+- [ ] 星标删除 fzf 内嵌确认，去 fuzzel 依赖
+- [ ] criterion 基准进 CI；man page / shell 补全
 
 ## v1.0 - Production
 

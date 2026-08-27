@@ -87,6 +87,19 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         "echo {3..}".to_string()
     };
 
+    // A+B: 1-9 快选 + Space jump + / 和 Ctrl-F 搜索
+    let mut binds: Vec<String> = Vec::new();
+    // 数字 1-9：未输入时 pos+accept，有输入时 put(数字)
+    for n in 1..=9 {
+        binds.push(format!(
+            "{n}:transform:if [ \"$FZF_INPUT_STATE\" = \"hidden\" ]; then echo \"pos({n})+accept\"; else echo \"put({n})\"; fi"
+        ));
+        // Alt+数字 始终快选（备用）
+        binds.push(format!("alt-{n}:pos({n})+accept"));
+    }
+    binds.push("space:jump".into());
+    binds.push("ctrl-y:execute-silent(niri-clip copy {2})".into());
+
     let mut fzf = Command::new("fzf")
         .arg("--no-sort")
         .arg("--delimiter=\t")
@@ -97,11 +110,15 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         .arg("--border")
         .arg("--info=inline")
         .arg("--prompt=剪贴板> ")
-        .arg("--header=Enter复制 · ^P固定 · ^X删除 · Alt-X清空 · ^R刷新")
+        .arg("--header=1-9快选(空输入) · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y复制不退出")
         .arg("--track")
         .arg("--id-nth=2")
+        .arg("--no-input")
         .arg(format!("--preview={}", preview_cmd))
         .arg("--preview-window=down:5:wrap:border-rounded")
+        .arg("--bind=/:show-input+clear-query")
+        .arg("--bind=ctrl-f:show-input+clear-query")
+        .arg("--bind=esc:hide-input+clear-query")
         .arg(format!(
             "--bind=ctrl-p:execute-silent({})+reload-sync({})",
             pin_cmd, reload_cmd
@@ -115,7 +132,6 @@ fn run_fzf(cfg: &Config) -> Result<()> {
             "--bind=alt-x:execute({})+reload-sync({})",
             wipe_cmd, reload_cmd
         ))
-        .arg("--bind=ctrl-f:accept")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

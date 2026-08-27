@@ -29,6 +29,8 @@ enum Commands {
     ListRaw,
     /// 预览指定 id
     Preview { id: i64 },
+    /// 复制指定 id 到剪贴板 (供 TUI 快选)
+    Copy { id: i64 },
     /// 切换固定
     Pin { id: i64 },
     /// 删除指定条目（--force/-f 跳过星标确认，供脚本与无头环境使用）
@@ -62,6 +64,16 @@ async fn main() -> Result<()> {
         }
         Some(Commands::ListRaw) => tui::list_raw()?,
         Some(Commands::Preview { id }) => tui::preview_id(id)?,
+        Some(Commands::Copy { id }) => {
+            let clip = store::get(id)?;
+            let mut wl = std::process::Command::new("wl-copy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()?;
+            use std::io::Write;
+            wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
+            wl.wait()?;
+            println!("copied {}", id);
+        }
         Some(Commands::Pin { id }) => {
             let pinned = store::toggle_pin(id)?;
             let msg = if pinned {
