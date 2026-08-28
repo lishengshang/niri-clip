@@ -143,14 +143,13 @@ impl App {
                     Message::ListReloaded,
                 );
             }
-            Message::ListReloaded(clips) => {
-                if let Some(clips) = clips {
-                    self.clips = clips;
-                    if self.selected >= self.clips.len() {
-                        self.selected = self.clips.len().saturating_sub(1);
-                    }
+            Message::ListReloaded(Some(clips)) => {
+                self.clips = clips;
+                if self.selected >= self.clips.len() {
+                    self.selected = self.clips.len().saturating_sub(1);
                 }
             }
+            Message::ListReloaded(None) => {}
             Message::Exit => std::process::exit(0),
             _ => {}
         }
