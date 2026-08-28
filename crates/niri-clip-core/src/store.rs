@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use regex::Regex;
 use rusqlite::{params, Connection, OpenFlags};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
@@ -417,6 +418,28 @@ pub fn get(id: i64) -> Result<Clip> {
         row_to_clip,
     )?;
     Ok(c)
+}
+
+/// 复制指定条目到剪贴板（wl-copy 子进程），并刷新当前项指针。
+/// CLI `copy` 子命令与原生 UI 的 Enter/Ctrl-Y 共用此唯一路径，
+/// 保证 ▶ 跟随语义在所有复制入口一致。
+pub fn copy_to_clipboard(id: i64) -> Result<()> {
+    let clip = get(id)?;
+    let mut wl = std::process::Command::new("wl-copy")
+        .stdin(std::process::Stdio::piped())
+        // wl-copy 会 fork 守护进程常驻服务剪贴板，不得持有调用方终端 fd
+        // （详见 tui.rs 同款注释），重定向 null 释放 pty
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("wl-copy")?;
+    wl.stdin
+        .as_mut()
+        .expect("piped stdin")
+        .write_all(clip.text.as_bytes())?;
+    wl.wait()?;
+    touch_current(&clip.hash);
+    Ok(())
 }
 
 /// 从 cliphist 迁移（一次性）。导入借用 insert() 会顺带刷新当前项指针，

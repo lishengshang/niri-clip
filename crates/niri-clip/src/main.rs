@@ -60,20 +60,7 @@ async fn main() -> Result<()> {
         Some(Commands::ListRaw) => tui::list_raw()?,
         Some(Commands::Preview { id }) => tui::preview_id(id)?,
         Some(Commands::Copy { id }) => {
-            let clip = store::get(id)?;
-            let mut wl = std::process::Command::new("wl-copy")
-                .stdin(std::process::Stdio::piped())
-                // 同 tui.rs：wl-copy 守护进程不得持有调用方终端 fd，
-                // 否则 fzf 里 Ctrl-Y 复制后 pty 被占，终端无法正常关闭
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()?;
-            use std::io::Write;
-            wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
-            wl.wait()?;
-            // Ctrl-Y 复制不退出场景：指针随复制即时刷新，
-            // 下一次 reload-sync 的 ▶ 就移到这条
-            store::touch_current(&clip.hash);
+            store::copy_to_clipboard(id)?;
             println!("copied {}", id);
         }
         Some(Commands::Pin { id }) => {
