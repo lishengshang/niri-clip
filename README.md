@@ -3,10 +3,10 @@
 > 为 `niri` 合成器打造的 **全新、高性能、开箱即用** Wayland 剪贴板历史管理器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.1-blue)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/Wayland-niri-4a90e2)](https://github.com/YaLTeR/niri)
-[![AUR](https://img.shields.io/badge/AUR-niri--clip-blue)](https://aur.archlinux.org/packages/niri-clip)
+[![AUR](https://img.shields.io/badge/AUR-审核中-blue)](https://aur.archlinux.org/packages/niri-clip)
 
 **`niri-clip` 是一个独立的剪贴板历史软件，不是 `cliphist` 的包装。** 它拥有自己的守护进程、数据库和 TUI，专为 `niri` + `Wayland` 优化。
 
@@ -21,35 +21,30 @@
 - **数据持久安全**：历史库位于 `~/.local/state/niri-clip/`（XDG state 规范，不会被系统清理工具误删），旧 `~/.cache` 库自动快照搬迁；目录 0700 / 库文件 0600 权限收紧
 - **图片预览**：`chafa` / `kitty icat`，`enable_image_preview=true` 时 `image/png/jpeg/webp` 终端渲染
 - **安全**：`ignore_regex` 默认过滤 `password|secret|token|otp`，`min_store_length` 可配
-- **开箱即用**：`paru -S niri-clip` → `Mod+V` 直接可用，`fuzzel` 自动回退无 `kitty` 环境
+- **开箱即用**：装好即 `Mod+V` 直接可用（AUR 上架前用 `cargo install` / `makepkg`），`fuzzel` 自动回退无 `fzf` 环境
 
 ---
 
 ### 📦 安装
 
-#### AUR (推荐)
-
-```bash
-paru -S niri-clip          # release
-# 或
-paru -S niri-clip-git      # git
-```
+#### AUR（即将上架，审核中）
 
 #### Cargo
 
 ```bash
-cargo install --path . --force  # -> ~/.cargo/bin/niri-clip
-# 或从 crates.io (v1.0 后)
 cargo install niri-clip
+# 原生 GUI（可选，需单独安装）
+cargo install niri-clip-gui
 ```
 
-#### 手动
+#### 源码 / makepkg
 
 ```bash
 git clone https://github.com/lishengshang/niri-clip
 cd niri-clip
-cargo build --release
-sudo install -Dm755 target/release/niri-clip /usr/bin/niri-clip
+makepkg -si          # Arch 打包（含 systemd 单元/配置示例）
+# 或
+cargo build --release -p niri-clip && sudo install -Dm755 target/release/niri-clip /usr/bin/niri-clip
 ```
 
 ---
