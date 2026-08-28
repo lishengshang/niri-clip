@@ -11,6 +11,8 @@
 //! 分层约定：业务全部在 core（store::copy_to_clipboard / delete / toggle_pin /
 //! current 指针），本 crate 只做渲染与输入分发。
 
+use std::cell::RefCell;
+
 use iced::widget::{column, container, image, scrollable, text, text_input};
 use iced::{border, keyboard, Background, Border, Color, Element, Length, Subscription, Task};
 use niri_clip_core::{config, preview, store};
@@ -60,6 +62,10 @@ struct App {
     /// 星标条目删除二段确认（对齐路线图 1.5：内嵌确认，去 fuzzel 依赖）
     confirm_delete: bool,
     preview_width: usize,
+    /// 图片 Handle 跨帧缓存：(clip id, Handle)。Handle::from_bytes 每次
+    /// 调用生成新 Id，若在 view 里现建会导致 tiny-skia 每帧重新解码；
+    /// clip id 内容不可变，按 id 缓存安全。view(&self) 下用 RefCell。
+    image_cache: RefCell<Option<(i64, image::Handle)>>,
 }
 
 impl App {
@@ -73,6 +79,7 @@ impl App {
             selected: 0,
             confirm_delete: false,
             preview_width: cfg.preview_width,
+            image_cache: RefCell::new(None),
         }
     }
 
@@ -331,19 +338,18 @@ impl App {
                 .into();
         };
         if clip.mime.starts_with("image/") {
-            match &clip.image_path {
-                Some(p) if std::path::Path::new(p).exists() => {
+            match self.image_handle(clip) {
+                Some(handle) => {
                     col = col.push(
                         container(
-                            image(iced::widget::image::Handle::from_path(p))
-                                .height(Length::Fixed(140.0)),
+                            image(handle).height(Length::Fixed(140.0)),
                         )
                         .width(Length::Fill)
                         .padding([6, 8])
                         .style(preview_style),
                     );
                 }
-                _ => {
+                None => {
                     col = col.push(
                         container(text(format!("[image {}] 数据文件缺失", clip.mime)).size(12))
                             .width(Length::Fill)
@@ -385,6 +391,28 @@ impl App {
         out
     }
 
+    /// 图片条目的渲染 Handle：从 images/{id}.bin 读字节按内容解码
+    /// （旧实现 Handle::from_path 按扩展名猜格式，`.bin` 猜不出 →
+    /// tiny-skia 渲染线程 panic "Image should be allocated"）。
+    /// 无法识别魔数的文件回落 None，显示缺失提示而非崩溃。
+    fn image_handle(&self, clip: &store::Clip) -> Option<image::Handle> {
+        let mut cache = self.image_cache.borrow_mut();
+        if let Some((id, handle)) = cache.as_ref() {
+            if *id == clip.id {
+                return Some(handle.clone());
+            }
+        }
+        let bytes = clip
+            .image_path
+            .as_deref()
+            .map(std::fs::read)
+            .and_then(|r| r.ok())
+            .filter(|b| is_image_magic(b))?;
+        let handle = image::Handle::from_bytes(bytes);
+        *cache = Some((clip.id, handle.clone()));
+        Some(handle)
+    }
+
     fn subscription(&self) -> Subscription<Message> {
         iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
@@ -399,6 +427,16 @@ impl App {
 fn fuzzy_match(q: &str, t: &str) -> bool {
     let mut chars = t.chars();
     q.chars().all(|qc| chars.any(|tc| tc == qc))
+}
+
+/// 常见位图魔数：PNG / JPEG / GIF / WebP / BMP。
+/// 魔数不对直接拒绝——iced image 解码失败会在渲染线程 panic，不能赌。
+fn is_image_magic(b: &[u8]) -> bool {
+    b.starts_with(&[0x89, b'P', b'N', b'G'])
+        || b.starts_with(&[0xFF, 0xD8, 0xFF])
+        || b.starts_with(b"GIF8")
+        || (b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP")
+        || b.starts_with(b"BM")
 }
 
 // 配色对齐 fzf 默认深色风格（与 layer-shell 旧版一致的视觉语言）
