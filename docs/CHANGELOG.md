@@ -1,20 +1,9 @@
 # Changelog
 
-## Unreleased
+## v0.5.0 - 2026-08-28
 
-### Fixed
-- CI smoke 适配 `list-raw` 5 列格式（num/▶/★/id/preview，id 列移位），
-  并新增 ▶ 置顶语义断言（当前项压过星标、pin 落第 2 行）
-
-### Changed
-- **TUI 启动提速与关闭闪窗修复**：`run()` 的 tty 探测提到最前，
-  niri spawn 拉起的外层进程不再白跑 `fzf --version`；终端模拟器探测
-  优先级调整为 foot > ghostty > kitty（终端冷启动是 Mod+V 链路主要
-  延迟，ghostty 明显轻于 kitty）；承载 fzf 的内层命令输出重定向到
-  `~/.local/state/niri-clip/tui.log`——fzf 退出后 scrollback 不再闪现
-  启动日志/copied 文本，日志文件兼作无 systemd 环境的排障入口；
-  `fzf --version` 门控结果缓存到 `state/fzf.version`（按 fzf 二进制
-  mtime 自动失效重校），高频路径再省一次子进程
+> 亮点：原生 layer-shell UI（tui_backend=native，无终端秒开）、▶ 当前项置顶、
+> 单条体积限流。详见 docs/NATIVE-UI.md 与 ADR-001。
 
 ### Added
 - **tui_backend 新增 `native` 后端（M5.4）**：`niri-clip tui` 在
@@ -36,6 +25,22 @@
 - native 回退轮询对超限内容以内容 hash 短路，避免每 500ms 重复通知
 - 单元测试 4 例：文本/图片在限额边界的入库与拒绝行为、
   当前项指针跟踪/置顶/超限过滤不移动指针
+
+### Changed
+- **TUI 启动提速与关闭闪窗修复**：`run()` 的 tty 探测提到最前，
+  niri spawn 拉起的外层进程不再白跑 `fzf --version`；终端模拟器探测
+  优先级调整为 foot > ghostty > kitty（终端冷启动是 Mod+V 链路主要
+  延迟，ghostty 明显轻于 kitty）；承载 fzf 的内层命令输出重定向到
+  `~/.local/state/niri-clip/tui.log`——fzf 退出后 scrollback 不再闪现
+  启动日志/copied 文本，日志文件兼作无 systemd 环境的排障入口；
+  `fzf --version` 门控结果缓存到 `state/fzf.version`（按 fzf 二进制
+  mtime 自动失效重校），高频路径再省一次子进程
+- **Cargo workspace 拆分**（Phase 5 前置 5.0）：niri-clip-core（业务库）
+  + niri-clip（CLI）+ niri-clip-gui（原生 UI）；移除未使用的 serde_json
+
+### Fixed
+- CI smoke 适配 `list-raw` 5 列格式（num/▶/★/id/preview，id 列移位），
+  并新增 ▶ 置顶语义断言（当前项压过星标、pin 落第 2 行）
 
 ## v0.4.1 - 2026-08-27
 
