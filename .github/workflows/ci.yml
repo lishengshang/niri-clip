@@ -19,6 +19,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # 原生 UI 依赖链（smithay-client-toolkit/winit）需要系统 xkbcommon
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
 
@@ -30,6 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev
       - name: cargo test --locked (XDG-isolated temp envs)
         run: cargo test --locked
       - name: release build (--locked)
@@ -44,6 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev
       - name: Exercise core CRUD without a real Wayland session
         run: |
           set -euo pipefail

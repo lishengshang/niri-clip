@@ -1,0 +1,15 @@
+[package]
+name = "niri-clip-gui"
+description = "niri-clip 原生 layer-shell 前端（iced_exwlshell）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+niri-clip-core.workspace = true
+anyhow.workspace = true
+iced.workspace = true
+iced_exwlshell.workspace = true
+wayland-client.workspace = true

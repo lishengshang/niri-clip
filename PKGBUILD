@@ -1,6 +1,6 @@
 # Maintainer: lishengshang <3490017805@qq.com>
 pkgname=niri-clip
-pkgver=0.4.1
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="为 niri 打造的全新高性能 Wayland 剪贴板历史 - Rust + SQLite + fzf 不跳顶"
 arch=('x86_64' 'aarch64')
@@ -14,6 +14,8 @@ optdepends=(
   'chafa: 图形终端图片预览'
   'cliphist: 可选, 一次性迁移旧数据'
 )
+# 主包只构建 CLI（-p niri-clip）：workspace 中 niri-clip-gui 的依赖链
+# （iced/winit）需要 libxkbcommon，由独立的 niri-clip-gui 包承载。
 # NOTE: 提交 AUR 正式包前需用 updpkgsums / makepkg -g 替换为真实校验值；
 # SKIP 仅适用于 *-git 包。入库的 Cargo.lock 保证 --locked 可复现构建。
 source=("$pkgname-$pkgver.tar.gz::https://github.com/lishengshang/niri-clip/archive/v$pkgver.tar.gz")
@@ -21,7 +23,7 @@ sha256sums=('SKIP')
 
 build() {
   cd "$pkgname-$pkgver"
-  cargo build --release --locked
+  cargo build --release --locked -p niri-clip
 }
 
 package() {

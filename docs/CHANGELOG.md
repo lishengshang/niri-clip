@@ -17,6 +17,10 @@
   mtime 自动失效重校），高频路径再省一次子进程
 
 ### Added
+- **tui_backend 新增 `native` 后端（M5.4）**：`niri-clip tui` 在
+  niri-clip-gui 可用时拉起原生 layer-shell 窗口（无终端、秒开），
+  `auto` 优先 native、缺二进制自动降级 fzf/fuzzel；显式 `native`/
+  `fzf`/`fuzzel` 可锁定后端。Mod+V 绑定无需改动
 - **当前项置顶与 ▶ 标识**：新概念"当前项"= 最后一次成功捕获的内容 ≈
   `Ctrl+V` 会粘出的东西。`store` 捕获成功（含去重刷 ts 路径）即刷新
   `state/current` 指针；`list()` 排序把当前项固定在第 1 行（星标之上）；

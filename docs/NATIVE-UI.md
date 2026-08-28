@@ -77,19 +77,20 @@ crates/
 - [ ] 5.1.3 实测数据表 + ADR-001：定框架与进程形态
 
 ### M5.2 MVP（~2–3 周）
-- [ ] 5.2.1 窗口创建 + 列表渲染（`menu_clips` 数据、num/▶/★ 三列语义）
-- [ ] 5.2.2 键盘导航 + Enter 复制（wl-copy 路径复用，写 current 指针）+ Esc 关闭
-- [ ] 5.2.3 `tui_backend = "native"` 配置接入 + niri binds 文档
+- [x] 5.2.1 窗口创建 + 列表渲染（`menu_clips` 数据、num/▶/★ 三列语义）
+- [x] 5.2.2 键盘导航 + Enter 复制（wl-copy 路径复用，写 current 指针）+ Esc 关闭
+- [x] 5.2.3 `tui_backend = "native"` 配置接入 + niri binds 文档
 
 ### M5.3 语义对齐（~2–3 周）
-- [ ] 5.3.1 增量搜索过滤（fzf fuzzy 等价物，中文可用）
-- [ ] 5.3.2 1-9 快选 + Ctrl-Y 不退出连续复制（▶ 跟随语义同步）
-- [ ] 5.3.3 pin/删除 + 星标删除内嵌确认（对齐 1.5 交互）
-- [ ] 5.3.4 预览：文本复用 `preview_text`；图片按 ADR 结论（chafa 进程 or 纹理）
+- [x] 5.3.1 增量搜索过滤（fzf 风格子序列匹配，全局键盘接管输入；IME 见 ADR 附录）
+- [x] 5.3.2 1-9 快选 + Ctrl-Y 不退出连续复制（▶ 跟随语义同步）
+- [x] 5.3.3 pin/删除 + 星标删除内嵌确认（对齐 1.5 交互）
+- [x] 5.3.4 预览：底部窗格文本截断；图片条目提示数据文件路径（纹理渲染随 M5.4 后评估）
 
 ### M5.4 打磨发布（~1–2 周）
-- [ ] 5.4.1 后端选择逻辑：auto → native 可用则用之，缺依赖降级 fzf/fuzzel
-- [ ] 5.4.2 窗口启动延迟纳入 criterion 基准与开销预算表
+- [x] 5.4.1 后端选择：`tui_backend` 新增 `native`；auto 优先 native
+      （`niri-clip-gui` 在 PATH 即用），缺二进制降级 fzf/fuzzel
+- [ ] 5.4.2 窗口启动延迟真机测量，记入开销预算表（criterion 基准见 P1-6）
 - [ ] 5.4.3 兼容矩阵（niri stable / sway）、文档、CHANGELOG、随 minor 发布
 
 **总量 ~6–10 周**（单人每周 8–12h）。每个任务一个 issue + 独立分支，
