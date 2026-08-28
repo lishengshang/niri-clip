@@ -50,16 +50,21 @@ fn fzf_version_ok() -> bool {
     parse_version(&ver).map(|v| v >= FZF_MIN).unwrap_or(false)
 }
 
-/// 选择后端：auto 时优先 fzf（任意终端均可运行），缺失则 fuzzel。
-/// v0.4 修复：旧实现要求 `fzf && kitty` 同时存在才启用 fzf，导致
-/// foot/alacritty 等用户被误降到功能残缺的 fuzzel。kitty/chafa 仅
-/// 影响图片预览渲染能力，不应决定整个后端选择。
+/// 选择后端：
+/// - "native"：原生 layer-shell 窗口（niri-clip-gui 二进制），无终端依赖
+/// - "fzf"：fzf 承载于终端（--track 不跳顶唯一现成解）
+/// - "fuzzel"：dmenu 兜底（无 TTY 需求）
+/// - "auto"：native 可用优先；其次 fzf；最后 fuzzel（fzf 版本地板在
+///   run() 里二次校验，此处只查存在性）
 fn backend(cfg: &Config) -> &'static str {
     match cfg.tui_backend.as_str() {
         "fuzzel" => "fuzzel",
         "fzf" => "fzf",
+        "native" => "native",
         _ => {
-            if has_bin("fzf") {
+            if has_bin("niri-clip-gui") {
+                "native"
+            } else if has_bin("fzf") {
                 "fzf"
             } else {
                 "fuzzel"
@@ -117,9 +122,26 @@ fn respawn_in_terminal(term: &str, prefix: &[&str], exe: &std::path::Path) -> Re
 
 pub fn run() -> Result<()> {
     let cfg = Config::load();
-    // 无控制终端（如 niri spawn 裸拉起）时 fzf 无法运行：
-    // 先做 tty 探测并立即重包装退出——backend/version 检查留给内层进程，
-    // 外层不做任何多余子进程调用（此前 fzf --version 在外层白跑一次）
+    let mut be = backend(&cfg);
+
+    // native：layer-shell 进程无需 TTY，直接拉起独立 GUI 后返回。
+    // 二进制缺失时降级：显式 "native" → fzf/fuzzel；auto 已在此前选择过。
+    if be == "native" {
+        return match which::which("niri-clip-gui") {
+            Ok(gui) => {
+                Command::new(gui).spawn().context("spawn niri-clip-gui")?;
+                Ok(())
+            }
+            Err(_) => {
+                eprintln!("[niri-clip tui] niri-clip-gui 不可用，回退 fzf/fuzzel");
+                be = if has_bin("fzf") { "fzf" } else { "fuzzel" };
+                run_fallback(be, &cfg)
+            }
+        };
+    }
+
+    // fzf/fuzzel：无控制终端（niri spawn 裸拉起）时先做 tty 探测——
+    // fzf 需要包一层终端；version 检查留给实际执行 fzf 的路径
     if !has_controlling_tty() {
         if let Some((term, prefix)) = terminal_wrap() {
             let exe = std::env::current_exe()?;
@@ -136,7 +158,6 @@ pub fn run() -> Result<()> {
         anyhow::bail!("no controlling tty and no terminal emulator / fuzzel available");
     }
 
-    let mut be = backend(&cfg);
     // fzf 版本地板：低于 0.71（--id-nth）时参数无法解析，主动回退 fuzzel
     if be == "fzf" && !fzf_version_ok() {
         if has_bin("fuzzel") {
@@ -154,6 +175,25 @@ pub fn run() -> Result<()> {
     match be {
         "fzf" => run_fzf(&cfg),
         _ => run_fuzzel(&cfg),
+    }
+}
+
+/// native 不可用时的降级执行：仍处于无 TTY 环境的决策辅助
+fn run_fallback(be: &'static str, cfg: &Config) -> Result<()> {
+    match be {
+        "fuzzel" => run_fuzzel(cfg),
+        "fzf" => {
+            // 无 TTY 时 fzf 无法运行：包终端重跑（backend 已定型 fzf）
+            if has_controlling_tty() {
+                return run_fzf(cfg);
+            }
+            if let Some((term, prefix)) = terminal_wrap() {
+                let exe = std::env::current_exe()?;
+                return respawn_in_terminal(term, prefix, &exe);
+            }
+            anyhow::bail!("fzf 需要 TTY 且无可用终端模拟器");
+        }
+        _ => run_fuzzel(cfg),
     }
 }
 

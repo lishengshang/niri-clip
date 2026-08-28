@@ -95,7 +95,7 @@ min_store_length = 1
 enable_image_preview = true   # chafa
 ignore_regex = "(?i)password|secret|token|otp|auth"
 pinned_on_top = true
-tui_backend = "auto"  # auto|fzf|fuzzel
+tui_backend = "auto"  # auto|native|fzf|fuzzel（native=无终端原生窗口）
 enable_preview = true
 capture_timeout_secs = 5   # v0.4.1 每次捕获子进程超时
 max_clip_bytes = 1048576   # v0.5 单条文本上限（字节），超限拒绝入库
