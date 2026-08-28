@@ -1,11 +1,6 @@
-mod config;
-mod daemon;
-mod preview;
-mod store;
-mod tui;
-
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use niri_clip_core::{config, daemon, preview, store, tui};
 
 #[derive(Parser)]
 #[command(name = "niri-clip", version, about = "高性能 niri 剪贴板历史")]

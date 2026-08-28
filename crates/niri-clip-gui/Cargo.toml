@@ -1,0 +1,11 @@
+[package]
+name = "niri-clip-gui"
+description = "niri-clip 原生 layer-shell 前端（iced_layershell，M5.2 起实现）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+niri-clip-core.workspace = true

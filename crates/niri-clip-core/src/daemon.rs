@@ -11,7 +11,7 @@ use crate::store;
 /// systemd user 单元模板（随二进制内置，供 `install-service` 一键落盘）
 pub const SERVICE_UNIT: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/assets/niri-clip.service"
+    "/../../assets/niri-clip.service"
 ));
 
 // =====================================================================
