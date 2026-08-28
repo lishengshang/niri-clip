@@ -151,10 +151,12 @@ pub fn run() -> Result<()> {
             eprintln!("[niri-clip tui] 无可用终端承载 fzf，回退 fuzzel");
             return run_fuzzel(&cfg);
         }
-        let _ = notify_rust::Notification::new()
-            .summary("niri-clip")
-            .body("fzf 需要 TTY：请安装 foot/ghostty/kitty 等终端，或安装 fuzzel")
-            .show();
+        if cfg.notify_enabled {
+            let _ = notify_rust::Notification::new()
+                .summary("niri-clip")
+                .body("fzf 需要 TTY：请安装 foot/ghostty/kitty 等终端，或安装 fuzzel")
+                .show();
+        }
         anyhow::bail!("no controlling tty and no terminal emulator / fuzzel available");
     }
 
@@ -164,10 +166,12 @@ pub fn run() -> Result<()> {
             eprintln!("[niri-clip tui] fzf 缺失或 <0.71（--id-nth 地板），回退 fuzzel");
             be = "fuzzel";
         } else {
-            let _ = notify_rust::Notification::new()
-                .summary("niri-clip")
-                .body("niri-clip 需要 fzf >= 0.71（或安装 fuzzel）")
-                .show();
+            if cfg.notify_enabled {
+                let _ = notify_rust::Notification::new()
+                    .summary("niri-clip")
+                    .body("niri-clip 需要 fzf >= 0.71（或安装 fuzzel）")
+                    .show();
+            }
             anyhow::bail!("fzf missing or too old (<0.71) and fuzzel unavailable");
         }
     }
@@ -213,10 +217,12 @@ fn row_marks(cur: Option<&str>, c: &store::Clip) -> (String, String) {
 fn run_fzf(cfg: &Config) -> Result<()> {
     let clips = menu_clips(cfg)?;
     if clips.is_empty() {
-        let _ = notify_rust::Notification::new()
-            .summary("niri-clip")
-            .body("剪贴板历史为空")
-            .show();
+        if cfg.notify_enabled {
+            let _ = notify_rust::Notification::new()
+                .summary("niri-clip")
+                .body("剪贴板历史为空")
+                .show();
+        }
         return Ok(());
     }
 

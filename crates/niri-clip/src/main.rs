@@ -70,10 +70,12 @@ async fn main() -> Result<()> {
             } else {
                 "已取消固定"
             };
-            let _ = notify_rust::Notification::new()
-                .summary("niri-clip")
-                .body(&format!("{} {}", msg, id))
-                .show();
+            if config::Config::load().notify_enabled {
+                let _ = notify_rust::Notification::new()
+                    .summary("niri-clip")
+                    .body(&format!("{} {}", msg, id))
+                    .show();
+            }
             println!("{} {}", msg, id);
         }
         Some(Commands::Delete { id, force }) => {
