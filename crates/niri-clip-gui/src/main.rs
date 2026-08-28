@@ -17,7 +17,7 @@
 //! 分层约定：业务全部在 core（store::copy_to_clipboard / delete / toggle_pin /
 //! current 指针），本 crate 只做渲染与输入分发。
 
-use iced::widget::{column, container, scrollable, text, text_input};
+use iced::widget::{column, container, scrollable, text};
 use iced::{keyboard, Background, Color, Element, Length, Subscription, Task};
 use iced_exwlshell::reexport::{Anchor, KeyboardInteractivity};
 use iced_exwlshell::settings::{LayerShellSettings, Settings};
@@ -30,8 +30,6 @@ use wayland_client::Connection;
 #[to_exwlshell_message]
 #[derive(Debug, Clone)]
 enum Message {
-    /// 搜索框内容变化（全局键盘处理器直接维护）
-    Query(String),
     /// Ctrl-V：读取系统剪贴板追加进查询
     Paste(String),
     /// 全局键盘路由：具体语义在 update 里结合状态分发
@@ -110,11 +108,6 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Query(q) => {
-                self.query = q;
-                self.selected = 0;
-                self.confirm_delete = false;
-            }
             Message::Paste(s) => {
                 self.query.push_str(&s);
                 self.selected = 0;
@@ -247,7 +240,11 @@ impl App {
     fn log_key(&self, key: &keyboard::Key, modifiers: &keyboard::Modifiers) {
         use std::io::Write;
         let path = config::Config::state_dir().join("gui.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = writeln!(f, "key={key:?} mods={modifiers:?}");
         }
     }
@@ -291,11 +288,9 @@ impl App {
         let cur = store::current_hash();
         let filtered = self.filtered();
 
-        let search = text_input("搜索（英文直打 / Ctrl-V 粘贴，子序列匹配）…", &self.query)
-            // 纯展示：键入由全局键盘处理器接管（不依赖 widget 焦点），
-            // 挂 on_input 会在 widget 意外持焦时造成双倍输入
-            .size(14)
-            .padding(6);
+        // 视觉对齐 fzf TUI：header 提示行 → "剪贴板> " 提示符 → 行列表 → 底部预览
+        let header = "1-9快选 · Enter复制 · Ctrl-Y连复 · Ctrl-P固定 · Ctrl-X删除 · Esc清除/退出";
+        let prompt = format!("剪贴板> {}▏", self.query);
 
         let rows = filtered.iter().enumerate().map(|(idx, clip)| {
             let selected = idx == self.selected;
@@ -306,7 +301,6 @@ impl App {
                 " "
             };
             let star = if clip.pinned { "★" } else { " " };
-            // 空查询时展示 1-9 快选序号；有输入时列位让渡给过滤结果
             let quick = if self.query.is_empty() && idx < 9 {
                 format!("{}", idx + 1)
             } else {
@@ -316,18 +310,36 @@ impl App {
                 "{cursor} {quick} {cur_mark}{star} {}",
                 preview::preview_text(clip, self.preview_width)
             );
-            container(text(line).size(14))
-                .width(Length::Fill)
-                .padding([2, 8])
-                .style(move |theme| row_style(selected, theme))
-                .into()
+            container(
+                text(line)
+                    .size(14)
+                    .color(if selected { ROW_FG_SELECTED } else { ROW_FG }),
+            )
+            .width(Length::Fill)
+            .padding([2, 8])
+            .style(move |_| container::Style {
+                background: Some(Background::Color(if selected { SEL_BG } else { BG })),
+                ..Default::default()
+            })
+            .into()
         });
 
-        let mut col = column![].push(search).push(
-            scrollable(column(rows).width(Length::Fill))
-                .height(Length::Fill)
-                .width(Length::Fill),
-        );
+        let mut col = column![]
+            .push(
+                container(text(header).size(11).color(ACCENT))
+                    .width(Length::Fill)
+                    .padding([4, 8]),
+            )
+            .push(
+                container(text(prompt).size(14).color(ACCENT))
+                    .width(Length::Fill)
+                    .padding([6, 8]),
+            )
+            .push(
+                scrollable(column(rows).width(Length::Fill))
+                    .height(Length::Fill)
+                    .width(Length::Fill),
+            );
 
         if self.confirm_delete {
             col = col.push(
@@ -338,7 +350,7 @@ impl App {
             );
         }
 
-        // 底部预览窗格：选中条目全文（多行截断）
+        // 底部预览窗格：选中条目全文（多行截断），与 TUI 的 preview-window 对应
         col = col.push(
             container(text(self.preview_selected(&filtered)).size(12))
                 .width(Length::Fill)
@@ -346,7 +358,14 @@ impl App {
                 .style(preview_style),
         );
 
-        col.width(Length::Fill).into()
+        container(col)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(BG)),
+                ..Default::default()
+            })
+            .into()
     }
 
     /// 底部预览：选中条目全文多行截断（图片条目给数据文件提示）
@@ -386,51 +405,76 @@ fn fuzzy_match(q: &str, t: &str) -> bool {
     q.chars().all(|qc| chars.any(|tc| tc == qc))
 }
 
-fn row_style(selected: bool, theme: &iced::Theme) -> container::Style {
-    let palette = theme.palette();
+// 配色对齐 fzf 默认深色风格
+const BG: Color = Color {
+    r: 0.086,
+    g: 0.086,
+    b: 0.110,
+    a: 1.0,
+};
+const ROW_FG: Color = Color {
+    r: 0.88,
+    g: 0.88,
+    b: 0.91,
+    a: 1.0,
+};
+const ROW_FG_SELECTED: Color = Color {
+    r: 0.96,
+    g: 0.96,
+    b: 0.98,
+    a: 1.0,
+};
+const ACCENT: Color = Color {
+    r: 0.48,
+    g: 0.64,
+    b: 0.97,
+    a: 1.0,
+};
+const SEL_BG: Color = Color {
+    r: 0.16,
+    g: 0.28,
+    b: 0.50,
+    a: 1.0,
+};
+
+fn preview_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(if selected {
-            palette.primary
-        } else {
-            Color::TRANSPARENT
+        background: Some(Background::Color(Color {
+            a: 1.0,
+            r: BG.r + 0.03,
+            g: BG.g + 0.03,
+            b: BG.b + 0.04,
         })),
-        text_color: Some(if selected {
-            palette.background
-        } else {
-            palette.text
-        }),
+        text_color: Some(ROW_FG),
         ..Default::default()
     }
 }
 
-fn preview_style(theme: &iced::Theme) -> container::Style {
-    let palette = theme.palette();
+fn confirm_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(Color {
-            a: 0.35,
-            ..palette.background
+            r: 0.42,
+            g: 0.11,
+            b: 0.11,
+            a: 1.0,
         })),
-        text_color: Some(palette.text),
-        ..Default::default()
-    }
-}
-
-fn confirm_style(theme: &iced::Theme) -> container::Style {
-    let palette = theme.palette();
-    container::Style {
-        background: Some(Background::Color(Color {
-            a: 0.6,
-            ..palette.danger
-        })),
-        text_color: Some(palette.background),
+        text_color: Some(ROW_FG_SELECTED),
         ..Default::default()
     }
 }
 
 fn main() -> Result<(), iced_exwlshell::Error> {
+    // 上游 issue #360：NVIDIA + wgpu 下 SurfaceError::Lost/Outdated 只记日志
+    // 不重建 surface，首帧后 UI 永久冻结（内部状态在变、画面不动）。
+    // 确认可用的规避：GL 后端。用户显式设置的 WGPU_BACKEND 优先。
+    if std::env::var("WGPU_BACKEND").is_err() {
+        std::env::set_var("WGPU_BACKEND", "gl");
+    }
+
     let connection = Connection::connect_to_env().expect("no wayland connection");
     let with_connection = connection.clone();
-    daemon(|| (App::new(), Task::none()),
+    daemon(
+        || (App::new(), Task::none()),
         || String::from("niri-clip"),
         App::update,
         App::view,
