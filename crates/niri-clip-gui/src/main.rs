@@ -464,13 +464,6 @@ fn confirm_style(_theme: &iced::Theme) -> container::Style {
 }
 
 fn main() -> Result<(), iced_exwlshell::Error> {
-    // 上游 issue #360：NVIDIA + wgpu 下 SurfaceError::Lost/Outdated 只记日志
-    // 不重建 surface，首帧后 UI 永久冻结（内部状态在变、画面不动）。
-    // 确认可用的规避：GL 后端。用户显式设置的 WGPU_BACKEND 优先。
-    if std::env::var("WGPU_BACKEND").is_err() {
-        std::env::set_var("WGPU_BACKEND", "gl");
-    }
-
     let connection = Connection::connect_to_env().expect("no wayland connection");
     let with_connection = connection.clone();
     daemon(

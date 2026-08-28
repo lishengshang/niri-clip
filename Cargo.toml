@@ -27,7 +27,11 @@ serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 which = "6"
-iced = "0.14"
+iced = { version = "0.14", default-features = false, features = [
+    "tiny-skia",
+    "wayland",
+    "thread-pool",
+] }
 iced_exwlshell = "0.19"
 wayland-client = "0.31"
 wl-clipboard-rs = "0.9"
