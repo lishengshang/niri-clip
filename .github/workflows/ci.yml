@@ -60,10 +60,15 @@ jobs:
           n=$("$B" list-raw | wc -l)
           echo "rows=$n"; [ "$n" -eq 3 ]
 
-          # list-raw 为 4 列格式 num\t★\tid\tpreview，id 在第 3 列
-          first=$("$B" list-raw | head -n1 | cut -f3)
-          "$B" pin "$first" >/dev/null 2>&1
-          "$B" list-raw | head -n1 | grep -q '★'
+          # list-raw 为 5 列格式 num\t▶\t★\tid\tpreview，id 在第 4 列
+          first=$("$B" list-raw | head -n1 | cut -f4)
+          second=$("$B" list-raw | sed -n '2p' | cut -f4)
+          # ▶ 当前项（最后捕获者）固定第 1 行，星标压不过当前项
+          "$B" list-raw | head -n1 | grep -q '▶'
+          # pin 第 2 行（非当前项）→ ★ 落在该行但仍排当前项之后
+          "$B" pin "$second" >/dev/null 2>&1
+          "$B" list-raw | head -n1 | grep -q '▶'
+          "$B" list-raw | sed -n '2p' | grep -q '★'
 
           after=$("$B" delete -f "$first" >/dev/null 2>&1; "$B" list-raw | wc -l)
           [ "$after" -eq 2 ]

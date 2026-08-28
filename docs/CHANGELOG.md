@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+- CI smoke 适配 `list-raw` 5 列格式（num/▶/★/id/preview，id 列移位），
+  并新增 ▶ 置顶语义断言（当前项压过星标、pin 落第 2 行）
+
 ### Changed
 - **TUI 启动提速与关闭闪窗修复**：`run()` 的 tty 探测提到最前，
   niri spawn 拉起的外层进程不再白跑 `fzf --version`；终端模拟器探测
