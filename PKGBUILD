@@ -2,7 +2,7 @@
 pkgname=niri-clip
 pkgver=0.5.0
 pkgrel=1
-pkgdesc="为 niri 打造的全新高性能 Wayland 剪贴板历史 - Rust + SQLite + fzf 不跳顶"
+pkgdesc="为 niri 打造的全新高性能 Wayland 剪贴板"
 arch=('x86_64' 'aarch64')
 url="https://github.com/lishengshang/niri-clip"
 license=('MIT')
@@ -19,7 +19,7 @@ optdepends=(
 # NOTE: 提交 AUR 正式包前需用 updpkgsums / makepkg -g 替换为真实校验值；
 # SKIP 仅适用于 *-git 包。入库的 Cargo.lock 保证 --locked 可复现构建。
 source=("$pkgname-$pkgver.tar.gz::https://github.com/lishengshang/niri-clip/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('0b289503302b31d0979627f5f2b50d38e3ba31907f21e41e35b26694f9eea181')
 
 build() {
   cd "$pkgname-$pkgver"
