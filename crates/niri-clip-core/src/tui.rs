@@ -50,6 +50,26 @@ fn fzf_version_ok() -> bool {
     parse_version(&ver).map(|v| v >= FZF_MIN).unwrap_or(false)
 }
 
+/// 原生 GUI 二进制定位（多级兜底）：PATH → 与当前可执行文件同目录
+/// （cargo install 同仓同目录）→ ~/.cargo/bin。
+/// 必须有兜底：niri spawn 环境的 PATH 常缺 ~/.cargo/bin（真机踩坑），
+/// 否则 auto 会误降级 fzf，GUI 永远打不开。
+fn gui_binary() -> Option<std::path::PathBuf> {
+    if let Ok(p) = which::which("niri-clip-gui") {
+        return Some(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("niri-clip-gui");
+            if sibling.exists() {
+                return Some(sibling);
+            }
+        }
+    }
+    let cargo = dirs::home_dir()?.join(".cargo/bin/niri-clip-gui");
+    cargo.exists().then_some(cargo)
+}
+
 /// 选择后端：
 /// - "native"：原生 layer-shell 窗口（niri-clip-gui 二进制），无终端依赖
 /// - "fzf"：fzf 承载于终端（--track 不跳顶唯一现成解）
@@ -62,7 +82,7 @@ fn backend(cfg: &Config) -> &'static str {
         "fzf" => "fzf",
         "native" => "native",
         _ => {
-            if has_bin("niri-clip-gui") {
+            if gui_binary().is_some() {
                 "native"
             } else if has_bin("fzf") {
                 "fzf"
@@ -127,12 +147,14 @@ pub fn run() -> Result<()> {
     // native：layer-shell 进程无需 TTY，直接拉起独立 GUI 后返回。
     // 二进制缺失时降级：显式 "native" → fzf/fuzzel；auto 已在此前选择过。
     if be == "native" {
-        return match which::which("niri-clip-gui") {
-            Ok(gui) => {
-                Command::new(gui).spawn().context("spawn niri-clip-gui")?;
+        return match gui_binary() {
+            Some(gui) => {
+                Command::new(&gui)
+                    .spawn()
+                    .with_context(|| format!("spawn {}", gui.display()))?;
                 Ok(())
             }
-            Err(_) => {
+            None => {
                 eprintln!("[niri-clip tui] niri-clip-gui 不可用，回退 fzf/fuzzel");
                 be = if has_bin("fzf") { "fzf" } else { "fuzzel" };
                 run_fallback(be, &cfg)
