@@ -12,7 +12,7 @@
 //! current 指针），本 crate 只做渲染与输入分发。
 
 use iced::widget::{column, container, image, scrollable, text, text_input};
-use iced::{keyboard, Background, Color, Element, Length, Subscription, Task};
+use iced::{border, keyboard, Background, Border, Color, Element, Length, Subscription, Task};
 use niri_clip_core::{config, preview, store};
 
 #[derive(Debug, Clone)]
@@ -268,39 +268,53 @@ impl App {
                     .color(if selected { ROW_FG_SELECTED } else { ROW_FG }),
             )
             .width(Length::Fill)
-            .padding([2, 8])
+            .padding([4, 10])
             .style(move |_| container::Style {
                 background: Some(Background::Color(if selected { SEL_BG } else { BG })),
+                border: Border {
+                    radius: RADIUS_ROW,
+                    ..Default::default()
+                },
                 ..Default::default()
             })
             .into()
         });
 
         let mut col = column![]
+            .spacing(6)
             .push(
-                container(text(header).size(11).color(ACCENT))
+                container(text(header).size(11).color(MUTED))
                     .width(Length::Fill)
-                    .padding([4, 8]),
+                    .padding([6, 10]),
             )
             .push(
-                text_input("搜索（中文 IME / Ctrl-V 粘贴，子序列匹配）…", &self.query)
+                container(
+                    text_input(
+                        "剪贴板> 搜索（中文 IME / Ctrl-V 粘贴，子序列匹配）…",
+                        &self.query,
+                    )
                     .id(self.search_id.clone())
                     .on_input(Message::Query)
                     .on_paste(Message::Query)
                     .size(14)
-                    .padding([6, 8]),
+                    .padding([7, 10])
+                    .style(input_style),
+                )
+                .width(Length::Fill)
+                .padding([0, 8]),
             )
             .push(
-                scrollable(column(rows).width(Length::Fill))
+                scrollable(column(rows).width(Length::Fill).spacing(2))
                     .height(Length::Fill)
-                    .width(Length::Fill),
+                    .width(Length::Fill)
+                    .style(scroll_style),
             );
 
         if self.confirm_delete {
             col = col.push(
                 container(text("★ 星标条目删除确认：再按 Ctrl-X 执行，Esc 取消").size(12))
                     .width(Length::Fill)
-                    .padding([4, 8])
+                    .padding([6, 10])
                     .style(confirm_style),
             );
         }
@@ -387,11 +401,24 @@ fn fuzzy_match(q: &str, t: &str) -> bool {
     q.chars().all(|qc| chars.any(|tc| tc == qc))
 }
 
-// 配色对齐 fzf 默认深色风格
+// 配色对齐 fzf 默认深色风格（与 layer-shell 旧版一致的视觉语言）
 const BG: Color = Color {
     r: 0.086,
     g: 0.086,
     b: 0.110,
+    a: 1.0,
+};
+/// 面板色：搜索框 / 预览窗格底色（比 BG 微亮一档）
+const PANEL: Color = Color {
+    r: 0.110,
+    g: 0.110,
+    b: 0.140,
+    a: 1.0,
+};
+const BORDER: Color = Color {
+    r: 0.170,
+    g: 0.170,
+    b: 0.220,
     a: 1.0,
 };
 const ROW_FG: Color = Color {
@@ -406,6 +433,13 @@ const ROW_FG_SELECTED: Color = Color {
     b: 0.98,
     a: 1.0,
 };
+/// 次要文本：header 提示行 / 占位符 / 预览
+const MUTED: Color = Color {
+    r: 0.545,
+    g: 0.570,
+    b: 0.650,
+    a: 1.0,
+};
 const ACCENT: Color = Color {
     r: 0.48,
     g: 0.64,
@@ -418,16 +452,84 @@ const SEL_BG: Color = Color {
     b: 0.50,
     a: 1.0,
 };
+const SCROLLBAR: Color = Color {
+    r: 0.230,
+    g: 0.230,
+    b: 0.290,
+    a: 1.0,
+};
+
+const RADIUS_ROW: border::Radius = border::Radius {
+    top_left: 4.0,
+    top_right: 4.0,
+    bottom_right: 4.0,
+    bottom_left: 4.0,
+};
+const RADIUS_PANEL: border::Radius = border::Radius {
+    top_left: 6.0,
+    top_right: 6.0,
+    bottom_right: 6.0,
+    bottom_left: 6.0,
+};
+
+fn input_style(_theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
+    let (bg, border_color) = match status {
+        text_input::Status::Focused { .. } => (PANEL, ACCENT),
+        text_input::Status::Hovered => (PANEL, BORDER),
+        _ => (PANEL, BORDER),
+    };
+    text_input::Style {
+        background: Background::Color(bg),
+        border: Border {
+            color: border_color,
+            width: 1.0,
+            radius: RADIUS_PANEL,
+        },
+        icon: ACCENT,
+        placeholder: MUTED,
+        value: ROW_FG_SELECTED,
+        selection: Color {
+            a: 0.35,
+            ..ACCENT
+        },
+    }
+}
+
+fn scroll_style(_theme: &iced::Theme, _status: scrollable::Status) -> scrollable::Style {
+    let rail = scrollable::Rail {
+        background: None,
+        border: Border::default(),
+        scroller: scrollable::Scroller {
+            background: Background::Color(SCROLLBAR),
+            border: Border {
+                radius: border::Radius::from(4.0),
+                ..Default::default()
+            },
+        },
+    };
+    scrollable::Style {
+        container: container::Style::default(),
+        vertical_rail: rail,
+        horizontal_rail: rail,
+        gap: None,
+        auto_scroll: scrollable::AutoScroll {
+            background: Background::Color(ACCENT),
+            border: Border::default(),
+            shadow: Default::default(),
+            icon: BG,
+        },
+    }
+}
 
 fn preview_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
-        background: Some(Background::Color(Color {
-            a: 1.0,
-            r: BG.r + 0.03,
-            g: BG.g + 0.03,
-            b: BG.b + 0.04,
-        })),
-        text_color: Some(ROW_FG),
+        background: Some(Background::Color(PANEL)),
+        text_color: Some(MUTED),
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: RADIUS_PANEL,
+        },
         ..Default::default()
     }
 }
@@ -441,6 +543,10 @@ fn confirm_style(_theme: &iced::Theme) -> container::Style {
             a: 1.0,
         })),
         text_color: Some(ROW_FG_SELECTED),
+        border: Border {
+            radius: RADIUS_PANEL,
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
