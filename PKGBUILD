@@ -6,7 +6,7 @@ pkgdesc="为 niri 打造的全新高性能 Wayland 剪贴板历史 - Rust + SQLi
 arch=('x86_64' 'aarch64')
 url="https://github.com/lishengshang/niri-clip"
 license=('MIT')
-depends=('wl-clipboard' 'fzf')
+depends=('wl-clipboard' 'fzf>=0.71')
 makedepends=('cargo' 'git')
 optdepends=(
   'fuzzel: 后备选择器（无 fzf 环境自动回退）'

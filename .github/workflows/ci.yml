@@ -60,7 +60,8 @@ jobs:
           n=$("$B" list-raw | wc -l)
           echo "rows=$n"; [ "$n" -eq 3 ]
 
-          first=$("$B" list-raw | head -n1 | cut -f2)
+          # list-raw 为 4 列格式 num\t★\tid\tpreview，id 在第 3 列
+          first=$("$B" list-raw | head -n1 | cut -f3)
           "$B" pin "$first" >/dev/null 2>&1
           "$B" list-raw | head -n1 | grep -q '★'
 

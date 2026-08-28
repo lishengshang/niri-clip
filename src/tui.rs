@@ -9,6 +9,28 @@ fn has_bin(name: &str) -> bool {
     which::which(name).is_ok()
 }
 
+/// fzf 功能地板：`--no-input`/`show-input` 需 0.59，`--id-nth` 需 0.71。
+/// 低于地板时 fzf 参数解析直接失败，必须主动回退 fuzzel。
+const FZF_MIN: (u32, u32) = (0, 71);
+
+/// 解析 `fzf --version` 输出（如 "0.74.4 (c0252b6)"）为 (major, minor)
+fn parse_version(s: &str) -> Option<(u32, u32)> {
+    let head = s.split_whitespace().next()?;
+    let mut it = head.split('.');
+    let major: u32 = it.next()?.parse().ok()?;
+    let minor: u32 = it.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+fn fzf_version_ok() -> bool {
+    let Ok(out) = Command::new("fzf").arg("--version").output() else {
+        return false;
+    };
+    parse_version(&String::from_utf8_lossy(&out.stdout))
+        .map(|v| v >= FZF_MIN)
+        .unwrap_or(false)
+}
+
 /// 选择后端：auto 时优先 fzf（任意终端均可运行），缺失则 fuzzel。
 /// v0.4 修复：旧实现要求 `fzf && kitty` 同时存在才启用 fzf，导致
 /// foot/alacritty 等用户被误降到功能残缺的 fuzzel。kitty/chafa 仅
@@ -33,9 +55,67 @@ fn menu_clips(cfg: &Config) -> Result<Vec<store::Clip>> {
     store::list(cfg.max_items.min(store::TUI_LIMIT))
 }
 
+/// fzf 的全屏 UI 依赖控制终端（/dev/tty）。niri `spawn` 拉起的进程
+/// 没有控制终端，fzf 会直接报 "inappropriate ioctl for device" 退出。
+fn has_controlling_tty() -> bool {
+    std::fs::File::open("/dev/tty").is_ok()
+}
+
+/// 无 TTY 时用于承载 fzf 的终端模拟器及其透传参数前缀（按序探测）
+fn terminal_wrap() -> Option<(&'static str, &'static [&'static str])> {
+    for (term, prefix) in [
+        ("foot", &[] as &[&str]),
+        ("alacritty", &["-e"]),
+        ("kitty", &[]),
+        ("wezterm", &["start", "--"]),
+        ("ghostty", &["-e"]),
+    ] {
+        if has_bin(term) {
+            return Some((term, prefix));
+        }
+    }
+    None
+}
+
 pub fn run() -> Result<()> {
     let cfg = Config::load();
-    let be = backend(&cfg);
+    let mut be = backend(&cfg);
+    // fzf 版本地板：低于 0.71（--id-nth）时参数无法解析，主动回退 fuzzel
+    if be == "fzf" && !fzf_version_ok() {
+        if has_bin("fuzzel") {
+            eprintln!("[niri-clip tui] fzf 缺失或 <0.71（--id-nth 地板），回退 fuzzel");
+            be = "fuzzel";
+        } else {
+            let _ = notify_rust::Notification::new()
+                .summary("niri-clip")
+                .body("niri-clip 需要 fzf >= 0.71（或安装 fuzzel）")
+                .show();
+            anyhow::bail!("fzf missing or too old (<0.71) and fuzzel unavailable");
+        }
+    }
+    // 无控制终端（如 niri spawn 裸拉起）时 fzf 无法运行：
+    // 包一层终端模拟器重跑自己；没有终端则回退 fuzzel（无需 TTY）
+    if be == "fzf" && !has_controlling_tty() {
+        if let Some((term, prefix)) = terminal_wrap() {
+            let exe = std::env::current_exe()?;
+            Command::new(term)
+                .args(prefix)
+                .arg(exe)
+                .arg("tui")
+                .spawn()
+                .context("spawn terminal to host fzf")?;
+            return Ok(());
+        }
+        if has_bin("fuzzel") {
+            eprintln!("[niri-clip tui] 无可用终端承载 fzf，回退 fuzzel");
+            return run_fuzzel(&cfg);
+        }
+        let _ = notify_rust::Notification::new()
+            .summary("niri-clip")
+            .body("fzf 需要 TTY：请安装 foot/alacritty/kitty 等终端，或安装 fuzzel")
+            .show();
+        anyhow::bail!("no controlling tty and no terminal emulator / fuzzel available");
+    }
     eprintln!("[niri-clip tui] backend={} db={:?}", be, Config::db_path());
     match be {
         "fzf" => run_fzf(&cfg),
@@ -95,7 +175,13 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     let mut fzf = Command::new("fzf")
         .arg("--no-sort")
         .arg("--delimiter=\t")
+        // 匹配只作用于 preview 列：隐藏的序号/id 列不参与搜索，
+        // 否则查询 "1" 会命中所有序号/id 含 1 的行，数字搜索被污染
+        .arg("--nth=4..")
         .arg("--with-nth=1,2,4..")
+        // 快选/跳转/不退出复制：binds 必须显式挂载，
+        // 否则 Alt+1..9 等于没有绑定，快选静默失效
+        .arg(format!("--bind={}", binds.join(",")))
         .arg("--tabstop=1")
         .arg("--height=100%")
         .arg("--layout=reverse")
@@ -153,11 +239,16 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // wl-copy
     let mut wl = Command::new("wl-copy")
         .stdin(Stdio::piped())
+        // 关键：wl-copy 会 fork 守护进程常驻服务剪贴板，默认继承的
+        // 终端 fd 被守护进程一直占着，kitty 等 pty EOF 才关窗，
+        // 导致 TUI 退出后残留黑屏空窗口。重定向到 null 释放 pty。
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .context("wl-copy")?;
     wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
     wl.wait()?;
-    println!("pasted {}", id);
+    println!("copied {}", id);
     Ok(())
 }
 
@@ -215,7 +306,7 @@ pub fn list_raw() -> Result<()> {
     for (idx, c) in clips.iter().enumerate() {
         let num = idx + 1;
         let star = if c.pinned { "★" } else { " " };
-        let preview = crate::preview::preview_text(&c, cfg.preview_width);
+        let preview = crate::preview::preview_text(c, cfg.preview_width);
         if writeln!(out, "{}\t{}\t{}\t{}", num, star, c.id, preview).is_err() {
             break;
         }
@@ -248,4 +339,30 @@ pub fn preview_id(id: i64) -> Result<()> {
         println!("… ({} bytes)", c.text.len());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_version_handles_fzf_output() {
+        assert_eq!(parse_version("0.74.4 (c0252b6)"), Some((0, 74)));
+        assert_eq!(parse_version("0.71.0"), Some((0, 71)));
+        assert_eq!(parse_version("0.59.0 (deb5468)"), Some((0, 59)));
+    }
+
+    #[test]
+    fn parse_version_rejects_garbage() {
+        assert_eq!(parse_version("garbage"), None);
+        assert_eq!(parse_version(""), None);
+    }
+
+    #[test]
+    fn version_gate_matches_feature_floor() {
+        // --id-nth 地板 0.71：0.70 拦截，0.71/0.74 放行
+        assert!((0, 70) < FZF_MIN);
+        assert!((0, 71) >= FZF_MIN);
+        assert!((0, 74) >= FZF_MIN);
+    }
 }

@@ -29,7 +29,8 @@ $BIN list-raw | head -n 5
 
 # 3. 验证 pinned 置顶
 echo -e "\n[3] pin test"
-first_id=$($BIN list-raw | head -n1 | cut -f2)
+# list-raw 为 4 列格式 num\t★\tid\tpreview，id 在第 3 列
+first_id=$($BIN list-raw | head -n1 | cut -f3)
 echo "pin $first_id"
 $BIN pin "$first_id" >/dev/null
 echo "after pin head:"
