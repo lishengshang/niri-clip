@@ -1,38 +1,25 @@
-//! niri-clip 原生 layer-shell 前端（ADR-001：iced_exwlshell，按需进程形态）。
+//! niri-clip 原生前端（iced xdg 窗口，app-id = "niri-clip-gui"）。
 //!
-//! 语义与 fzf TUI 对齐（M5.3）：
-//! - 搜索过滤：fzf 风格子序列匹配（大小写归一，中文按字符）；有输入时数字
-//!   回落为查询字符，空查询时 1-9 快选复制
-//! - 导航：↑↓ 移动 ❯，Enter 复制并关闭，Ctrl-Y 连续复制（▶ 跟随）
-//! - 管理：Ctrl-P 固定/取消，Ctrl-X 删除（星标条目需二段确认，对齐路线图 1.5）
-//! - 底部预览窗格展示选中条目全文（截断）
+//! 架构修订（ADR-001 修订 1）：由 layer-shell 覆盖层改为常规 xdg 窗口——
+//! layer-shell 无法被 niri window-rule 约束，且 daemon 式事件循环缺 IME；
+//! xdg 窗口带来：
+//! - niri window-rule 全量生效（悬浮/位置/边框/阴影/透明度由用户 rule.kdl 约定）
+//! - winit 原生 IME（zwp_text_input）→ 中文搜索可用
+//! - 图片预览（iced image widget 直接渲染 images/{id}.bin）
 //!
-//! 已知限制（ADR-001 附录）：
-//! - IME：iced_exwlshell 的 daemon 路径未接 zwp_text_input（上游缺口，
-//!   multi_window 运行器私有不可达）。中文搜索场景由默认 fzf TUI 后端覆盖；
-//!   GUI 搜索走英文直打或 Ctrl-V 粘贴（剪贴板管理器的自然交互）
-//! - 阻塞：复制/固定/删除全部后台线程化（Task::perform + worker），
-//!   UI 线程零阻塞——同步 wait 是偶发卡死根因
-//!
+//! 渲染：tiny-skia 纯软件（NVIDIA wgpu 冻结 / GL 启动失败的规避，见 #360）。
 //! 分层约定：业务全部在 core（store::copy_to_clipboard / delete / toggle_pin /
 //! current 指针），本 crate 只做渲染与输入分发。
 
-use iced::widget::{column, container, scrollable, text};
+use iced::widget::{column, container, image, scrollable, text, text_input};
 use iced::{keyboard, Background, Color, Element, Length, Subscription, Task};
-use iced_exwlshell::reexport::{Anchor, KeyboardInteractivity};
-use iced_exwlshell::settings::{LayerShellSettings, Settings};
-use iced_exwlshell::{daemon, to_exwlshell_message};
 use niri_clip_core::{config, preview, store};
-use wayland_client::Connection;
 
-// 注意顺序：to_exwlshell_message 必须在 derive 之前（外层属性宏先增广枚举，
-// derive(Debug/Clone) 才能覆盖宏注入的 shell 变体）
-#[to_exwlshell_message]
 #[derive(Debug, Clone)]
 enum Message {
-    /// Ctrl-V：读取系统剪贴板追加进查询
-    Paste(String),
-    /// 全局键盘路由：具体语义在 update 里结合状态分发
+    /// 搜索框内容变化（widget 持焦点自管键入，winit 原生 IME）
+    Query(String),
+    /// 全局键盘路由：仅处理导航/动作键，普通字符交给 widget
     Key(keyboard::Key, keyboard::Modifiers),
     /// 复制当前选中条目；Enter 复制后关闭窗口，Ctrl-Y 连续复制不退出
     Copy { exit: bool },
@@ -40,8 +27,6 @@ enum Message {
     CopyFinished { exit: bool, ok: bool },
     /// 后台 pin/delete 完成，带回重拉后的列表（None = worker 异常，放弃）
     ListReloaded(Option<Vec<store::Clip>>),
-    /// Esc 关闭窗口
-    Exit,
 }
 
 /// 把阻塞任务丢到后台线程执行（iced 默认执行器为 thread-pool，
@@ -68,6 +53,7 @@ where
 }
 
 struct App {
+    search_id: iced::widget::Id,
     clips: Vec<store::Clip>,
     query: String,
     selected: usize,
@@ -81,6 +67,7 @@ impl App {
         let cfg = config::Config::load();
         let clips = store::list(Self::load_limit()).unwrap_or_default();
         Self {
+            search_id: iced::widget::Id::unique(),
             clips,
             query: String::new(),
             selected: 0,
@@ -108,14 +95,15 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Paste(s) => {
-                self.query.push_str(&s);
+            Message::Query(q) => {
+                self.query = q;
                 self.selected = 0;
+                self.confirm_delete = false;
             }
             Message::Key(key, modifiers) => return self.on_key(key, modifiers),
             Message::Copy { exit } => {
                 // 复制链路（wl-copy fork/wait + sqlite 读）全部后台化，
-                // UI 线程零阻塞——偶发卡死的根因即此处的同步 wait
+                // UI 线程零阻塞——同步 wait 是卡死根因
                 let target = self.filtered().get(self.selected).map(|c| c.id);
                 if let Some(id) = target {
                     return run_bg(
@@ -147,24 +135,16 @@ impl App {
                 }
             }
             Message::ListReloaded(None) => {}
-            Message::Exit => std::process::exit(0),
-            _ => {}
         }
         Task::none()
     }
 
     fn on_key(&mut self, key: keyboard::Key, modifiers: keyboard::Modifiers) -> Task<Message> {
-        self.log_key(&key, &modifiers);
-        // 文本输入由全局键盘处理器直接接管（fzf 模式），不依赖 text_input
-        // widget 焦点——operation::focus 在 exwlshell 下不可靠（真机失效），
-        // widget 只负责展示 self.query
+        // 仅导航/动作键；普通字符、Backspace、Space、IME 提交由持焦点的
+        // text_input 自行处理（winit 原生 IME，中文可用）
         match key {
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => self.move_selection(-1),
             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => self.move_selection(1),
-            keyboard::Key::Named(keyboard::key::Named::Backspace) => {
-                self.query.pop();
-            }
-            keyboard::Key::Named(keyboard::key::Named::Space) => self.query.push(' '),
             keyboard::Key::Named(keyboard::key::Named::Escape) => {
                 // fzf 语义：有输入/确认时先取消，空查询才退出
                 if !self.query.is_empty() || self.confirm_delete {
@@ -199,10 +179,6 @@ impl App {
                     },
                 );
             }
-            keyboard::Key::Character(c) if modifiers.control() && c == "v" => {
-                // 粘贴搜索（剪贴板管理器的自然交互）：读系统剪贴板追加进查询
-                return iced::clipboard::read().map(|s| Message::Paste(s.unwrap_or_default()));
-            }
             keyboard::Key::Character(c) if modifiers.control() && c == "x" => {
                 return self.delete_selected();
             }
@@ -214,39 +190,16 @@ impl App {
                     && c.as_str() <= "9" =>
             {
                 // 空查询时 1-9 快选：定位到过滤列表第 n 行并复制关闭；
-                // 有输入时数字回落为查询字符（下方通用分支处理）
+                // 有输入时数字回落为查询字符（text_input 自行处理）
                 let n: usize = c.parse().unwrap_or(0);
                 if n >= 1 && n <= self.filtered().len() {
                     self.selected = n - 1;
                     return self.update(Message::Copy { exit: true });
                 }
             }
-            keyboard::Key::Character(c)
-                if !modifiers.control() && !modifiers.alt() && !modifiers.logo() =>
-            {
-                // 普通可打印字符直接进查询（widget 不持有焦点也能输入）
-                for ch in c.chars() {
-                    if !ch.is_control() {
-                        self.query.push(ch);
-                    }
-                }
-            }
             _ => {}
         }
         Task::none()
-    }
-
-    /// 临时诊断日志：真机按键问题定位用（~/.local/state/niri-clip/gui.log）
-    fn log_key(&self, key: &keyboard::Key, modifiers: &keyboard::Modifiers) {
-        use std::io::Write;
-        let path = config::Config::state_dir().join("gui.log");
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(f, "key={key:?} mods={modifiers:?}");
-        }
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -284,13 +237,12 @@ impl App {
         )
     }
 
-    fn view(&self, _id: iced::window::Id) -> Element<'_, Message> {
+    fn view(&self) -> Element<'_, Message> {
         let cur = store::current_hash();
         let filtered = self.filtered();
 
-        // 视觉对齐 fzf TUI：header 提示行 → "剪贴板> " 提示符 → 行列表 → 底部预览
+        // 视觉对齐 fzf TUI：header 提示行 → 搜索框 → 行列表 → 底部预览
         let header = "1-9快选 · Enter复制 · Ctrl-Y连复 · Ctrl-P固定 · Ctrl-X删除 · Esc清除/退出";
-        let prompt = format!("剪贴板> {}▏", self.query);
 
         let rows = filtered.iter().enumerate().map(|(idx, clip)| {
             let selected = idx == self.selected;
@@ -331,8 +283,11 @@ impl App {
                     .padding([4, 8]),
             )
             .push(
-                container(text(prompt).size(14).color(ACCENT))
-                    .width(Length::Fill)
+                text_input("搜索（中文 IME / Ctrl-V 粘贴，子序列匹配）…", &self.query)
+                    .id(self.search_id.clone())
+                    .on_input(Message::Query)
+                    .on_paste(Message::Query)
+                    .size(14)
                     .padding([6, 8]),
             )
             .push(
@@ -350,13 +305,47 @@ impl App {
             );
         }
 
-        // 底部预览窗格：选中条目全文（多行截断），与 TUI 的 preview-window 对应
-        col = col.push(
-            container(text(self.preview_selected(&filtered)).size(12))
+        // 底部预览窗格：文本多行截断；图片条目直接渲染（iced image widget）
+        let Some(clip) = filtered.get(self.selected) else {
+            return container(col)
                 .width(Length::Fill)
-                .padding([6, 8])
-                .style(preview_style),
-        );
+                .height(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(BG)),
+                    ..Default::default()
+                })
+                .into();
+        };
+        if clip.mime.starts_with("image/") {
+            match &clip.image_path {
+                Some(p) if std::path::Path::new(p).exists() => {
+                    col = col.push(
+                        container(
+                            image(iced::widget::image::Handle::from_path(p))
+                                .height(Length::Fixed(140.0)),
+                        )
+                        .width(Length::Fill)
+                        .padding([6, 8])
+                        .style(preview_style),
+                    );
+                }
+                _ => {
+                    col = col.push(
+                        container(text(format!("[image {}] 数据文件缺失", clip.mime)).size(12))
+                            .width(Length::Fill)
+                            .padding([6, 8])
+                            .style(preview_style),
+                    );
+                }
+            }
+        } else {
+            col = col.push(
+                container(text(self.preview_text(clip)).size(12))
+                    .width(Length::Fill)
+                    .padding([6, 8])
+                    .style(preview_style),
+            );
+        }
 
         container(col)
             .width(Length::Fill)
@@ -368,15 +357,8 @@ impl App {
             .into()
     }
 
-    /// 底部预览：选中条目全文多行截断（图片条目给数据文件提示）
-    fn preview_selected(&self, filtered: &[&store::Clip]) -> String {
-        let Some(clip) = filtered.get(self.selected) else {
-            return String::from("(空)");
-        };
-        if clip.mime.starts_with("image/") {
-            let path = clip.image_path.as_deref().unwrap_or("(未记录数据文件)");
-            return format!("[image {}] {}", clip.mime, path);
-        }
+    /// 底部预览：选中条目全文多行截断
+    fn preview_text(&self, clip: &store::Clip) -> String {
         let mut out = String::new();
         for line in clip.text.lines().take(8) {
             let l: String = line.chars().take(160).collect();
@@ -463,26 +445,28 @@ fn confirm_style(_theme: &iced::Theme) -> container::Style {
     }
 }
 
-fn main() -> Result<(), iced_exwlshell::Error> {
-    let connection = Connection::connect_to_env().expect("no wayland connection");
-    let with_connection = connection.clone();
-    daemon(
-        || (App::new(), Task::none()),
-        || String::from("niri-clip"),
+fn main() -> iced::Result {
+    // 常规 xdg 窗口：受 niri window-rule 约束（悬浮/位置/边框由用户
+    // rule.kdl 约定，app-id = "niri-clip-gui"），winit 原生 IME
+    iced::application(
+        || {
+            let app = App::new();
+            // 搜索框自动聚焦：键入即过滤（winit 焦点可靠）
+            let focus = iced::widget::operation::focus(app.search_id.clone());
+            (app, focus)
+        },
         App::update,
         App::view,
     )
+    .title("niri-clip")
     .subscription(App::subscription)
-    .settings(Settings {
-        layer_settings: LayerShellSettings {
-            // 顶部居中浮层：仅锚定 Top，水平方向不锚定时合成器自动居中；
-            // 通栏（Top|Left|Right）会让窗口独占上半屏，已废弃
-            anchor: Anchor::Top,
-            size: Some((760, 420)),
-            keyboard_interactivity: KeyboardInteractivity::Exclusive,
+    .window(iced::window::Settings {
+        size: iced::Size::new(760.0, 420.0),
+        resizable: true,
+        platform_specific: iced::window::settings::PlatformSpecific {
+            application_id: String::from("niri-clip-gui"),
             ..Default::default()
         },
-        with_connection: Some(with_connection.into()),
         ..Default::default()
     })
     .run()

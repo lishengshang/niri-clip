@@ -1,6 +1,6 @@
 [package]
 name = "niri-clip-gui"
-description = "niri-clip 原生 layer-shell 前端（iced_exwlshell）"
+description = "niri-clip 原生前端（iced xdg 窗口，受 niri window-rule 约束）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,5 +11,3 @@ repository.workspace = true
 niri-clip-core.workspace = true
 anyhow.workspace = true
 iced.workspace = true
-iced_exwlshell.workspace = true
-wayland-client.workspace = true
