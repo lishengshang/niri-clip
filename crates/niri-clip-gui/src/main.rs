@@ -30,8 +30,10 @@ use wayland_client::Connection;
 #[to_exwlshell_message]
 #[derive(Debug, Clone)]
 enum Message {
-    /// 搜索框内容变化
+    /// 搜索框内容变化（全局键盘处理器直接维护）
     Query(String),
+    /// Ctrl-V：读取系统剪贴板追加进查询
+    Paste(String),
     /// 全局键盘路由：具体语义在 update 里结合状态分发
     Key(keyboard::Key, keyboard::Modifiers),
     /// 复制当前选中条目；Enter 复制后关闭窗口，Ctrl-Y 连续复制不退出
@@ -68,7 +70,6 @@ where
 }
 
 struct App {
-    search_id: iced::widget::Id,
     clips: Vec<store::Clip>,
     query: String,
     selected: usize,
@@ -82,7 +83,6 @@ impl App {
         let cfg = config::Config::load();
         let clips = store::list(Self::load_limit()).unwrap_or_default();
         Self {
-            search_id: iced::widget::Id::unique(),
             clips,
             query: String::new(),
             selected: 0,
@@ -114,6 +114,10 @@ impl App {
                 self.query = q;
                 self.selected = 0;
                 self.confirm_delete = false;
+            }
+            Message::Paste(s) => {
+                self.query.push_str(&s);
+                self.selected = 0;
             }
             Message::Key(key, modifiers) => return self.on_key(key, modifiers),
             Message::Copy { exit } => {
@@ -157,9 +161,17 @@ impl App {
     }
 
     fn on_key(&mut self, key: keyboard::Key, modifiers: keyboard::Modifiers) -> Task<Message> {
+        self.log_key(&key, &modifiers);
+        // 文本输入由全局键盘处理器直接接管（fzf 模式），不依赖 text_input
+        // widget 焦点——operation::focus 在 exwlshell 下不可靠（真机失效），
+        // widget 只负责展示 self.query
         match key {
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => self.move_selection(-1),
             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => self.move_selection(1),
+            keyboard::Key::Named(keyboard::key::Named::Backspace) => {
+                self.query.pop();
+            }
+            keyboard::Key::Named(keyboard::key::Named::Space) => self.query.push(' '),
             keyboard::Key::Named(keyboard::key::Named::Escape) => {
                 // fzf 语义：有输入/确认时先取消，空查询才退出
                 if !self.query.is_empty() || self.confirm_delete {
@@ -194,6 +206,10 @@ impl App {
                     },
                 );
             }
+            keyboard::Key::Character(c) if modifiers.control() && c == "v" => {
+                // 粘贴搜索（剪贴板管理器的自然交互）：读系统剪贴板追加进查询
+                return iced::clipboard::read().map(|s| Message::Paste(s.unwrap_or_default()));
+            }
             keyboard::Key::Character(c) if modifiers.control() && c == "x" => {
                 return self.delete_selected();
             }
@@ -205,16 +221,35 @@ impl App {
                     && c.as_str() <= "9" =>
             {
                 // 空查询时 1-9 快选：定位到过滤列表第 n 行并复制关闭；
-                // 有输入时数字回落为查询字符（text_input 自行处理）
+                // 有输入时数字回落为查询字符（下方通用分支处理）
                 let n: usize = c.parse().unwrap_or(0);
                 if n >= 1 && n <= self.filtered().len() {
                     self.selected = n - 1;
                     return self.update(Message::Copy { exit: true });
                 }
             }
+            keyboard::Key::Character(c)
+                if !modifiers.control() && !modifiers.alt() && !modifiers.logo() =>
+            {
+                // 普通可打印字符直接进查询（widget 不持有焦点也能输入）
+                for ch in c.chars() {
+                    if !ch.is_control() {
+                        self.query.push(ch);
+                    }
+                }
+            }
             _ => {}
         }
         Task::none()
+    }
+
+    /// 临时诊断日志：真机按键问题定位用（~/.local/state/niri-clip/gui.log）
+    fn log_key(&self, key: &keyboard::Key, modifiers: &keyboard::Modifiers) {
+        use std::io::Write;
+        let path = config::Config::state_dir().join("gui.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "key={key:?} mods={modifiers:?}");
+        }
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -257,10 +292,8 @@ impl App {
         let filtered = self.filtered();
 
         let search = text_input("搜索（英文直打 / Ctrl-V 粘贴，子序列匹配）…", &self.query)
-            .id(self.search_id.clone())
-            .on_input(Message::Query)
-            .on_paste(Message::Query)
-            .on_submit(Message::Copy { exit: true })
+            // 纯展示：键入由全局键盘处理器接管（不依赖 widget 焦点），
+            // 挂 on_input 会在 widget 意外持焦时造成双倍输入
             .size(14)
             .padding(6);
 
@@ -397,13 +430,7 @@ fn confirm_style(theme: &iced::Theme) -> container::Style {
 fn main() -> Result<(), iced_exwlshell::Error> {
     let connection = Connection::connect_to_env().expect("no wayland connection");
     let with_connection = connection.clone();
-    daemon(
-        || {
-            let app = App::new();
-            // 搜索框自动聚焦：键入即过滤
-            let focus = iced::widget::operation::focus(app.search_id.clone());
-            (app, focus)
-        },
+    daemon(|| (App::new(), Task::none()),
         || String::from("niri-clip"),
         App::update,
         App::view,
