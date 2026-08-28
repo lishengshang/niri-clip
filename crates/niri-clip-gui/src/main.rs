@@ -7,6 +7,13 @@
 //! - 管理：Ctrl-P 固定/取消，Ctrl-X 删除（星标条目需二段确认，对齐路线图 1.5）
 //! - 底部预览窗格展示选中条目全文（截断）
 //!
+//! 已知限制（ADR-001 附录）：
+//! - IME：iced_exwlshell 的 daemon 路径未接 zwp_text_input（上游缺口，
+//!   multi_window 运行器私有不可达）。中文搜索场景由默认 fzf TUI 后端覆盖；
+//!   GUI 搜索走英文直打或 Ctrl-V 粘贴（剪贴板管理器的自然交互）
+//! - 阻塞：复制/固定/删除全部后台线程化（Task::perform + worker），
+//!   UI 线程零阻塞——同步 wait 是偶发卡死根因
+//!
 //! 分层约定：业务全部在 core（store::copy_to_clipboard / delete / toggle_pin /
 //! current 指针），本 crate 只做渲染与输入分发。
 
@@ -29,8 +36,35 @@ enum Message {
     Key(keyboard::Key, keyboard::Modifiers),
     /// 复制当前选中条目；Enter 复制后关闭窗口，Ctrl-Y 连续复制不退出
     Copy { exit: bool },
+    /// 后台复制完成
+    CopyFinished { exit: bool, ok: bool },
+    /// 后台 pin/delete 完成，带回重拉后的列表（None = worker 异常，放弃）
+    ListReloaded(Option<Vec<store::Clip>>),
     /// Esc 关闭窗口
     Exit,
+}
+
+/// 把阻塞任务丢到后台线程执行（iced 默认执行器为 thread-pool，
+/// Task::perform 的 future 里阻塞仅占一个 worker，UI 线程不受影响）。
+/// worker panic 时以 None 回传，UI 放弃本次结果不卡死。
+fn run_bg<T, F>(f: F, wrap: impl Fn(T) -> Message + Send + 'static) -> Task<Message>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    Task::perform(
+        async move {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(f());
+            });
+            rx.recv().ok()
+        },
+        move |t| match t {
+            Some(v) => wrap(v),
+            None => Message::ListReloaded(None),
+        },
+    )
 }
 
 struct App {
@@ -46,7 +80,7 @@ struct App {
 impl App {
     fn new() -> Self {
         let cfg = config::Config::load();
-        let clips = store::list(cfg.max_items.min(store::TUI_LIMIT)).unwrap_or_default();
+        let clips = store::list(Self::load_limit()).unwrap_or_default();
         Self {
             search_id: iced::widget::Id::unique(),
             clips,
@@ -57,17 +91,9 @@ impl App {
         }
     }
 
-    fn menu_limit(&self) -> usize {
+    fn load_limit() -> usize {
         let cfg = config::Config::load();
         cfg.max_items.min(store::TUI_LIMIT)
-    }
-
-    /// 重新拉取列表（保留选中位置，越界时夹到末尾）
-    fn reload(&mut self) {
-        self.clips = store::list(self.menu_limit()).unwrap_or_default();
-        if self.selected >= self.clips.len() {
-            self.selected = self.clips.len().saturating_sub(1);
-        }
     }
 
     /// 过滤后的视图：fzf 风格子序列匹配（大小写归一，中文按字符）
@@ -89,22 +115,41 @@ impl App {
                 self.selected = 0;
                 self.confirm_delete = false;
             }
-            Message::Key(key, modifiers) => self.on_key(key, modifiers),
+            Message::Key(key, modifiers) => return self.on_key(key, modifiers),
             Message::Copy { exit } => {
+                // 复制链路（wl-copy fork/wait + sqlite 读）全部后台化，
+                // UI 线程零阻塞——偶发卡死的根因即此处的同步 wait
                 let target = self.filtered().get(self.selected).map(|c| c.id);
                 if let Some(id) = target {
-                    if let Err(e) = store::copy_to_clipboard(id) {
-                        eprintln!("[niri-clip gui] copy failed: {e:#}");
-                    }
+                    return run_bg(
+                        move || store::copy_to_clipboard(id).is_ok(),
+                        move |ok| Message::CopyFinished { exit, ok },
+                    );
+                }
+            }
+            Message::CopyFinished { exit, ok } => {
+                if !ok {
+                    eprintln!("[niri-clip gui] copy failed");
                 }
                 if exit {
-                    // wl-copy 已 fork 守护进程持有数据，进程退出不丢内容
+                    // 后台复制已完成，wl-copy 守护进程持有数据，退出安全
                     std::process::exit(0);
                 }
                 // Ctrl-Y 连续复制：重拉列表，▶ 已随 copy 刷新到刚复制的条目
                 self.query.clear();
-                self.reload();
                 self.selected = 0;
+                return run_bg(
+                    move || store::list(Self::load_limit()).ok(),
+                    Message::ListReloaded,
+                );
+            }
+            Message::ListReloaded(clips) => {
+                if let Some(clips) = clips {
+                    self.clips = clips;
+                    if self.selected >= self.clips.len() {
+                        self.selected = self.clips.len().saturating_sub(1);
+                    }
+                }
             }
             Message::Exit => std::process::exit(0),
             _ => {}
@@ -112,12 +157,12 @@ impl App {
         Task::none()
     }
 
-    fn on_key(&mut self, key: keyboard::Key, modifiers: keyboard::Modifiers) {
+    fn on_key(&mut self, key: keyboard::Key, modifiers: keyboard::Modifiers) -> Task<Message> {
         match key {
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => self.move_selection(-1),
             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => self.move_selection(1),
             keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                // fzf 语义：有输入时 Esc 先清空查询，空查询才退出
+                // fzf 语义：有输入/确认时先取消，空查询才退出
                 if !self.query.is_empty() || self.confirm_delete {
                     self.query.clear();
                     self.confirm_delete = false;
@@ -126,22 +171,32 @@ impl App {
                 }
             }
             keyboard::Key::Named(keyboard::key::Named::Enter) => {
-                let _ = self.update(Message::Copy { exit: true });
+                return self.update(Message::Copy { exit: true });
             }
             keyboard::Key::Character(c) if modifiers.control() && c == "y" => {
-                let _ = self.update(Message::Copy { exit: false });
+                return self.update(Message::Copy { exit: false });
             }
             keyboard::Key::Character(c) if modifiers.control() && c == "p" => {
-                if let Some(clip) = self.filtered().get(self.selected) {
-                    let id = clip.id;
-                    if let Err(e) = store::toggle_pin(id) {
-                        eprintln!("[niri-clip gui] pin failed: {e:#}");
-                    }
-                    self.reload();
-                }
+                // 后台 pin + 重拉列表，UI 线程零阻塞
+                let Some(clip) = self.filtered().get(self.selected).cloned() else {
+                    return Task::none();
+                };
+                let id = clip.id;
+                return run_bg(
+                    move || {
+                        let ok = store::toggle_pin(id).is_ok();
+                        (ok, store::list(App::load_limit()).ok())
+                    },
+                    |(ok, clips)| {
+                        if !ok {
+                            eprintln!("[niri-clip gui] pin failed");
+                        }
+                        Message::ListReloaded(clips)
+                    },
+                );
             }
             keyboard::Key::Character(c) if modifiers.control() && c == "x" => {
-                self.delete_selected();
+                return self.delete_selected();
             }
             keyboard::Key::Character(c)
                 if self.query.is_empty()
@@ -155,11 +210,12 @@ impl App {
                 let n: usize = c.parse().unwrap_or(0);
                 if n >= 1 && n <= self.filtered().len() {
                     self.selected = n - 1;
-                    let _ = self.update(Message::Copy { exit: true });
+                    return self.update(Message::Copy { exit: true });
                 }
             }
             _ => {}
         }
+        Task::none()
     }
 
     fn move_selection(&mut self, delta: i32) {
@@ -170,30 +226,41 @@ impl App {
         }
     }
 
-    fn delete_selected(&mut self) {
+    fn delete_selected(&mut self) -> Task<Message> {
         let Some(clip) = self.filtered().get(self.selected).cloned() else {
-            return;
+            return Task::none();
         };
         // 星标条目二段确认：第一次 Ctrl-X 仅挂起确认，再按才执行
         if clip.pinned && !self.confirm_delete {
             self.confirm_delete = true;
-            return;
+            return Task::none();
         }
-        if let Err(e) = store::delete(clip.id) {
-            eprintln!("[niri-clip gui] delete failed: {e:#}");
-        }
+        let id = clip.id;
+        // 后台删除 + 重拉列表，UI 线程零阻塞（sqlite 写锁最长 busy_timeout 5s）
         self.confirm_delete = false;
         self.query.clear();
-        self.reload();
+        run_bg(
+            move || {
+                let ok = store::delete(id).is_ok();
+                (ok, store::list(App::load_limit()).ok())
+            },
+            |(ok, clips)| {
+                if !ok {
+                    eprintln!("[niri-clip gui] delete failed");
+                }
+                Message::ListReloaded(clips)
+            },
+        )
     }
 
     fn view(&self, _id: iced::window::Id) -> Element<'_, Message> {
         let cur = store::current_hash();
         let filtered = self.filtered();
 
-        let search = text_input("搜索（子序列匹配）…", &self.query)
+        let search = text_input("搜索（英文直打 / Ctrl-V 粘贴，子序列匹配）…", &self.query)
             .id(self.search_id.clone())
             .on_input(Message::Query)
+            .on_paste(Message::Query)
             .on_submit(Message::Copy { exit: true })
             .size(14)
             .padding(6);
@@ -241,7 +308,7 @@ impl App {
 
         // 底部预览窗格：选中条目全文（多行截断）
         col = col.push(
-            container(text(self.preview_selected()).size(12))
+            container(text(self.preview_selected(&filtered)).size(12))
                 .width(Length::Fill)
                 .padding([6, 8])
                 .style(preview_style),
@@ -251,8 +318,7 @@ impl App {
     }
 
     /// 底部预览：选中条目全文多行截断（图片条目给数据文件提示）
-    fn preview_selected(&self) -> String {
-        let filtered = self.filtered();
+    fn preview_selected(&self, filtered: &[&store::Clip]) -> String {
         let Some(clip) = filtered.get(self.selected) else {
             return String::from("(空)");
         };
@@ -346,9 +412,10 @@ fn main() -> Result<(), iced_exwlshell::Error> {
     .subscription(App::subscription)
     .settings(Settings {
         layer_settings: LayerShellSettings {
-            // fuzzel 风格：顶部横向铺开、高 420 的浮层，独占键盘
-            anchor: Anchor::Top | Anchor::Left | Anchor::Right,
-            size: Some((0, 420)),
+            // 顶部居中浮层：仅锚定 Top，水平方向不锚定时合成器自动居中；
+            // 通栏（Top|Left|Right）会让窗口独占上半屏，已废弃
+            anchor: Anchor::Top,
+            size: Some((760, 420)),
             keyboard_interactivity: KeyboardInteractivity::Exclusive,
             ..Default::default()
         },
