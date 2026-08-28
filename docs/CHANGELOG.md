@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **当前项置顶与 ▶ 标识**：新概念"当前项"= 最后一次成功捕获的内容 ≈
+  `Ctrl+V` 会粘出的东西。`store` 捕获成功（含去重刷 ts 路径）即刷新
+  `state/current` 指针；`list()` 排序把当前项固定在第 1 行（星标之上）；
+  fzf/fuzzel 行首打 `▶`，与 `★` 可叠加（`▶★`）。`copy` 子命令与 TUI
+  Enter/Ctrl-Y/fuzzel 选中路径同步刷新指针，会话内 reload 的 ▶ 跟随移动。
+  当前内容被 ignore_regex 过滤或超限时 header 提示"当前剪贴板不在历史中"。
+  `migrate` 导入旧历史前保存、结束后还原指针，避免 ▶ 误指
+- **单条体积限流（路线图 P1-2）**：新配置 `max_clip_bytes`（默认 1 MiB）与
+  `max_image_bytes`（默认 10 MiB）。store 层守卫覆盖所有入库调用方
+  （daemon 三个捕获路径 / migrate）超限拒绝并桌面通知；
+  捕获读取改 `Read::take(max+1)` 有界读，读取过程内存上限即限额，
+  杜绝 `read_to_end` 对超大载荷的全内存直通
+- native 回退轮询对超限内容以内容 hash 短路，避免每 500ms 重复通知
+- 单元测试 4 例：文本/图片在限额边界的入库与拒绝行为、
+  当前项指针跟踪/置顶/超限过滤不移动指针
+
 ## v0.4.1 - 2026-08-27
 
 > 分支 `fix/issue-2-daemon-reliable-capture`（堆叠于 PR #1 分支之上）。

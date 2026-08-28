@@ -33,15 +33,38 @@ fn watch_shell_command(exe: &std::path::Path, timeout_secs: u64) -> String {
     format!("exec timeout {timeout_secs}s {} store", exe.display())
 }
 
+/// 超限提示：stderr 恒写；桌面通知尽力而为（无通知服务时静默）
+fn notify_oversize(msg: &str) {
+    eprintln!("[niri-clip store] {msg}，已忽略");
+    let _ = notify_rust::Notification::new()
+        .summary("niri-clip")
+        .body(msg)
+        .show();
+}
+
 /// `niri-clip store` : 入库一段剪贴板载荷。
 ///
 /// * stdin 有数据（主模式：wl-paste 管道直灌）→ 直接按文本处理，
 ///   不再触碰本进程内的 Wayland 连接，热点路径零阻塞面；
 /// * stdin 为空（历史兼容：直接手动执行 store）→ 保持旧的
 ///   get_contents(Text) 探测，并在开启图片预览时尝试图片 MIME。
+///
+/// v0.5 限流：读取用 `Read::take(max+1)` 划界——读满 max+1 即判定超限
+/// 整体拒绝，未超限时 take 内已到 EOF 载荷完整；杜绝超大载荷全内存直通
+/// （读取过程内存上限 = max_clip_bytes + 1 字节）。
 pub fn store_from_stdin() -> Result<()> {
+    let cfg = Config::load();
+    let cap = cfg.max_clip_bytes as u64 + 1;
     let mut buf = Vec::new();
-    std::io::stdin().read_to_end(&mut buf)?;
+    std::io::stdin().lock().take(cap).read_to_end(&mut buf)?;
+
+    if buf.len() as u64 > cfg.max_clip_bytes as u64 {
+        notify_oversize(&format!(
+            "条目超过 max_clip_bytes={} 字节",
+            cfg.max_clip_bytes
+        ));
+        return Ok(());
+    }
 
     // 非空载荷：优先视作 UTF-8 文本
     if !buf.is_empty() {
@@ -79,10 +102,16 @@ fn ingest_text(text: &str) -> Result<bool> {
 /// 无 stdin 数据时的系统剪贴板探测：先文本，后图片（受开关约束）。
 /// 所有失败在此收敛为“本次未捕获”，由调用方决定是否报错。
 fn try_system_capture() -> Result<bool> {
+    let max = Config::load().max_clip_bytes;
+    let cap = max as u64 + 1;
     match get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text) {
-        Ok((mut pipe, _)) => {
+        Ok((pipe, _)) => {
             let mut v = Vec::new();
-            if pipe.read_to_end(&mut v).is_ok() {
+            if pipe.take(cap).read_to_end(&mut v).is_ok() {
+                if v.len() as u64 > max as u64 {
+                    notify_oversize(&format!("条目超过 max_clip_bytes={max} 字节"));
+                    return Ok(false);
+                }
                 let text = String::from_utf8(v)
                     .map_err(|_| anyhow!("clipboard payload is not valid utf-8"))?;
                 let trimmed = text.trim();
@@ -101,17 +130,24 @@ fn try_system_capture() -> Result<bool> {
 }
 
 fn capture_image_if_enabled() -> Result<bool> {
-    if !Config::load().enable_image_preview {
+    let cfg = Config::load();
+    if !cfg.enable_image_preview {
         return Ok(false);
     }
+    let max = cfg.max_image_bytes;
+    let cap = max as u64 + 1;
     for mime in ["image/png", "image/jpeg", "image/webp"] {
-        if let Ok((mut pipe, _)) = get_contents(
+        if let Ok((pipe, _)) = get_contents(
             ClipboardType::Regular,
             Seat::Unspecified,
             MimeType::Specific(mime),
         ) {
             let mut v = Vec::new();
-            if pipe.read_to_end(&mut v).is_ok() && !v.is_empty() {
+            if pipe.take(cap).read_to_end(&mut v).is_ok() && !v.is_empty() {
+                if v.len() as u64 > max as u64 {
+                    notify_oversize(&format!("图片超过 max_image_bytes={max} 字节"));
+                    return Ok(false);
+                }
                 match store::insert_image(mime, &v) {
                     Ok(Some(img)) => {
                         eprintln!(
@@ -167,12 +203,28 @@ async fn run_native_polling() -> Result<()> {
     println!(
         "[niri-clip daemon] FALLBACK native polling (500ms) — recommend installing wl-clipboard"
     );
+    let max = Config::load().max_clip_bytes;
+    let cap = max as u64 + 1;
     let mut last_hash: Option<String> = None;
     loop {
         match get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text) {
-            Ok((mut pipe, _)) => {
+            Ok((pipe, _)) => {
                 let mut v = Vec::new();
-                if pipe.read_to_end(&mut v).is_ok() {
+                if pipe.take(cap).read_to_end(&mut v).is_ok() {
+                    if v.len() as u64 > max as u64 {
+                        // 超限内容会持续占据剪贴板：以内容前缀 hash 短路，
+                        // 避免每 500ms 重复通知
+                        let key = format!(
+                            "oversize:{}",
+                            store::hash_text(&format!("{max}:{}", v.len()))
+                        );
+                        if last_hash.as_ref() != Some(&key) {
+                            last_hash = Some(key);
+                            notify_oversize(&format!("条目超过 max_clip_bytes={max} 字节"));
+                        }
+                        sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
                     if let Ok(text) = String::from_utf8(v) {
                         let trimmed = text.trim();
                         if !trimmed.is_empty() {
@@ -253,8 +305,8 @@ pub async fn run() -> Result<()> {
     let _lock_file = acquire_single_instance()?;
     let cfg = Config::load();
     println!(
-        "[niri-clip daemon] max_items={} tui={} image_preview={}",
-        cfg.max_items, cfg.tui_backend, cfg.enable_image_preview
+        "[niri-clip daemon] max_items={} tui={} image_preview={} max_clip_bytes={} max_image_bytes={}",
+        cfg.max_items, cfg.tui_backend, cfg.enable_image_preview, cfg.max_clip_bytes, cfg.max_image_bytes
     );
     println!("[niri-clip daemon] db: {}", Config::db_path().display());
 

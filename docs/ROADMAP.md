@@ -97,7 +97,8 @@
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
 | 1.1 | PRIMARY selection 支持 | `ClipboardType::Primary` 捕获与粘贴；区分 mouse-paste 语义 | 选中即捕获，中键粘贴可选历史 |
-| 1.2 | `max_clip_bytes` 上限 | **P0**：daemon/store 入库前限流，超限拒绝 + 通知提示，防 DB 膨胀与 `read_to_end` 全内存直通；图片同理 | 单元测试覆盖边界值；10MB 条目不抬升常驻内存 |
+| 1.2 | ✅ `max_clip_bytes` 上限 | **P0**：daemon/store 入库前限流，超限拒绝 + 通知提示，防 DB 膨胀与 `read_to_end` 全内存直通；图片同理（store 层守卫 + `Read::take` 有界读） | 单元测试覆盖边界值（已过）；超限载荷不落库不产生数据文件 |
+| 1.9 | ✅ 当前项置顶与 ▶ 标识 | "当前项"（最后一次成功捕获 ≈ Ctrl+V 内容）经 `state/current` 指针跟踪，排序固定第 1 行（星标之上），行首 `▶` 与 `★` 可叠加；copy/Enter/Ctrl-Y 路径刷新指针；被过滤/超限时 header 提示缺席 | CLI 冒烟验证 ▶ 置顶压过 ★、copy 后 `▶★` 合并上顶（已过）；指针行为单测 2 例 |
 | 1.3 | 图片磁盘配额 GC | `images/` 按 LRU 清理，配额可配（默认 200MB） | GC 后预览不串图（按 id 关联） |
 | 1.4 | `notify_enabled` 开关 | 桌面通知可关 | 配置生效 |
 | 1.5 | 星标删除 fzf 内嵌确认 | `--expect` 二段确认，去 fuzzel 依赖路径 | 删除误操作率归零（manual.sh 验证） |

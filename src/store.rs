@@ -185,6 +185,37 @@ pub fn should_ignore(text: &str, cfg: &Config) -> bool {
     false
 }
 
+// =====================================================================
+// v0.5：当前项指针（current pointer）
+//
+// state/current 单行文件记录"最后一次被成功捕获的内容 hash"。语义：
+// ▶ 标识 = 你最后一次复制的东西 ≈ Ctrl+V 会粘出的内容。
+// - 仅在捕获成功时刷新（新入库 / 去重刷 ts）；被 ignore_regex 过滤、
+//   超过体积上限、空载荷均不写 → "当前剪贴板不在历史中"由指针与列表
+//   不匹配自然表达，不会撒谎。
+// - list() 依此把当前项排到第 1 行（星标之上），fzf/fuzzel 行首打 ▶。
+// =====================================================================
+
+fn current_pointer_path() -> PathBuf {
+    Config::state_dir().join("current")
+}
+
+/// 读取当前项指针；文件缺失或为空返回 None（旧库升级后自然无指针）
+pub fn current_hash() -> Option<String> {
+    std::fs::read_to_string(current_pointer_path())
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// 刷新当前项指针（供捕获路径与 TUI copy 路径调用）。
+/// 指针属辅助功能，写失败不阻断捕获，仅记 stderr。
+pub fn touch_current(hash: &str) {
+    if let Err(e) = std::fs::write(current_pointer_path(), hash) {
+        eprintln!("[niri-clip] write current pointer failed: {e}");
+    }
+}
+
 pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
     // 统一空白语义：所有捕获路径（watch 管道 / try_system_capture / native
     // 轮询）必须在同一 hash 口径下去重。此前仅 try_system_capture 做 trim，
@@ -197,6 +228,17 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
     }
     let cfg = Config::load();
     if should_ignore(&text, &cfg) {
+        return Ok(false);
+    }
+    // v0.5：单条体积上限。守卫放 store 层（单一真相源）——除 daemon 三个捕获
+    // 路径外，migrate 等所有调用方同样受限；daemon 侧另有 Read::take 有界读
+    // 保证读取过程本身的内存上限。
+    if text.len() > cfg.max_clip_bytes {
+        eprintln!(
+            "[niri-clip store] 条目 {} 字节超过 max_clip_bytes={}，拒绝入库",
+            text.len(),
+            cfg.max_clip_bytes
+        );
         return Ok(false);
     }
     let mut conn = connect()?;
@@ -217,6 +259,8 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
     if let Some(id) = exists {
         tx.execute("UPDATE clips SET ts=?1 WHERE id=?2", params![ts, id])?;
         tx.commit()?;
+        // 重复捕获同样代表"剪贴板变成了这个内容"：刷新指针
+        touch_current(&hash);
         return Ok(false);
     }
     tx.execute(
@@ -224,6 +268,7 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
         params![hash, text, mime, ts, size],
     )?;
     tx.commit()?;
+    touch_current(&hash);
 
     enforce_max_items(&conn, cfg.max_items)?;
     Ok(true)
@@ -238,6 +283,15 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
 /// 注意：图片不做 ignore_regex 内容过滤（无法对二进制语义扫描）；上限裁剪共用。
 pub fn insert_image(mime: &str, bytes: &[u8]) -> Result<Option<InsertedImage>> {
     let cfg = Config::load();
+    // v0.5：图片单张体积上限（截图通常 1–3MB，默认 10MiB 给足余量）
+    if bytes.len() > cfg.max_image_bytes {
+        eprintln!(
+            "[niri-clip store] 图片 {} 字节超过 max_image_bytes={}，拒绝入库",
+            bytes.len(),
+            cfg.max_image_bytes
+        );
+        return Ok(None);
+    }
     let mut conn = connect()?;
     let hash = image_content_key(mime, bytes);
     let ts = Utc::now().timestamp_millis();
@@ -252,6 +306,7 @@ pub fn insert_image(mime: &str, bytes: &[u8]) -> Result<Option<InsertedImage>> {
     if let Some(id) = exists {
         tx.execute("UPDATE clips SET ts=?1 WHERE id=?2", params![ts, id])?;
         tx.commit()?;
+        touch_current(&hash);
         return Ok(None);
     }
     tx.execute(
@@ -260,6 +315,7 @@ pub fn insert_image(mime: &str, bytes: &[u8]) -> Result<Option<InsertedImage>> {
     )?;
     let id = tx.last_insert_rowid();
     tx.commit()?;
+    touch_current(&hash);
 
     let dir = Config::images_dir();
     std::fs::create_dir_all(&dir)?;
@@ -305,14 +361,17 @@ fn row_to_clip(r: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
 pub fn list(limit: usize) -> Result<Vec<Clip>> {
     let cfg = Config::load();
     let conn = connect()?;
+    // 当前项永远第 1 行（星标之上）：第 1 行 = Ctrl+V 会粘出的内容。
+    // 无指针时绑空串（hash 列不存在空值），排序退化为原行为。
+    let cur_hash = current_hash().unwrap_or_default();
     let order = if cfg.pinned_on_top {
-        "pinned DESC, ts DESC, id DESC"
+        "(hash = ?2) DESC, pinned DESC, ts DESC, id DESC"
     } else {
-        "ts DESC, id DESC"
+        "(hash = ?2) DESC, ts DESC, id DESC"
     };
     let sql = format!("SELECT {CLIP_COLS} FROM clips ORDER BY {order} LIMIT ?1");
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![limit as i64], row_to_clip)?;
+    let rows = stmt.query_map(params![limit as i64, cur_hash], row_to_clip)?;
     let mut out = Vec::new();
     for r in rows {
         out.push(r?);
@@ -360,8 +419,11 @@ pub fn get(id: i64) -> Result<Clip> {
     Ok(c)
 }
 
-/// 从 cliphist 迁移（一次性）
+/// 从 cliphist 迁移（一次性）。导入借用 insert() 会顺带刷新当前项指针，
+/// 但迁移导入的是旧历史、剪贴板并未变化——迁移前保存指针，结束后还原
+/// （原本无指针则清除），避免 ▶ 指向最后一条导入的旧条目。
 pub fn migrate_from_cliphist() -> Result<usize> {
+    let saved_current = current_hash();
     let out = std::process::Command::new("cliphist").arg("list").output();
     let out = match out {
         Ok(o) if o.status.success() => o,
@@ -384,6 +446,12 @@ pub fn migrate_from_cliphist() -> Result<usize> {
                     n += 1;
                 }
             }
+        }
+    }
+    match saved_current {
+        Some(h) => touch_current(&h),
+        None => {
+            let _ = std::fs::remove_file(current_pointer_path());
         }
     }
     Ok(n)
@@ -553,6 +621,90 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(total, 2);
+        });
+    }
+
+    #[test]
+    fn insert_rejects_oversize_text_at_boundary() {
+        with_env(|g| {
+            clear_db();
+            // 通过测试隔离环境写入小限额配置，Config::load() 在 insert 内生效
+            let cfg_dir = g.root.join("config/niri-clip");
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(cfg_dir.join("config.toml"), "max_clip_bytes = 64\n").unwrap();
+
+            let at_limit = "x".repeat(64);
+            assert!(insert(at_limit, None).unwrap(), "恰好达到上限应入库");
+            let over = "y".repeat(65);
+            assert!(!insert(over, None).unwrap(), "超限一个字节即拒绝");
+
+            let all = list(10).unwrap();
+            assert_eq!(all.len(), 1, "超限条目不得落库");
+            assert!(all[0].text.starts_with('x'));
+        });
+    }
+
+    #[test]
+    fn insert_image_rejects_oversize_payload_at_boundary() {
+        with_env(|g| {
+            clear_db();
+            let cfg_dir = g.root.join("config/niri-clip");
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(cfg_dir.join("config.toml"), "max_image_bytes = 64\n").unwrap();
+
+            let big = vec![0u8; 65];
+            assert!(
+                insert_image("image/png", &big).unwrap().is_none(),
+                "超限图片应拒绝且不产生数据文件"
+            );
+            assert!(!Config::images_dir().join("1.bin").exists());
+
+            let ok = vec![0u8; 64];
+            let img = insert_image("image/png", &ok)
+                .unwrap()
+                .expect("恰好达到上限应入库");
+            assert!(img.path.exists());
+        });
+    }
+
+    #[test]
+    fn current_pointer_tracks_capture_and_tops_list() {
+        with_env(|_| {
+            clear_db();
+            insert("old-a".into(), None).unwrap();
+            insert("old-b".into(), None).unwrap();
+            assert!(current_hash().is_some(), "insert 成功即写指针");
+            let all = list(10).unwrap();
+            assert_eq!(all[0].text, "old-b", "最后捕获者置顶");
+
+            // 星标压不过当前项：当前项永远第 1 行
+            let pinned_id = all[1].id; // old-a
+            toggle_pin(pinned_id).unwrap();
+            assert_eq!(list(10).unwrap()[0].text, "old-b", "星标不得顶掉当前项");
+
+            // 重复捕获（dedup 刷 ts 路径）同样刷新指针
+            insert("old-a".into(), None).unwrap();
+            let cur = current_hash().unwrap();
+            assert_eq!(list(10).unwrap()[0].hash, cur, "▶ 应跟随最后一次捕获");
+        });
+    }
+
+    #[test]
+    fn oversize_or_ignored_capture_does_not_move_current_pointer() {
+        with_env(|g| {
+            clear_db();
+            insert("keep-me".into(), None).unwrap();
+            let cur = current_hash().unwrap();
+
+            // 超限拒绝不写指针
+            let cfg_dir = g.root.join("config/niri-clip");
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(cfg_dir.join("config.toml"), "max_clip_bytes = 8\n").unwrap();
+            insert("this is way beyond eight bytes".into(), None).unwrap();
+            assert_eq!(current_hash().unwrap(), cur, "超限捕获不得移动 ▶");
+            // ignore_regex 命中不写指针
+            insert("my password is hunter2".into(), None).unwrap();
+            assert_eq!(current_hash().unwrap(), cur, "被过滤捕获不得移动 ▶");
         });
     }
 

@@ -15,6 +15,7 @@
 ### ✨ 特性
 
 - **不跳顶**：`fzf --track --id-nth` 单进程 `reload-sync`，删除/固定后光标停在 **下一个**，删末尾停在 **上一个**
+- **当前项可见**：`▶` 永远指向最后一次复制的内容 ≈ `Ctrl+V` 会粘出的东西，且固定在第 1 行（星标之上）；被安全过滤/超限的内容会显示"当前剪贴板不在历史中"，不撒谎
 - **高性能**：`Rust + SQLite WAL`（`busy_timeout=5000` + 事务化去重，多进程并发安全），菜单直查 `300` 条，`10k` 条 `list <11ms` / `sqlite <4ms`
 - **事件驱动捕获**：`wl-paste --watch` 主路径，selection 变化才入库、零空闲轮询；每次捕获子进程受 `capture_timeout_secs` 时间边界保护，从机制上杜绝"进程活着但捕获停摆"；原生 500ms 轮询仅为无 wl-paste 环境兜底
 - **数据持久安全**：历史库位于 `~/.local/state/niri-clip/`（XDG state 规范，不会被系统清理工具误删），旧 `~/.cache` 库自动快照搬迁；目录 0700 / 库文件 0600 权限收紧
@@ -97,6 +98,8 @@ pinned_on_top = true
 tui_backend = "auto"  # auto|fzf|fuzzel
 enable_preview = true
 capture_timeout_secs = 5   # v0.4.1 每次捕获子进程超时
+max_clip_bytes = 1048576   # v0.5 单条文本上限（字节），超限拒绝入库
+max_image_bytes = 10485760 # v0.5 单张图片上限（字节）
 ```
 
 ---

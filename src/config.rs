@@ -24,6 +24,12 @@ pub struct Config {
     /// v0.4.1：事件模式下每次捕获子进程的超时秒数（防止病态读挂起长期占用）
     #[serde(default = "default_capture_timeout")]
     pub capture_timeout_secs: u64,
+    /// v0.5：单条文本入库上限（字节），超限拒绝入库，防 DB 膨胀与全内存直通
+    #[serde(default = "default_max_clip_bytes")]
+    pub max_clip_bytes: usize,
+    /// v0.5：单张图片入库上限（字节），截图通常 1–3MB，给足余量
+    #[serde(default = "default_max_image_bytes")]
+    pub max_image_bytes: usize,
 }
 
 fn default_max_items() -> usize {
@@ -47,6 +53,12 @@ fn default_backend() -> String {
 fn default_capture_timeout() -> u64 {
     5
 }
+fn default_max_clip_bytes() -> usize {
+    1_048_576 // 1 MiB
+}
+fn default_max_image_bytes() -> usize {
+    10_485_760 // 10 MiB
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -60,6 +72,8 @@ impl Default for Config {
             tui_backend: "auto".to_string(),
             enable_preview: true,
             capture_timeout_secs: 5,
+            max_clip_bytes: 1_048_576,
+            max_image_bytes: 10_485_760,
         }
     }
 }

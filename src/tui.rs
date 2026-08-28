@@ -123,6 +123,19 @@ pub fn run() -> Result<()> {
     }
 }
 
+/// fzf/fuzzel 共用的行渲染：序号 + 当前项标记(▶) + 星标(★) + id + 预览。
+/// fzf 输入列布局（tab 分隔）：1=num 2=cur 3=star 4=id 5=preview。
+/// ▶ 语义 = 最后一次复制的内容 ≈ Ctrl+V 会粘出的东西（store::current_hash）。
+fn row_marks(cur: Option<&str>, c: &store::Clip) -> (String, String) {
+    let cur_mark = if cur == Some(c.hash.as_str()) {
+        "▶"
+    } else {
+        " "
+    };
+    let star = if c.pinned { "★" } else { " " };
+    (cur_mark.to_string(), star.to_string())
+}
+
 fn run_fzf(cfg: &Config) -> Result<()> {
     let clips = menu_clips(cfg)?;
     if clips.is_empty() {
@@ -133,14 +146,28 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         return Ok(());
     }
 
-    // 生成 fzf 输入：序号\t★\t{id}\t{preview}  (序号用于 1-9 快选定位)
+    let cur = store::current_hash();
+    // 生成 fzf 输入：序号\t▶\t★\t{id}\t{preview}  (序号用于 1-9 快选定位)
     let mut input = String::new();
     for (idx, c) in clips.iter().enumerate() {
         let num = idx + 1;
-        let star = if c.pinned { "★" } else { " " };
+        let (cur_mark, star) = row_marks(cur.as_deref(), c);
         let preview = crate::preview::preview_text(c, cfg.preview_width);
-        // 显示序号 1-99，fzf 用 with-nth 1,2,4.. 展示序号、星标、预览
-        input.push_str(&format!("{}\t{}\t{}\t{}\n", num, star, c.id, preview));
+        input.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            num, cur_mark, star, c.id, preview
+        ));
+    }
+
+    // header 缺席提示：指针存在但列表第 1 行不匹配 → 当前内容被过滤/超限，
+    // 不在历史中（在库中则必因置顶排序出现在第 1 行）
+    let mut header =
+        "Alt+1..9快选 · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出 · ▶=当前".to_string();
+    if cur
+        .as_ref()
+        .is_some_and(|h| clips.first().is_some_and(|c| c.hash != *h))
+    {
+        header.push_str(" · 当前剪贴板不在历史中(被过滤或超限)");
     }
 
     // 临时脚本目录
@@ -153,15 +180,15 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // 构建 fzf 参数：单进程 reload-sync + track + id-nth
     // 注意：reload 命令需要重新从 DB 读取，所以用 `niri-clip list-raw` 子命令
     let reload_cmd = format!("{} list-raw", exe);
-    let pin_cmd = format!("{} pin {{3}}", exe);
-    let del_cmd = format!("{} delete {{3}}", exe);
+    let pin_cmd = format!("{} pin {{4}}", exe);
+    let del_cmd = format!("{} delete {{4}}", exe);
     let wipe_cmd = format!("{} wipe", exe);
 
     let preview_cmd = if cfg.enable_preview {
-        // id 在第 3 列 (序号、星标、id、预览)
-        format!("{} preview {{3}}", exe)
+        // id 在第 4 列 (序号、▶、★、id、预览)
+        format!("{} preview {{4}}", exe)
     } else {
-        "echo {4..}".to_string()
+        "echo {5..}".to_string()
     };
 
     // A+B: Alt+1..9 快选 + Space jump + / 和 Ctrl-F 搜索 (裸数字留给搜索输入)
@@ -170,15 +197,15 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         binds.push(format!("alt-{n}:pos({n})+accept"));
     }
     binds.push("space:jump".into());
-    binds.push("ctrl-y:execute-silent(niri-clip copy {3})".into());
+    binds.push("ctrl-y:execute-silent(niri-clip copy {4})".into());
 
     let mut fzf = Command::new("fzf")
         .arg("--no-sort")
         .arg("--delimiter=\t")
-        // 匹配只作用于 preview 列：隐藏的序号/id 列不参与搜索，
+        // 匹配只作用于 preview 列：隐藏的序号/标记/id 列不参与搜索，
         // 否则查询 "1" 会命中所有序号/id 含 1 的行，数字搜索被污染
-        .arg("--nth=4..")
-        .arg("--with-nth=1,2,4..")
+        .arg("--nth=5..")
+        .arg("--with-nth=1,2,3,5..")
         // 快选/跳转/不退出复制：binds 必须显式挂载，
         // 否则 Alt+1..9 等于没有绑定，快选静默失效
         .arg(format!("--bind={}", binds.join(",")))
@@ -188,9 +215,9 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         .arg("--border")
         .arg("--info=inline")
         .arg("--prompt=剪贴板> ")
-        .arg("--header=Alt+1..9快选 · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出")
+        .arg(format!("--header={header}"))
         .arg("--track")
-        .arg("--id-nth=3")
+        .arg("--id-nth=4")
         .arg("--no-input")
         .arg(format!("--preview={}", preview_cmd))
         .arg("--preview-window=down:5:wrap:border-rounded")
@@ -228,14 +255,17 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // 可能包含多个? 只取第一行
     let line = selected.lines().next().unwrap_or("");
     let parts: Vec<&str> = line.split('\t').collect();
-    if parts.len() < 3 {
+    if parts.len() < 4 {
         return Ok(());
     }
-    let id: i64 = parts[2].parse().unwrap_or(0);
+    let id: i64 = parts[3].parse().unwrap_or(0);
     if id == 0 {
         return Ok(());
     }
     let clip = store::get(id)?;
+    // Enter 复制即成为"当前内容"：刷新指针，下次打开 ▶ 指向它
+    // （正常情况下 watch 捕获也会刷新，这里显式写保证即时一致）
+    store::touch_current(&clip.hash);
     // wl-copy
     let mut wl = Command::new("wl-copy")
         .stdin(Stdio::piped())
@@ -257,12 +287,14 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
     if clips.is_empty() {
         return Ok(());
     }
+    let cur = store::current_hash();
     let mut input = String::new();
     for (idx, c) in clips.iter().enumerate() {
         let num = idx + 1;
-        let star = if c.pinned { "★ " } else { "" };
+        let (cur_mark, star) = row_marks(cur.as_deref(), c);
+        let marks = format!("{cur_mark}{star}").trim().to_string();
         let preview = crate::preview::preview_text(c, cfg.preview_width);
-        input.push_str(&format!("{}. {}{} {}\n", num, star, c.id, preview));
+        input.push_str(&format!("{}. {} {} {}\n", num, marks, c.id, preview));
     }
     // fuzzel dmenu 简单实现：选中后粘贴，不支持原地 reload，按 Enter 后退出
     // v0.2 fuzzel 模式为兜底，v1.0 再做 fuzzel 原地刷新
@@ -279,35 +311,42 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
     if sel.is_empty() {
         return Ok(());
     }
-    // 解析 id：格式 "★ 123 preview" 或 "123 preview"
-    let id_str = sel
-        .trim_start_matches('★')
+    // 行格式 "{num}. {marks} {id} {preview}"：marks 含 ▶/★ 前缀符号，
+    // 直接取首个可解析为整数的 token 作 id（对符号增减鲁棒）
+    let id: i64 = sel
         .split_whitespace()
-        .next()
-        .unwrap_or("0");
-    let id: i64 = id_str.parse().unwrap_or(0);
+        .find_map(|t| t.parse::<i64>().ok())
+        .unwrap_or(0);
     if id == 0 {
         return Ok(());
     }
     let clip = store::get(id)?;
+    store::touch_current(&clip.hash);
     let mut wl = Command::new("wl-copy").stdin(Stdio::piped()).spawn()?;
     wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
     wl.wait()?;
     Ok(())
 }
 
-/// 子命令辅助：list-raw 供 fzf reload 调用
+/// 子命令辅助：list-raw 供 fzf reload 调用（行格式须与 run_fzf 初始输入一致）
 pub fn list_raw() -> Result<()> {
     let cfg = Config::load();
     let clips = menu_clips(&cfg)?;
+    let cur = store::current_hash();
     use std::io::{self, Write};
     let stdout = io::stdout();
     let mut out = stdout.lock();
     for (idx, c) in clips.iter().enumerate() {
         let num = idx + 1;
-        let star = if c.pinned { "★" } else { " " };
+        let (cur_mark, star) = row_marks(cur.as_deref(), c);
         let preview = crate::preview::preview_text(c, cfg.preview_width);
-        if writeln!(out, "{}\t{}\t{}\t{}", num, star, c.id, preview).is_err() {
+        if writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}",
+            num, cur_mark, star, c.id, preview
+        )
+        .is_err()
+        {
             break;
         }
     }

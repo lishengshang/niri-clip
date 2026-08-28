@@ -76,6 +76,9 @@ async fn main() -> Result<()> {
             use std::io::Write;
             wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
             wl.wait()?;
+            // Ctrl-Y 复制不退出场景：指针随复制即时刷新，
+            // 下一次 reload-sync 的 ▶ 就移到这条
+            store::touch_current(&clip.hash);
             println!("copied {}", id);
         }
         Some(Commands::Pin { id }) => {
