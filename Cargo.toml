@@ -31,9 +31,8 @@ iced = { version = "0.14", default-features = false, features = [
     "tiny-skia",
     "wayland",
     "thread-pool",
+    "image",
 ] }
-iced_exwlshell = "0.19"
-wayland-client = "0.31"
 wl-clipboard-rs = "0.9"
 
 [profile.release]
