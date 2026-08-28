@@ -22,13 +22,32 @@ fn parse_version(s: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// fzf 版本门控。`fzf --version` 每次约 10ms，而 Mod+V 是高频路径——
+/// 版本号缓存到 state/fzf.version，仅当 fzf 二进制 mtime 比缓存新时重查
+/// （fzf 升级自动失效重校，不会出现"升级后门控判定过期"的问题）。
 fn fzf_version_ok() -> bool {
+    let Ok(fzf_path) = which::which("fzf") else {
+        return false;
+    };
+    let cache = Config::state_dir().join("fzf.version");
+    let fzf_mtime = std::fs::metadata(&fzf_path).and_then(|m| m.modified()).ok();
+    let cache_mtime = std::fs::metadata(&cache).and_then(|m| m.modified()).ok();
+    if let (Some(f), Some(c)) = (fzf_mtime, cache_mtime) {
+        if f <= c {
+            let cached = std::fs::read_to_string(&cache).unwrap_or_default();
+            return parse_version(&cached)
+                .map(|v| v >= FZF_MIN)
+                .unwrap_or(false);
+        }
+    }
     let Ok(out) = Command::new("fzf").arg("--version").output() else {
         return false;
     };
-    parse_version(&String::from_utf8_lossy(&out.stdout))
-        .map(|v| v >= FZF_MIN)
-        .unwrap_or(false)
+    let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // 缓存写失败（只读 fs 等）不影响本次判定，只是退回每次实查
+    let _ = std::fs::create_dir_all(Config::state_dir());
+    let _ = std::fs::write(&cache, &ver);
+    parse_version(&ver).map(|v| v >= FZF_MIN).unwrap_or(false)
 }
 
 /// 选择后端：auto 时优先 fzf（任意终端均可运行），缺失则 fuzzel。
@@ -61,14 +80,16 @@ fn has_controlling_tty() -> bool {
     std::fs::File::open("/dev/tty").is_ok()
 }
 
-/// 无 TTY 时用于承载 fzf 的终端模拟器及其透传参数前缀（按序探测）
+/// 无 TTY 时用于承载 fzf 的终端模拟器及其透传参数前缀（按序探测）。
+/// 顺序即启动耗时顺序：foot 最轻；ghostty 启动明显轻于 kitty，
+/// 提前探测（Mod+V 链路中终端冷启动是主要延迟来源）。
 fn terminal_wrap() -> Option<(&'static str, &'static [&'static str])> {
     for (term, prefix) in [
         ("foot", &[] as &[&str]),
-        ("alacritty", &["-e"]),
-        ("kitty", &[]),
-        ("wezterm", &["start", "--"]),
         ("ghostty", &["-e"]),
+        ("kitty", &[]),
+        ("alacritty", &["-e"]),
+        ("wezterm", &["start", "--"]),
     ] {
         if has_bin(term) {
             return Some((term, prefix));
@@ -77,8 +98,44 @@ fn terminal_wrap() -> Option<(&'static str, &'static [&'static str])> {
     None
 }
 
+/// niri `spawn` 拉起的外层进程没有控制终端：包装一层终端模拟器重跑自己。
+///
+/// 内层命令经 `sh -c` 把 stdout/stderr 重定向到 state/tui.log——
+/// fzf 退出瞬间 alt-screen 收起，若 scrollback 里有启动日志/copied 文本，
+/// 关闭时终端会闪现一帧"脚本输出"；重定向后 scrollback 干净，闪窗只剩
+/// 空帧不可见。日志文件同时充当无 systemd 环境的排障入口。
+fn respawn_in_terminal(term: &str, prefix: &[&str], exe: &std::path::Path) -> Result<()> {
+    let log = Config::state_dir().join("tui.log");
+    let inner = format!("exec '{}' tui >> '{}' 2>&1", exe.display(), log.display());
+    Command::new(term)
+        .args(prefix)
+        .args(["sh", "-c", &inner])
+        .spawn()
+        .with_context(|| format!("spawn {term} to host fzf"))?;
+    Ok(())
+}
+
 pub fn run() -> Result<()> {
     let cfg = Config::load();
+    // 无控制终端（如 niri spawn 裸拉起）时 fzf 无法运行：
+    // 先做 tty 探测并立即重包装退出——backend/version 检查留给内层进程，
+    // 外层不做任何多余子进程调用（此前 fzf --version 在外层白跑一次）
+    if !has_controlling_tty() {
+        if let Some((term, prefix)) = terminal_wrap() {
+            let exe = std::env::current_exe()?;
+            return respawn_in_terminal(term, prefix, &exe);
+        }
+        if has_bin("fuzzel") {
+            eprintln!("[niri-clip tui] 无可用终端承载 fzf，回退 fuzzel");
+            return run_fuzzel(&cfg);
+        }
+        let _ = notify_rust::Notification::new()
+            .summary("niri-clip")
+            .body("fzf 需要 TTY：请安装 foot/ghostty/kitty 等终端，或安装 fuzzel")
+            .show();
+        anyhow::bail!("no controlling tty and no terminal emulator / fuzzel available");
+    }
+
     let mut be = backend(&cfg);
     // fzf 版本地板：低于 0.71（--id-nth）时参数无法解析，主动回退 fuzzel
     if be == "fzf" && !fzf_version_ok() {
@@ -92,29 +149,6 @@ pub fn run() -> Result<()> {
                 .show();
             anyhow::bail!("fzf missing or too old (<0.71) and fuzzel unavailable");
         }
-    }
-    // 无控制终端（如 niri spawn 裸拉起）时 fzf 无法运行：
-    // 包一层终端模拟器重跑自己；没有终端则回退 fuzzel（无需 TTY）
-    if be == "fzf" && !has_controlling_tty() {
-        if let Some((term, prefix)) = terminal_wrap() {
-            let exe = std::env::current_exe()?;
-            Command::new(term)
-                .args(prefix)
-                .arg(exe)
-                .arg("tui")
-                .spawn()
-                .context("spawn terminal to host fzf")?;
-            return Ok(());
-        }
-        if has_bin("fuzzel") {
-            eprintln!("[niri-clip tui] 无可用终端承载 fzf，回退 fuzzel");
-            return run_fuzzel(&cfg);
-        }
-        let _ = notify_rust::Notification::new()
-            .summary("niri-clip")
-            .body("fzf 需要 TTY：请安装 foot/alacritty/kitty 等终端，或安装 fuzzel")
-            .show();
-        anyhow::bail!("no controlling tty and no terminal emulator / fuzzel available");
     }
     eprintln!("[niri-clip tui] backend={} db={:?}", be, Config::db_path());
     match be {

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+- **TUI 启动提速与关闭闪窗修复**：`run()` 的 tty 探测提到最前，
+  niri spawn 拉起的外层进程不再白跑 `fzf --version`；终端模拟器探测
+  优先级调整为 foot > ghostty > kitty（终端冷启动是 Mod+V 链路主要
+  延迟，ghostty 明显轻于 kitty）；承载 fzf 的内层命令输出重定向到
+  `~/.local/state/niri-clip/tui.log`——fzf 退出后 scrollback 不再闪现
+  启动日志/copied 文本，日志文件兼作无 systemd 环境的排障入口；
+  `fzf --version` 门控结果缓存到 `state/fzf.version`（按 fzf 二进制
+  mtime 自动失效重校），高频路径再省一次子进程
+
 ### Added
 - **当前项置顶与 ▶ 标识**：新概念"当前项"= 最后一次成功捕获的内容 ≈
   `Ctrl+V` 会粘出的东西。`store` 捕获成功（含去重刷 ts 路径）即刷新
