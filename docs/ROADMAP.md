@@ -62,7 +62,7 @@
   Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    约 3–4 周
   Phase 3   v0.7          安全与隐私强化                         约 2–3 周
   Phase 4   v1.0          Production 正式发布                    约 3–4 周
-  Phase 5   v1.x          生态与集成（waybar/OSC52/niri）        v1.0 后持续
+  Phase 5   v1.x          生态与集成（原生UI已立项/waybar/OSC52）  v1.0 后持续
   Phase 6   v2.0+         长期愿景（加密/跨合成器/原生UI）        远期
 ```
 
@@ -178,10 +178,11 @@
 
 | 候选项 | 说明 | 前置 |
 |---|---|---|
+| **原生 layer-shell UI（已立项 ▶）** | 消除终端冷启动瓶颈的彻底解：Mod+V ≤50ms、零终端依赖。里程碑 M5.1 选型 PoC/ADR → M5.2 MVP → M5.3 语义对齐 → M5.4 发布，任务分解与技术候选见 [docs/NATIVE-UI.md](NATIVE-UI.md)；执行窗口 v1.0 GA 之后 | 5.0 core 下沉 lib crate |
 | OSC52 远程剪贴板 | SSH/终端场景同步历史 | 1.1（selection 抽象） |
-| niri overview 集成 | 预览窗口嵌入 niri 概览 | layer-shell 协议调研 |
-| 原生 layer-shell UI | 可选 GUI 前端（缓解 fzf 外部依赖） | 技术预研 ADR |
+| niri overview 集成 | 预览窗口嵌入 niri 概览 | layer-shell 协议调研（随原生 UI 立项一并推进） |
 | 历史内容动作插件化 | 自定义 action（URL 直接打开等） | 2.4 导出格式稳定 |
+| foot server 模式 | `foot --server` 常驻 + `footclient` ~10ms 拉窗（终端方案的极限优化，原生 UI 交付后自然退役） | 用户安装 foot |
 | 跨合成器通用化 | 抽离 niri 特定假设，支持 sway/hyprland | 无破坏性改动审计 |
 
 节奏：每 6–8 周一个 minor（v1.1 / v1.2 ...），patch 随 bug 修复随时发。
@@ -248,3 +249,40 @@
 | 依赖蔓生拖慢编译、增大二进制 | 中 | 新增依赖过开销审计（1.8）；编译时间/依赖数进开销预算表跟踪 |
 | 单人 bus factor | 中 | 文档与 CI 即"第二维护者"；关键流程（发版/迁移）全部脚本化 |
 | 加密方案性能不达标 | 低 | PoC 先行（3.4），不达标则 v2.0 降级为可选导出加密 |
+
+---
+
+## 十四、分支与协作规范
+
+> 目的：main 分支只接受经过 CI 验证的变更，防止直推；单人维护同样执行
+> （规范即未来协作者的 onboarding 文档）。
+
+**1. main 保护（GitHub 设置，一次性配置）**
+- Settings → Branches → Add branch protection rule（`main`）：
+  - ✅ Require a pull request before merging（单人场景可设 "require 0 approvals"）
+  - ✅ Require status checks：勾选 CI 全部六道工序（fmt/clippy/test/build/smoke/bench）
+  - ✅ Do not allow force pushes / Do not allow deletions
+- 未配置前的人工红线：`git push origin main` 禁止；只推功能分支
+
+**2. 分支命名与 issue 关联**
+- 格式：`<type>/<issue>-<slug>`，type ∈ feat / fix / perf / docs / chore / epic
+- 例：`feat/12-native-ui-mvp`、`fix/15-reload-flash`、`epic/native-ui`
+- ROADMAP 任务编号（P1-2、5.2.1）即 issue 标题前缀，分支必须挂 issue
+
+**3. PR 规则**
+- 一个 PR 聚焦一个任务；>400 行建议拆分
+- 长期 epic（如原生 UI）用 **stacked PR**：core 下沉 → spike → MVP → 语义对齐，
+  每个 PR 独立可运行、CI 全绿、可演示（附截图/asciinema）
+- 合并方式：**squash merge**，保持 main 线性历史；commit 标题用 Conventional Commits
+
+**4. commit message（Conventional Commits）**
+- 格式：`<type>(<scope>): <what>`，正文回答"为什么"，ADR/事故关联放正文
+- 例：`perf(tui): 启动提速 + 关闭闪窗修复`（正文含诊断结论与取舍）
+
+**5. 紧急修复 fast-track**
+- 线上事故（如 v0.4.1 捕获停摆级）走 `hotfix/<issue>-<slug>` 分支 + 最小 PR，
+  仍需 CI 绿才可合并；合并后立即 tag patch 版本
+
+**6. 本地门禁（提交前自检）**
+- `cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test --locked`
+- 行为变更必须：CHANGELOG 条目 + 相关文档同步 + 测试覆盖
