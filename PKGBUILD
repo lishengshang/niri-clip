@@ -23,6 +23,10 @@ sha256sums=('0b289503302b31d0979627f5f2b50d38e3ba31907f21e41e35b26694f9eea181')
 
 build() {
   cd "$pkgname-$pkgver"
+  # makepkg 注入的 -flto=auto 会把 bundled sqlite3.c 编成 GCC LTO 字节码，
+  # cargo 默认的 lld 链接器无法解析，导致大量 undefined symbol。
+  # 剥离 -flto（Rust 自带 LTO，见 profile.release）
+  export CFLAGS="${CFLAGS/-flto=auto/}" CXXFLAGS="${CXXFLAGS/-flto=auto/}" LDFLAGS="${LDFLAGS/-flto=auto/}"
   cargo build --release --locked -p niri-clip
 }
 
