@@ -6,7 +6,7 @@ pkgdesc="为 niri + Wayland 设计的高性能剪贴板历史 - git 版"
 arch=('x86_64' 'aarch64')
 url="https://github.com/lishengshang/niri-clip"
 license=('MIT')
-depends=('wl-clipboard' 'fzf' 'fuzzel' 'sqlite')
+depends=('wl-clipboard' 'fzf' 'fuzzel')
 makedepends=('cargo' 'git')
 optdepends=('kitty: fzf TUI' 'nirius: niri focus-or-spawn' 'chafa: 图片预览' 'cliphist: 迁移')
 provides=('niri-clip')
@@ -21,7 +21,8 @@ pkgver() {
 
 build() {
   cd "niri-clip"
-  cargo build --release
+  # 仅构建 CLI：gui 依赖链需要 libxkbcommon，由独立包承载
+  cargo build --release -p niri-clip
 }
 
 package() {

@@ -159,7 +159,7 @@
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
 | 4.1 | 图片剪贴板完整支持 | 覆盖 image/png、jpeg、webp 全链路（捕获→存储→预览→重粘贴）；`wl-copy < image` 场景 | 手动 + 自动测试全过 |
-| 4.2 | AUR 三包齐备 | `niri-clip`（release）、`niri-clip-git`、`niri-clip-bin`（预编译） | 三包 CI 自动 bump + 安装冒烟 |
+| 4.2 | AUR 三包齐备 | `niri-clip`（release）、`niri-clip-git`、`niri-clip-bin`（预编译）。**决策（2026-08-28）：AUR 首次发布随 epic（原生 UI）合并后的首个版本一起**；主包构建 `-p niri-clip`（不含 gui 依赖链，makedepends 不需要 libxkbcommon），`niri-clip-gui` 待 M5.4 单独分包；`sqlite` 非运行依赖（rusqlite bundled）已移除 | 三包 CI 自动 bump + 安装冒烟 |
 | 4.3 | crates.io 发布 | `cargo publish`，检查 package metadata 完整 | `cargo install niri-clip` 可用 |
 | 4.4 | waybar 模块 | JSON 输出（历史条数/最新条目/daemon 状态），`niri-clip waybar` | waybar wiki 配置示例可用 |
 | 4.5 | 文档完善 | man page 终稿、README 截图/GIF、ARCHITECTURE 同步、CHANGELOG 规范化（Keep a Changelog） | 外部用户仅凭文档可完成安装到使用 |
