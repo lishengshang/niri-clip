@@ -1,7 +1,22 @@
-// niri-clip binds - include this in your niri config.kdl
+// niri-clip binds + window-rule - include this in your niri config.kdl
 // include "niri-clip/niri-clip.kdl"
 binds {
     Mod+V hotkey-overlay-title="剪贴板 (niri-clip)" {
         spawn "niri-clip" "tui";
+    }
+}
+
+// niri-clip-gui（xdg 窗口）打开效果规则：顶部居中浮层、无焦点环/阴影。
+// x 偏移 = (输出逻辑宽度 - 窗口宽 760) / 2，按自己屏幕调整
+// （如 1920 宽 → x=580；2560 逻辑宽 2048 → x=644）。
+window-rule {
+    match app-id="niri-clip-gui"
+    open-floating true
+    default-floating-position x=644 y=0 relative-to="top"
+    focus-ring {
+        off
+    }
+    shadow {
+        off
     }
 }
