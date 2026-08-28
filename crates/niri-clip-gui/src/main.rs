@@ -13,11 +13,20 @@
 
 use std::cell::RefCell;
 
-use iced::widget::{column, container, image, row, scrollable, space, text, text_input};
+use iced::widget::{
+    column, container, image, mouse_area, operation, row, rule, scrollable, space, text,
+    text_input,
+};
 use iced::{
-    border, keyboard, Background, Border, Color, Element, Font, Length, Subscription, Task,
+    border, keyboard, Background, Border, Color, Element, Font, Length, Shadow, Subscription,
+    Task, Vector,
 };
 use niri_clip_core::{config, preview, store};
+
+/// 主字体：JetBrainsMono Nerd Font（真机已装）。
+/// 不用 Font::MONOSPACE（fontconfig 解析到 Noto Sans Mono）：❯▶◆⏎ 等符号
+/// 字形缺失且 cosmic-text fallback 不稳 → 显示方框（tofu）。
+const UI_FONT: Font = Font::with_name("JetBrainsMono Nerd Font");
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -31,6 +40,10 @@ enum Message {
     CopyFinished { exit: bool, ok: bool },
     /// 后台 pin/delete 完成，带回重拉后的列表（None = worker 异常，放弃）
     ListReloaded(Option<Vec<store::Clip>>),
+    /// 鼠标悬停行：跟随选中（高亮预览）
+    Hover(usize),
+    /// 鼠标点击行：定位并复制关闭（对齐 Enter 语义）
+    Pick(usize),
 }
 
 /// 把阻塞任务丢到后台线程执行（iced 默认执行器为 thread-pool，
@@ -58,6 +71,8 @@ where
 
 struct App {
     search_id: iced::widget::Id,
+    /// 行列表 scrollable 的 Id：键盘导航时 scroll_to 跟随选中
+    list_id: iced::widget::Id,
     clips: Vec<store::Clip>,
     query: String,
     selected: usize,
@@ -76,6 +91,7 @@ impl App {
         let clips = store::list(Self::load_limit()).unwrap_or_default();
         Self {
             search_id: iced::widget::Id::unique(),
+            list_id: iced::widget::Id::unique(),
             clips,
             query: String::new(),
             selected: 0,
@@ -108,8 +124,26 @@ impl App {
                 self.query = q;
                 self.selected = 0;
                 self.confirm_delete = false;
+                // 重新过滤后回到顶部
+                return self.scroll_to_selected();
             }
             Message::Key(key, modifiers) => return self.on_key(key, modifiers),
+            Message::Hover(idx) => {
+                // 鼠标悬停跟随选中：不触发滚动（避免和滚轮互相拉扯）
+                if idx < self.filtered().len() {
+                    self.selected = idx;
+                }
+            }
+            Message::Pick(idx) => {
+                // 点击行 = 定位到该行并复制关闭（对齐 Enter）
+                if idx < self.filtered().len() {
+                    self.selected = idx;
+                    return Task::batch([
+                        self.scroll_to_selected(),
+                        self.update(Message::Copy { exit: true }),
+                    ]);
+                }
+            }
             Message::Copy { exit } => {
                 // 复制链路（wl-copy fork/wait + sqlite 读）全部后台化，
                 // UI 线程零阻塞——同步 wait 是卡死根因
@@ -132,16 +166,20 @@ impl App {
                 // Ctrl-Y 连续复制：重拉列表，▶ 已随 copy 刷新到刚复制的条目
                 self.query.clear();
                 self.selected = 0;
-                return run_bg(
-                    move || store::list(Self::load_limit()).ok(),
-                    Message::ListReloaded,
-                );
+                return Task::batch([
+                    self.scroll_to_selected(),
+                    run_bg(
+                        move || store::list(Self::load_limit()).ok(),
+                        Message::ListReloaded,
+                    ),
+                ]);
             }
             Message::ListReloaded(Some(clips)) => {
                 self.clips = clips;
                 if self.selected >= self.clips.len() {
                     self.selected = self.clips.len().saturating_sub(1);
                 }
+                return self.scroll_to_selected();
             }
             Message::ListReloaded(None) => {}
         }
@@ -152,8 +190,12 @@ impl App {
         // 仅导航/动作键；普通字符、Backspace、Space、IME 提交由持焦点的
         // text_input 自行处理（winit 原生 IME，中文可用）
         match key {
-            keyboard::Key::Named(keyboard::key::Named::ArrowUp) => self.move_selection(-1),
-            keyboard::Key::Named(keyboard::key::Named::ArrowDown) => self.move_selection(1),
+            keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
+                return self.move_selection(-1)
+            }
+            keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
+                return self.move_selection(1)
+            }
             keyboard::Key::Named(keyboard::key::Named::Escape) => {
                 // fzf 语义：有输入/确认时先取消，空查询才退出
                 if !self.query.is_empty() || self.confirm_delete {
@@ -211,12 +253,24 @@ impl App {
         Task::none()
     }
 
-    fn move_selection(&mut self, delta: i32) {
+    fn move_selection(&mut self, delta: i32) -> Task<Message> {
         let n = self.filtered().len();
         if n > 0 {
             let next = self.selected as i64 + delta as i64;
             self.selected = next.clamp(0, n as i64 - 1) as usize;
+            // 键盘导航滚动跟随：把选中行滚进可视区（视口半高估算）
+            return self.scroll_to_selected();
         }
+        Task::none()
+    }
+
+    /// 把选中行滚动到可视区中部（行高定长 ROW_PITCH，偏移可精确计算）
+    fn scroll_to_selected(&self) -> Task<Message> {
+        let y = ((self.selected as f32) * ROW_PITCH - VIEWPORT_HALF).max(0.0);
+        operation::scroll_to(
+            self.list_id.clone(),
+            operation::AbsoluteOffset { x: 0.0, y },
+        )
     }
 
     fn delete_selected(&mut self) -> Task<Message> {
@@ -263,14 +317,16 @@ impl App {
             } else {
                 " "
             };
-            let star = if clip.pinned { "★" } else { " " };
+            let star = if clip.pinned { "◆" } else { " " };
             let quick = if self.query.is_empty() && idx < 9 {
                 format!("{}", idx + 1)
             } else {
                 " ".to_string()
             };
             let prefix = format!("{cursor} {quick} {cur_mark}{star} ");
-            let preview = preview::preview_text(clip, self.preview_width);
+            // ↵（U+21B5）字形覆盖差（tofu），GUI 侧换成 ⏎
+            let preview =
+                preview::preview_text(clip, self.preview_width).replace('↵', "⏎");
             let base = if selected { ROW_FG_SELECTED } else { ROW_FG };
 
             // fzf 灵魂：命中查询子序列的字符用 hl 色点亮
@@ -299,25 +355,42 @@ impl App {
                 spans.push(text::Span::new(run).color(if run_hit { HL } else { base }));
             }
 
-            container(
-                text::Rich::with_spans(spans)
-                    .size(14)
-                    .font(Font::MONOSPACE)
-                    .width(Length::Fill)
-                    .wrapping(text::Wrapping::None),
-            )
-            .width(Length::Fill)
-            .padding([4, 10])
-            .style(move |_| container::Style {
-                background: Some(Background::Color(if selected { SEL_BG } else { BG })),
-                border: Border {
-                    radius: RADIUS_ROW,
+            // 鼠标交互：悬停跟随选中，点击复制关闭
+            let row = mouse_area(
+                container(
+                    text::Rich::with_spans(spans)
+                        .size(14)
+                        .font(UI_FONT)
+                        .width(Length::Fill)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(ROW_HEIGHT))
+                .padding([4, 10])
+                .style(move |_| container::Style {
+                    background: Some(Background::Color(if selected { SEL_BG } else { BG })),
+                    border: Border {
+                        radius: RADIUS_ROW,
+                        ..Default::default()
+                    },
+                    shadow: if selected { SHADOW_ROW } else { Shadow::default() },
                     ..Default::default()
-                },
-                ..Default::default()
-            })
-            .into()
+                }),
+            )
+            .on_press(Message::Pick(idx))
+            .on_enter(Message::Hover(idx));
+
+            Element::from(row)
         });
+
+        // 行列表：行间细分界线（fzf 行分隔观感）
+        let mut list = column![];
+        for (idx, row) in rows.enumerate() {
+            if idx > 0 {
+                list = list.push(rule::horizontal(1.0).style(rule_style));
+            }
+            list = list.push(row);
+        }
 
         let mut col = column![]
             .spacing(6)
@@ -342,15 +415,17 @@ impl App {
                         .on_input(Message::Query)
                         .on_paste(Message::Query)
                         .size(14)
-                        .font(Font::MONOSPACE)
+                        .font(UI_FONT)
                         .padding([7, 0])
                         .style(prompt_style)
                 ]
                 .width(Length::Fill)
                 .padding([0, 10]),
             )
+            .push(rule::horizontal(1.0).style(rule_style))
             .push(
-                scrollable(column(rows).width(Length::Fill).spacing(2))
+                scrollable(list)
+                    .id(self.list_id.clone())
                     .height(Length::Fill)
                     .width(Length::Fill)
                     .style(scroll_style),
@@ -358,7 +433,7 @@ impl App {
 
         if self.confirm_delete {
             col = col.push(
-                container(text("★ 星标条目删除确认：再按 Ctrl-X 执行，Esc 取消").size(12))
+                container(text("◆ 星标条目删除确认：再按 Ctrl-X 执行，Esc 取消").size(12))
                     .width(Length::Fill)
                     .padding([6, 10])
                     .style(confirm_style),
@@ -572,6 +647,39 @@ const RADIUS_PANEL: border::Radius = border::Radius {
     bottom_left: 6.0,
 };
 
+/// 行定高：Rich 文本 14px × 行高 1.3 ≈ 18.2 + 上下 padding 8，凑整 27。
+/// 分界线 1px → 行距（pitch）恒定 28，键盘导航的 scroll_to 据此精确计算
+const ROW_HEIGHT: f32 = 27.0;
+const ROW_PITCH: f32 = ROW_HEIGHT + 1.0;
+/// 视口半高估算（675 - 头行/提示符/预览窗格），选中行滚到可视区中部
+const VIEWPORT_HALF: f32 = 240.0;
+
+/// 面板阴影（立体感）：黑色低透明 + 垂直偏移
+const SHADOW_PANEL: Shadow = Shadow {
+    color: Color {
+        a: 0.35,
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    },
+    offset: Vector {
+        x: 0.0,
+        y: 2.0,
+    },
+    blur_radius: 10.0,
+};
+/// 选中行微阴影
+const SHADOW_ROW: Shadow = Shadow {
+    color: Color {
+        a: 0.30,
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    },
+    offset: Vector { x: 0.0, y: 1.0 },
+    blur_radius: 5.0,
+};
+
 fn prompt_style(_theme: &iced::Theme, _status: text_input::Status) -> text_input::Style {
     text_input::Style {
         // 无边框无底色，融入提示符行（fzf 的输入就是一段裸文本）
@@ -591,22 +699,55 @@ fn prompt_style(_theme: &iced::Theme, _status: text_input::Status) -> text_input
     }
 }
 
-fn scroll_style(_theme: &iced::Theme, _status: scrollable::Status) -> scrollable::Style {
-    let rail = scrollable::Rail {
+fn rule_style(_theme: &iced::Theme) -> rule::Style {
+    rule::Style {
+        color: BORDER,
+        radius: border::Radius::default(),
+        fill_mode: rule::FillMode::Full,
+        snap: true,
+    }
+}
+
+fn scroll_style(_theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
+    // 滚动条默认隐藏，仅当鼠标悬停/拖动滚动条本身时浮现
+    let bar_visible = match status {
+        scrollable::Status::Active { .. } => false,
+        scrollable::Status::Hovered {
+            is_vertical_scrollbar_hovered,
+            ..
+        } => is_vertical_scrollbar_hovered,
+        scrollable::Status::Dragged {
+            is_vertical_scrollbar_dragged,
+            ..
+        } => is_vertical_scrollbar_dragged,
+    };
+    let hidden_rail = scrollable::Rail {
         background: None,
         border: Border::default(),
         scroller: scrollable::Scroller {
-            background: Background::Color(SCROLLBAR),
-            border: Border {
-                radius: border::Radius::from(4.0),
-                ..Default::default()
-            },
+            background: Background::Color(Color::TRANSPARENT),
+            border: Border::default(),
         },
+    };
+    let v_rail = if bar_visible {
+        scrollable::Rail {
+            background: None,
+            border: Border::default(),
+            scroller: scrollable::Scroller {
+                background: Background::Color(SCROLLBAR),
+                border: Border {
+                    radius: border::Radius::from(4.0),
+                    ..Default::default()
+                },
+            },
+        }
+    } else {
+        hidden_rail
     };
     scrollable::Style {
         container: container::Style::default(),
-        vertical_rail: rail,
-        horizontal_rail: rail,
+        vertical_rail: v_rail,
+        horizontal_rail: hidden_rail,
         gap: None,
         auto_scroll: scrollable::AutoScroll {
             background: Background::Color(ACCENT),
@@ -626,6 +767,8 @@ fn preview_style(_theme: &iced::Theme) -> container::Style {
             width: 1.0,
             radius: RADIUS_PANEL,
         },
+        // 浮起的面板：立体感
+        shadow: SHADOW_PANEL,
         ..Default::default()
     }
 }
@@ -665,10 +808,9 @@ fn main() -> iced::Result {
         App::view,
     )
     .title("niri-clip")
-    // 深色主题（光标/默认控件色）+ 等宽字体：终端同款观感
-    // （fn item 而非闭包：theme() 的 HRTB 闭包推导在 iced 0.14 报错）
+    // 深色主题（光标/默认控件色）+ JetBrainsMono NF：符号字形齐全无 tofu
     .theme(theme_dark)
-    .default_font(Font::MONOSPACE)
+    .default_font(UI_FONT)
     .subscription(App::subscription)
     .window(iced::window::Settings {
         size: iced::Size::new(500.0, 675.0),
