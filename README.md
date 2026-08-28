@@ -159,7 +159,12 @@ cargo clippy --all-targets     # lint 门禁（零警告基线）
 
 - **v0.3 ✅** 原生 daemon + 300 缓存 + chafa
 - **v0.4.x ✅** P0 修复（并发/图片/panic/state 迁移）+ 事件驱动捕获 + systemd 托管 + CI
-- **v1.0** AUR 正式、waybar、man、CI 深化
+- **v0.5 ▶** TUI 体验闭环（PRIMARY selection / 配额 GC / 基准进 CI / man）
+- **v0.6** FTS5 全文搜索 + 数据治理（稳定 hash / GC / 导出）
+- **v0.7** 安全与隐私强化（过滤规则 / systemd 沙箱 / 加密 PoC）
+- **v1.0** Production GA：AUR 三包、crates.io、waybar、CI 深化
+
+完整阶段规划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
 ---
 
