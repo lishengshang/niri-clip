@@ -13,8 +13,10 @@
 
 use std::cell::RefCell;
 
-use iced::widget::{column, container, image, scrollable, text, text_input};
-use iced::{border, keyboard, Background, Border, Color, Element, Length, Subscription, Task};
+use iced::widget::{column, container, image, row, scrollable, space, text, text_input};
+use iced::{
+    border, keyboard, Background, Border, Color, Element, Font, Length, Subscription, Task,
+};
 use niri_clip_core::{config, preview, store};
 
 #[derive(Debug, Clone)]
@@ -247,9 +249,11 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         let cur = store::current_hash();
         let filtered = self.filtered();
+        let q_lower = self.query.to_lowercase();
 
-        // 视觉对齐 fzf TUI：header 提示行 → 搜索框 → 行列表 → 底部预览
+        // 视觉对齐 fzf TUI：info 头行 → "剪贴板> " 提示符 → 行列表 → 底部预览
         let header = "1-9快选 · Enter复制 · Ctrl-Y连复 · Ctrl-P固定 · Ctrl-X删除 · Esc清除/退出";
+        let counter = format!("{}/{}", filtered.len(), self.clips.len());
 
         let rows = filtered.iter().enumerate().map(|(idx, clip)| {
             let selected = idx == self.selected;
@@ -265,14 +269,42 @@ impl App {
             } else {
                 " ".to_string()
             };
-            let line = format!(
-                "{cursor} {quick} {cur_mark}{star} {}",
-                preview::preview_text(clip, self.preview_width)
-            );
+            let prefix = format!("{cursor} {quick} {cur_mark}{star} ");
+            let preview = preview::preview_text(clip, self.preview_width);
+            let base = if selected { ROW_FG_SELECTED } else { ROW_FG };
+
+            // fzf 灵魂：命中查询子序列的字符用 hl 色点亮
+            let flags = if self.query.is_empty() {
+                None
+            } else {
+                fuzzy_flags(&q_lower, &preview)
+            };
+
+            let mut spans: Vec<text::Span<'static, (), Font>> = Vec::new();
+            spans.push(text::Span::new(prefix).color(base));
+            let mut run = String::new();
+            let mut run_hit = false;
+            for (i, ch) in preview.chars().enumerate() {
+                let hit = flags.as_ref().is_some_and(|f| f.get(i).copied().unwrap_or(false));
+                if i > 0 && hit != run_hit {
+                    spans.push(
+                        text::Span::new(std::mem::take(&mut run))
+                            .color(if run_hit { HL } else { base }),
+                    );
+                }
+                run_hit = hit;
+                run.push(ch);
+            }
+            if !run.is_empty() {
+                spans.push(text::Span::new(run).color(if run_hit { HL } else { base }));
+            }
+
             container(
-                text(line)
+                text::Rich::with_spans(spans)
                     .size(14)
-                    .color(if selected { ROW_FG_SELECTED } else { ROW_FG }),
+                    .font(Font::MONOSPACE)
+                    .width(Length::Fill)
+                    .wrapping(text::Wrapping::None),
             )
             .width(Length::Fill)
             .padding([4, 10])
@@ -290,25 +322,32 @@ impl App {
         let mut col = column![]
             .spacing(6)
             .push(
-                container(text(header).size(11).color(MUTED))
-                    .width(Length::Fill)
-                    .padding([6, 10]),
-            )
-            .push(
                 container(
-                    text_input(
-                        "剪贴板> 搜索（中文 IME / Ctrl-V 粘贴，子序列匹配）…",
-                        &self.query,
-                    )
-                    .id(self.search_id.clone())
-                    .on_input(Message::Query)
-                    .on_paste(Message::Query)
-                    .size(14)
-                    .padding([7, 10])
-                    .style(input_style),
+                    row![
+                        text(header).size(11).color(MUTED),
+                        space::horizontal(),
+                        text(counter).size(11).color(MUTED)
+                    ]
+                    .width(Length::Fill),
                 )
                 .width(Length::Fill)
-                .padding([0, 8]),
+                .padding([6, 10]),
+            )
+            .push(
+                // fzf 式提示符行：无输入框边框，前缀 + 透明输入区
+                row![
+                    text("剪贴板> ").size(14).color(ACCENT),
+                    text_input("", &self.query)
+                        .id(self.search_id.clone())
+                        .on_input(Message::Query)
+                        .on_paste(Message::Query)
+                        .size(14)
+                        .font(Font::MONOSPACE)
+                        .padding([7, 0])
+                        .style(prompt_style)
+                ]
+                .width(Length::Fill)
+                .padding([0, 10]),
             )
             .push(
                 scrollable(column(rows).width(Length::Fill).spacing(2))
@@ -429,13 +468,29 @@ fn fuzzy_match(q: &str, t: &str) -> bool {
     q.chars().all(|qc| chars.any(|tc| tc == qc))
 }
 
+/// 同 fuzzy_match，但返回 t 每个字符是否命中（Vec 与 t.chars() 对齐）。
+/// 贪心逐字符推进；查询未耗尽 → None（整行不高亮）。
+fn fuzzy_flags(q: &str, t: &str) -> Option<Vec<bool>> {
+    let mut qc = q.chars();
+    let mut next = qc.next();
+    let mut flags = Vec::with_capacity(t.chars().count());
+    for ch in t.chars() {
+        let hit = next.is_some_and(|n| n == ch);
+        if hit {
+            next = qc.next();
+        }
+        flags.push(hit);
+    }
+    next.is_none().then_some(flags)
+}
+
 /// 常见位图魔数：PNG / JPEG / GIF / WebP / BMP。
 /// 魔数不对直接拒绝——iced image 解码失败会在渲染线程 panic，不能赌。
 fn is_image_magic(b: &[u8]) -> bool {
     b.starts_with(&[0x89, b'P', b'N', b'G'])
         || b.starts_with(&[0xFF, 0xD8, 0xFF])
         || b.starts_with(b"GIF8")
-        || (b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP")
+        || (b.len() > 12 && b.starts_with(b"RIFF") && b[8..12] == *b"WEBP")
         || b.starts_with(b"BM")
 }
 
@@ -478,6 +533,13 @@ const MUTED: Color = Color {
     b: 0.650,
     a: 1.0,
 };
+/// 命中字符高亮（fzf 默认 hl：深红）
+const HL: Color = Color {
+    r: 0.949,
+    g: 0.467,
+    b: 0.478,
+    a: 1.0,
+};
 const ACCENT: Color = Color {
     r: 0.48,
     g: 0.64,
@@ -510,18 +572,14 @@ const RADIUS_PANEL: border::Radius = border::Radius {
     bottom_left: 6.0,
 };
 
-fn input_style(_theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
-    let (bg, border_color) = match status {
-        text_input::Status::Focused { .. } => (PANEL, ACCENT),
-        text_input::Status::Hovered => (PANEL, BORDER),
-        _ => (PANEL, BORDER),
-    };
+fn prompt_style(_theme: &iced::Theme, _status: text_input::Status) -> text_input::Style {
     text_input::Style {
-        background: Background::Color(bg),
+        // 无边框无底色，融入提示符行（fzf 的输入就是一段裸文本）
+        background: Background::Color(BG),
         border: Border {
-            color: border_color,
-            width: 1.0,
-            radius: RADIUS_PANEL,
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: border::Radius::default(),
         },
         icon: ACCENT,
         placeholder: MUTED,
@@ -589,6 +647,10 @@ fn confirm_style(_theme: &iced::Theme) -> container::Style {
     }
 }
 
+fn theme_dark(_state: &App) -> iced::Theme {
+    iced::Theme::Dark
+}
+
 fn main() -> iced::Result {
     // 常规 xdg 窗口：受 niri window-rule 约束（悬浮/位置/边框由用户
     // rule.kdl 约定，app-id = "niri-clip-gui"），winit 原生 IME
@@ -603,9 +665,13 @@ fn main() -> iced::Result {
         App::view,
     )
     .title("niri-clip")
+    // 深色主题（光标/默认控件色）+ 等宽字体：终端同款观感
+    // （fn item 而非闭包：theme() 的 HRTB 闭包推导在 iced 0.14 报错）
+    .theme(theme_dark)
+    .default_font(Font::MONOSPACE)
     .subscription(App::subscription)
     .window(iced::window::Settings {
-        size: iced::Size::new(760.0, 420.0),
+        size: iced::Size::new(500.0, 675.0),
         resizable: true,
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: String::from("niri-clip-gui"),
