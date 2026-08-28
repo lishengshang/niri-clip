@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **原生 UI 架构修订（ADR-001 修订 1）**：layer-shell 覆盖层改为常规 xdg
+  窗口（app-id = `niri-clip-gui`）——可被 niri window-rule 全量约束（悬浮/
+  位置/边框/阴影由用户 rule.kdl 约定）；winit 原生 IME 解锁中文搜索；
+  底部预览窗格直接渲染剪贴板图片（iced image widget）
+- **渲染器固定 tiny-skia 纯软件**：NVIDIA wgpu 冻结（上游 #360）与 GL
+  启动失败双问题的彻底规避，二进制 -1/3，与显卡驱动解耦
+
 ## v0.5.0 - 2026-08-28
 
 > 亮点：原生 layer-shell UI（tui_backend=native，无终端秒开）、▶ 当前项置顶、
