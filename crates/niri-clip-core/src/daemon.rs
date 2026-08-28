@@ -33,13 +33,15 @@ fn watch_shell_command(exe: &std::path::Path, timeout_secs: u64) -> String {
     format!("exec timeout {timeout_secs}s {} store", exe.display())
 }
 
-/// 超限提示：stderr 恒写；桌面通知尽力而为（无通知服务时静默）
+/// 超限提示：stderr 恒写；桌面通知受 notify_enabled 门控（P1-4，无通知服务时静默）
 fn notify_oversize(msg: &str) {
     eprintln!("[niri-clip store] {msg}，已忽略");
-    let _ = notify_rust::Notification::new()
-        .summary("niri-clip")
-        .body(msg)
-        .show();
+    if Config::load().notify_enabled {
+        let _ = notify_rust::Notification::new()
+            .summary("niri-clip")
+            .body(msg)
+            .show();
+    }
 }
 
 /// `niri-clip store` : 入库一段剪贴板载荷。
@@ -172,10 +174,12 @@ async fn run_watch(timeout_secs: u64) -> Result<()> {
     println!(
         "[niri-clip daemon] event-driven source: wl-paste --watch (per-capture timeout {timeout_secs}s)"
     );
-    let _ = notify_rust::Notification::new()
-        .summary("niri-clip")
-        .body("守护进程已启动 (event)")
-        .show();
+    if Config::load().notify_enabled {
+        let _ = notify_rust::Notification::new()
+            .summary("niri-clip")
+            .body("守护进程已启动 (event)")
+            .show();
+    }
 
     // 注意传给内部 sh 的引号转义：exe 含空格时仍可靠
     let mut child = tokio::process::Command::new("wl-paste")

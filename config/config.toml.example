@@ -11,6 +11,7 @@ pinned_on_top = true
 tui_backend = "auto"      # auto | native | fzf | fuzzel
                           # native: 原生 layer-shell 窗口（需 niri-clip-gui）
                           # auto: gui 可用优先 native，其次 fzf，最后 fuzzel
+notify_enabled = true     # v0.5（P1-4）：桌面通知开关（mako 等），false 完全静默
 enable_preview = true
 # v0.4.1：事件驱动捕获下每次子进程的超时秒数（防病态读挂起）
 capture_timeout_secs = 5

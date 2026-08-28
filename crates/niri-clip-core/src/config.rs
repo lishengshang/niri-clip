@@ -30,6 +30,9 @@ pub struct Config {
     /// v0.5：单张图片入库上限（字节），截图通常 1–3MB，给足余量
     #[serde(default = "default_max_image_bytes")]
     pub max_image_bytes: usize,
+    /// v0.5（P1-4）：桌面通知开关（mako 等）。关闭后完全静默运行
+    #[serde(default = "default_true")]
+    pub notify_enabled: bool,
 }
 
 fn default_max_items() -> usize {
@@ -74,6 +77,7 @@ impl Default for Config {
             capture_timeout_secs: 5,
             max_clip_bytes: 1_048_576,
             max_image_bytes: 10_485_760,
+            notify_enabled: true,
         }
     }
 }
