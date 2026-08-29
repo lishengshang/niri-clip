@@ -12,15 +12,21 @@
 //! current 指针），本 crate 只做渲染与输入分发。
 
 use std::cell::RefCell;
+use std::cmp::Reverse;
+
+mod instance;
+mod search;
+mod theme;
+
+use instance::ensure_single_instance;
+use search::{fuzzy_flags, fuzzy_score};
+use theme::*;
 
 use iced::widget::{
     column, container, image, mouse_area, operation, row, rule, scrollable, space, text,
     text_input,
 };
-use iced::{
-    border, keyboard, Background, Border, Color, Element, Font, Length, Shadow, Subscription,
-    Task, Vector,
-};
+use iced::{keyboard, Background, Border, Element, Font, Length, Shadow, Subscription, Task};
 use niri_clip_core::{config, preview, store};
 
 /// 主字体：JetBrainsMono Nerd Font（真机已装）。
@@ -142,7 +148,7 @@ impl App {
             .iter()
             .filter_map(|c| fuzzy_score(&q, &c.text).map(|s| (s, c)))
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|s| Reverse(s.0));
         scored.into_iter().map(|(_, c)| c).collect()
     }
 
@@ -629,60 +635,6 @@ impl App {
     }
 }
 
-/// fzf 风格简易评分：连续命中 +4、词首/行首 +5、基础命中 +2、
-/// 位置弱惩罚。None = 子序列不匹配。
-/// q 需已 lowercase；t 逐字符 ci_eq 比较（免逐条 to_lowercase 分配）
-fn fuzzy_score(q: &str, t: &str) -> Option<i32> {
-    let mut qc = q.chars();
-    let mut want = qc.next();
-    let mut score = 0i32;
-    let mut prev_hit = false;
-    let mut prev_ch: Option<char> = None;
-    for (i, ch) in t.chars().enumerate() {
-        if want.is_some_and(|w| ci_eq(w, ch)) {
-            want = qc.next();
-            score += 2;
-            if prev_hit {
-                score += 4; // 连续命中：词组感
-            }
-            if prev_ch.map_or(true, |p| !p.is_alphanumeric()) {
-                score += 5; // 词首/行首
-            }
-            score -= (i as i32) / 64; // 位置弱惩罚
-            prev_hit = true;
-            if want.is_none() {
-                return Some(score);
-            }
-        } else {
-            prev_hit = false;
-        }
-        prev_ch = Some(ch);
-    }
-    None
-}
-
-/// 大小写不敏感比较：ASCII 归一，非 ASCII（中文等本身无大小写）直等
-#[inline]
-fn ci_eq(a: char, b: char) -> bool {
-    a == b || a.to_ascii_lowercase() == b.to_ascii_lowercase()
-}
-
-/// 同 fuzzy_match，但返回 t 每个字符是否命中（Vec 与 t.chars() 对齐）。
-/// 贪心逐字符推进；查询未耗尽 → None（整行不高亮）。
-fn fuzzy_flags(q: &str, t: &str) -> Option<Vec<bool>> {
-    let mut qc = q.chars();
-    let mut next = qc.next();
-    let mut flags = Vec::with_capacity(t.chars().count());
-    for ch in t.chars() {
-        let hit = next.is_some_and(|n| n == ch);
-        if hit {
-            next = qc.next();
-        }
-        flags.push(hit);
-    }
-    next.is_none().then_some(flags)
-}
-
 /// 常见位图魔数：PNG / JPEG / GIF / WebP / BMP。
 /// 魔数不对直接拒绝——iced image 解码失败会在渲染线程 panic，不能赌。
 fn is_image_magic(b: &[u8]) -> bool {
@@ -693,83 +645,7 @@ fn is_image_magic(b: &[u8]) -> bool {
         || b.starts_with(b"BM")
 }
 
-// 配色对齐 fzf 默认深色风格（与 layer-shell 旧版一致的视觉语言）
-const BG: Color = Color {
-    r: 0.086,
-    g: 0.086,
-    b: 0.110,
-    a: 1.0,
-};
-/// 面板色：搜索框 / 预览窗格底色（比 BG 微亮一档）
-const PANEL: Color = Color {
-    r: 0.110,
-    g: 0.110,
-    b: 0.140,
-    a: 1.0,
-};
-const BORDER: Color = Color {
-    r: 0.170,
-    g: 0.170,
-    b: 0.220,
-    a: 1.0,
-};
-const ROW_FG: Color = Color {
-    r: 0.88,
-    g: 0.88,
-    b: 0.91,
-    a: 1.0,
-};
-const ROW_FG_SELECTED: Color = Color {
-    r: 0.96,
-    g: 0.96,
-    b: 0.98,
-    a: 1.0,
-};
-/// 次要文本：header 提示行 / 占位符 / 预览
-const MUTED: Color = Color {
-    r: 0.545,
-    g: 0.570,
-    b: 0.650,
-    a: 1.0,
-};
-/// 命中字符高亮（fzf 默认 hl：深红）
-const HL: Color = Color {
-    r: 0.949,
-    g: 0.467,
-    b: 0.478,
-    a: 1.0,
-};
-const ACCENT: Color = Color {
-    r: 0.48,
-    g: 0.64,
-    b: 0.97,
-    a: 1.0,
-};
-const SEL_BG: Color = Color {
-    r: 0.16,
-    g: 0.28,
-    b: 0.50,
-    a: 1.0,
-};
-const SCROLLBAR: Color = Color {
-    r: 0.230,
-    g: 0.230,
-    b: 0.290,
-    a: 1.0,
-};
-
-const RADIUS_ROW: border::Radius = border::Radius {
-    top_left: 4.0,
-    top_right: 4.0,
-    bottom_right: 4.0,
-    bottom_left: 4.0,
-};
-const RADIUS_PANEL: border::Radius = border::Radius {
-    top_left: 6.0,
-    top_right: 6.0,
-    bottom_right: 6.0,
-    bottom_left: 6.0,
-};
+// 布局常量（视图结构相关，主题配色见 theme.rs）
 
 /// 行定高：Rich 文本 14px × 行高 1.3 ≈ 18.2 + 上下 padding 8，凑整 27。
 /// 分界线 1px → 行距（pitch）恒定 28，键盘导航的 scroll_to 据此精确计算
@@ -783,215 +659,8 @@ const MAX_RENDER_ROWS: usize = 300;
 /// 图片 Handle LRU 上限：最近浏览的图免重复解码
 const IMAGE_CACHE_CAP: usize = 8;
 
-/// 面板阴影（立体感）：黑色低透明 + 垂直偏移
-const SHADOW_PANEL: Shadow = Shadow {
-    color: Color {
-        a: 0.35,
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-    },
-    offset: Vector {
-        x: 0.0,
-        y: 2.0,
-    },
-    blur_radius: 10.0,
-};
-/// 选中行微阴影
-const SHADOW_ROW: Shadow = Shadow {
-    color: Color {
-        a: 0.30,
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-    },
-    offset: Vector { x: 0.0, y: 1.0 },
-    blur_radius: 5.0,
-};
-
-fn prompt_style(_theme: &iced::Theme, _status: text_input::Status) -> text_input::Style {
-    text_input::Style {
-        // 无边框无底色，融入提示符行（fzf 的输入就是一段裸文本）
-        background: Background::Color(BG),
-        border: Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: border::Radius::default(),
-        },
-        icon: ACCENT,
-        placeholder: MUTED,
-        value: ROW_FG_SELECTED,
-        selection: Color {
-            a: 0.35,
-            ..ACCENT
-        },
-    }
-}
-
-fn rule_style(_theme: &iced::Theme) -> rule::Style {
-    rule::Style {
-        color: BORDER,
-        radius: border::Radius::default(),
-        fill_mode: rule::FillMode::Full,
-        snap: true,
-    }
-}
-
-fn scroll_style(_theme: &iced::Theme, status: scrollable::Status) -> scrollable::Style {
-    // 滚动条默认隐藏，仅当鼠标悬停/拖动滚动条本身时浮现
-    let bar_visible = match status {
-        scrollable::Status::Active { .. } => false,
-        scrollable::Status::Hovered {
-            is_vertical_scrollbar_hovered,
-            ..
-        } => is_vertical_scrollbar_hovered,
-        scrollable::Status::Dragged {
-            is_vertical_scrollbar_dragged,
-            ..
-        } => is_vertical_scrollbar_dragged,
-    };
-    let hidden_rail = scrollable::Rail {
-        background: None,
-        border: Border::default(),
-        scroller: scrollable::Scroller {
-            background: Background::Color(Color::TRANSPARENT),
-            border: Border::default(),
-        },
-    };
-    let v_rail = if bar_visible {
-        scrollable::Rail {
-            background: None,
-            border: Border::default(),
-            scroller: scrollable::Scroller {
-                background: Background::Color(SCROLLBAR),
-                border: Border {
-                    radius: border::Radius::from(4.0),
-                    ..Default::default()
-                },
-            },
-        }
-    } else {
-        hidden_rail
-    };
-    scrollable::Style {
-        container: container::Style::default(),
-        vertical_rail: v_rail,
-        horizontal_rail: hidden_rail,
-        gap: None,
-        auto_scroll: scrollable::AutoScroll {
-            background: Background::Color(ACCENT),
-            border: Border::default(),
-            shadow: Default::default(),
-            icon: BG,
-        },
-    }
-}
-
-fn preview_style(_theme: &iced::Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(PANEL)),
-        text_color: Some(MUTED),
-        border: Border {
-            color: BORDER,
-            width: 1.0,
-            radius: RADIUS_PANEL,
-        },
-        // 浮起的面板：立体感
-        shadow: SHADOW_PANEL,
-        ..Default::default()
-    }
-}
-
-fn confirm_style(_theme: &iced::Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Color {
-            r: 0.42,
-            g: 0.11,
-            b: 0.11,
-            a: 1.0,
-        })),
-        text_color: Some(ROW_FG_SELECTED),
-        border: Border {
-            radius: RADIUS_PANEL,
-            ..Default::default()
-        },
-        ..Default::default()
-    }
-}
-
 fn theme_dark(_state: &App) -> iced::Theme {
     iced::Theme::Dark
-}
-
-/// 单实例保护：Mod+V 连按会并发拉起多个 GUI。state/gui.lock 存 PID——
-/// 活实例存在 → 聚焦其窗口后本进程退出；残留死锁（崩溃/强杀）→ 覆写接管
-fn ensure_single_instance() {
-    use std::io::Write;
-    let dir = config::Config::state_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("gui.lock");
-    let pid = std::process::id();
-
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut f) => {
-            let _ = write!(f, "{pid}");
-        }
-        Err(_) => {
-            let existing = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                .filter(|p| *p != pid && pid_alive(*p));
-            if existing.is_some() {
-                let _ = focus_existing_window();
-                std::process::exit(0);
-            }
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&path)
-            {
-                let _ = write!(f, "{pid}");
-            }
-        }
-    }
-}
-
-/// PID 活性复核：/proc cmdline 含进程名（防 PID 回收误判）
-fn pid_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-        .map(|s| s.replace('\0', " ").contains("niri-clip-gui"))
-        .unwrap_or(false)
-}
-
-/// 已开窗口聚焦到前台（niri IPC）：Mod+V 二连按 = 把它拉回来而非开新的
-fn focus_existing_window() -> bool {
-    let Ok(out) = std::process::Command::new("niri").args(["msg", "windows"]).output()
-    else {
-        return false;
-    };
-    if !out.status.success() {
-        return false;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut current_id: Option<String> = None;
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("Window ID ") {
-            current_id = rest.split(':').next().map(|s| s.trim().to_string());
-        } else if line.contains("App ID:") && line.contains("niri-clip-gui") {
-            if let Some(id) = current_id.take() {
-                return std::process::Command::new("niri")
-                    .args(["msg", "action", "focus-window", "--id", &id])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-            }
-        }
-    }
-    false
 }
 
 fn main() -> iced::Result {
