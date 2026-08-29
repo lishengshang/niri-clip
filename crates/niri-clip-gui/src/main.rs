@@ -61,8 +61,10 @@ enum Message {
 
 /// 把阻塞任务丢到后台线程执行（iced 默认执行器为 thread-pool，
 /// Task::perform 的 future 里阻塞仅占一个 worker，UI 线程不受影响）。
-/// worker panic 时以 None 回传，UI 放弃本次结果不卡死。
-fn run_bg<T, F>(f: F, wrap: impl Fn(T) -> Message + Send + 'static) -> Task<Message>
+/// worker panic 时回传 `on_panic`——由调用方指定兜底消息，保证语义正确
+/// （Copy 任务 panic 必须走 CopyFinished{ok:false} 触发失败通知，而非被
+/// ListReloaded(None) 静默吞掉）。
+fn run_bg<T, F>(f: F, wrap: impl Fn(T) -> Message + Send + 'static, on_panic: Message) -> Task<Message>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
@@ -77,7 +79,7 @@ where
         },
         move |t| match t {
             Some(v) => wrap(v),
-            None => Message::ListReloaded(None),
+            None => on_panic,
         },
     )
 }
@@ -157,6 +159,12 @@ impl App {
         scored.into_iter().map(|(_, c)| c).collect()
     }
 
+    /// 可渲染行数：过滤结果与渲染上限取小。选中态/快选/导航必须以此为界——
+    /// 只画前 MAX_RENDER_ROWS 行，越界的高亮会落在不存在的行上
+    fn visible_len(&self) -> usize {
+        self.filtered().len().min(MAX_RENDER_ROWS)
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Query(q) => {
@@ -169,7 +177,7 @@ impl App {
             Message::Key(key, modifiers) => return self.on_key(key, modifiers),
             Message::Hover(idx) => {
                 // 仅在鼠标活跃时跟随：键盘滚动中忽略 on_enter（防闪烁）
-                if self.mouse_follow && idx < self.filtered().len() {
+                if self.mouse_follow && idx < self.visible_len() {
                     self.selected = idx;
                 }
             }
@@ -178,7 +186,7 @@ impl App {
             }
             Message::Pick(idx) => {
                 // 点击行 = 定位到该行并复制关闭（对齐 Enter）
-                if idx < self.filtered().len() {
+                if idx < self.visible_len() {
                     self.selected = idx;
                     return Task::batch([
                         self.scroll_to_selected(),
@@ -188,7 +196,7 @@ impl App {
             }
             Message::PickStay(idx) => {
                 // 右键行 = 定位到该行并连续复制（对齐 Ctrl-Y，不退出）
-                if idx < self.filtered().len() {
+                if idx < self.visible_len() {
                     self.selected = idx;
                     return Task::batch([
                         self.scroll_to_selected(),
@@ -211,6 +219,8 @@ impl App {
                     return run_bg(
                         move || store::copy_to_clipboard(id).is_ok(),
                         move |ok| Message::CopyFinished { exit, ok },
+                        // panic 按失败处理：触发失败通知而非静默吞掉
+                        Message::CopyFinished { exit, ok: false },
                     );
                 }
             }
@@ -238,13 +248,14 @@ impl App {
                     run_bg(
                         move || store::list(Self::load_limit()).ok(),
                         Message::ListReloaded,
+                        Message::ListReloaded(None),
                     ),
                 ]);
             }
             Message::ListReloaded(Some(clips)) => {
                 self.clips = clips;
-                if self.selected >= self.clips.len() {
-                    self.selected = self.clips.len().saturating_sub(1);
+                if self.selected >= self.visible_len() {
+                    self.selected = self.visible_len().saturating_sub(1);
                 }
                 return self.scroll_to_selected();
             }
@@ -303,6 +314,7 @@ impl App {
                         }
                         Message::ListReloaded(clips)
                     },
+                    Message::ListReloaded(None),
                 );
             }
             keyboard::Key::Character(c) if modifiers.control() && c == "x" => {
@@ -321,7 +333,7 @@ impl App {
                 } else {
                     c.parse().unwrap_or(0)
                 };
-                if n >= 1 && n <= self.filtered().len() {
+                if n >= 1 && n <= self.visible_len() {
                     self.selected = n - 1;
                     return self.update(Message::Copy { exit: true });
                 }
@@ -335,7 +347,7 @@ impl App {
         // 键盘导航接管选中：暂停悬停跟随（列表滚过静止指针会触发
         // 一串 on_enter，把选中态抢回去——闪烁根因）
         self.mouse_follow = false;
-        let n = self.filtered().len();
+        let n = self.visible_len();
         if n > 0 {
             let next = self.selected as i64 + delta as i64;
             self.selected = next.clamp(0, n as i64 - 1) as usize;
@@ -387,6 +399,7 @@ impl App {
                 }
                 Message::ListReloaded(clips)
             },
+            Message::ListReloaded(None),
         )
     }
 

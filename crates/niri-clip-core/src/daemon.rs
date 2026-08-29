@@ -314,6 +314,14 @@ pub async fn run() -> Result<()> {
     );
     println!("[niri-clip daemon] db: {}", Config::db_path().display());
 
+    // 启动时回收孤儿图片文件（旧版本 delete/wipe/淘汰不删文件的存量残留
+    // 与入库中途崩溃的 .tmp- 残片）。失败不阻断捕获，仅记日志。
+    match store::prune_orphan_images() {
+        Ok(0) => {}
+        Ok(n) => println!("[niri-clip daemon] 清理孤儿图片文件 {n} 个"),
+        Err(e) => eprintln!("[niri-clip daemon] prune orphan images failed: {e:#}"),
+    }
+
     if which::which("wl-paste").is_ok() {
         return run_watch(cfg.capture_timeout_secs).await;
     }

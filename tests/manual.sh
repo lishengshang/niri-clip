@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# niri-clip v0.3 manual test - 验证 Mod+V 删除后 pos 跟随 + 性能
+# niri-clip manual smoke test - 验证 pin 置顶 + 删除后 pos 跟随 + 性能
+# 全程在临时 XDG 环境隔离运行，绝不触碰真实剪贴板历史库
 set -euo pipefail
 BIN="${1:-$HOME/.cargo/bin/niri-clip}"
 if [[ ! -x "$BIN" ]]; then BIN="./target/debug/niri-clip"; fi
 if [[ ! -x "$BIN" ]]; then echo "niri-clip not found"; exit 1; fi
 
-echo "=== niri-clip v0.3 manual test ==="
+TMP_ROOT=$(mktemp -d /tmp/niri-clip-manual.XXXXXX)
+trap 'rm -rf "$TMP_ROOT"' EXIT
+export XDG_STATE_HOME="$TMP_ROOT/state"
+export XDG_CONFIG_HOME="$TMP_ROOT/config"
+export XDG_CACHE_HOME="$TMP_ROOT/cache"
+mkdir -p "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
+
+echo "=== niri-clip manual smoke test ==="
 echo "bin: $BIN"
 echo "version: $($BIN --version)"
+echo "isolated state: $XDG_STATE_HOME"
 
 # 1. wipe
 echo -e "\n[1] wipe"
@@ -29,8 +38,8 @@ $BIN list-raw | head -n 5
 
 # 3. 验证 pinned 置顶
 echo -e "\n[3] pin test"
-# list-raw 为 4 列格式 num\t★\tid\tpreview，id 在第 3 列
-first_id=$($BIN list-raw | head -n1 | cut -f3)
+# list-raw 为 5 列格式 num\t▶\t★\tid\tpreview，id 在第 4 列
+first_id=$($BIN list-raw | head -n1 | cut -f4)
 echo "pin $first_id"
 $BIN pin "$first_id" >/dev/null
 echo "after pin head:"
@@ -41,15 +50,15 @@ $BIN pin "$first_id" >/dev/null
 
 # 4. 验证删除后 pos 跟随（模拟 fzf --track --id-nth 逻辑）
 echo -e "\n[4] delete pos follow test (middle & last)"
-# 获取当前列表 id 顺序
-ids_before=($($BIN list-raw | cut -f2))
+# 获取当前列表 id 顺序（id 在第 4 列）
+ids_before=($($BIN list-raw | cut -f4))
 echo "before ids: ${ids_before[*]:0:5} ... total ${#ids_before[@]}"
 # 删中间第 5 条 (index 4)
 mid_id=${ids_before[4]}
 mid_next=${ids_before[5]}
 echo "delete middle id=$mid_id, expect next=$mid_next to move to pos 5"
 $BIN delete "$mid_id" >/dev/null
-ids_after=($($BIN list-raw | cut -f2))
+ids_after=($($BIN list-raw | cut -f4))
 echo "after ids: ${ids_after[*]:0:5} ..."
 if [[ "${ids_after[4]}" != "$mid_next" ]]; then
   echo "FAIL: middle delete pos not follow, expected ${mid_next} at pos5 got ${ids_after[4]}"
@@ -63,7 +72,7 @@ last_id=${ids_after[$last_idx]}
 prev_id=${ids_after[$((last_idx-1))]}
 echo "delete last id=$last_id, expect prev=$prev_id to be last"
 $BIN delete "$last_id" >/dev/null
-ids_after2=($($BIN list-raw | cut -f2))
+ids_after2=($($BIN list-raw | cut -f4))
 new_last=${ids_after2[-1]}
 if [[ "$new_last" != "$prev_id" ]]; then
   echo "FAIL: last delete pos not follow, expected $prev_id got $new_last"
@@ -86,8 +95,8 @@ $BIN list-raw >/dev/null 2>&1 || true
 end=$(date +%s%N)
 elapsed_ms=$(( (end-start)/1000000 ))
 echo "list-raw (300 limit) took ${elapsed_ms}ms"
-# 全量 10k 列表测试
-DB_PATH="${XDG_STATE_HOME:-$HOME/.local/state}/niri-clip/db.sqlite"
+# 全量列表测试（隔离环境内）
+DB_PATH="$XDG_STATE_HOME/niri-clip/db.sqlite"
 echo "full list via sqlite ($DB_PATH):"
 sqlite3 "$DB_PATH" "SELECT count(*) FROM clips;" 2>&1 | head
 time sqlite3 "$DB_PATH" "SELECT id, text FROM clips ORDER BY pinned DESC, ts DESC LIMIT 10000;" >/dev/null 2>&1 || echo "sqlite bench done"
@@ -100,9 +109,9 @@ fi
 
 # 6. 图片预览开关
 echo -e "\n[6] image preview config"
-if grep -q "enable_image_preview" ~/.config/niri-clip/config.toml 2>&1; then
+if grep -q "enable_image_preview" "$XDG_CONFIG_HOME/niri-clip/config.toml" 2>/dev/null; then
   echo "config has enable_image_preview"
-  cat ~/.config/niri-clip/config.toml | grep enable_image
+  grep enable_image "$XDG_CONFIG_HOME/niri-clip/config.toml"
 else
   echo "no image preview config"
 fi

@@ -315,19 +315,27 @@ pub fn insert_image(mime: &str, bytes: &[u8]) -> Result<Option<InsertedImage>> {
         params![hash, placeholder, mime, ts, bytes.len() as i64],
     )?;
     let id = tx.last_insert_rowid();
-    tx.commit()?;
-    touch_current(&hash);
 
+    // 数据文件写入放进同一事务窗口：先落 `.tmp-` 再原子 rename 到最终路径。
+    // 任何一步失败 tx drop 即回滚行，不再出现"有行无图"的永久残缺状态
+    // （旧行为：先 commit 行、后写文件，中途崩溃则 hash 已占用，该图永远无法重录）。
+    // rename 成功但 UPDATE 失败的残余文件由 prune_orphan_images 兜底回收。
     let dir = Config::images_dir();
     std::fs::create_dir_all(&dir)?;
     tighten_dir_perms(&dir);
     let path = dir.join(format!("{}.bin", id));
-    std::fs::write(&path, bytes)
-        .with_context(|| format!("write image cache {}", path.display()))?;
-    conn.execute(
+    let tmp = dir.join(format!(".tmp-{}.bin", id));
+    std::fs::write(&tmp, bytes)
+        .with_context(|| format!("write image cache {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("publish image cache {}", path.display()))?;
+    tighten_file_perms(&path);
+    tx.execute(
         "UPDATE clips SET image_path=?1 WHERE id=?2",
         params![path.to_string_lossy(), id],
     )?;
+    tx.commit()?;
+    touch_current(&hash);
 
     enforce_max_items(&conn, cfg.max_items)?;
     Ok(Some(InsertedImage { id, path }))
@@ -337,12 +345,56 @@ fn enforce_max_items(conn: &Connection, max_items: usize) -> Result<()> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
     if count > max_items as i64 {
         let to_del = count - max_items as i64;
-        conn.execute(
-            "DELETE FROM clips WHERE id IN (SELECT id FROM clips WHERE pinned=0 ORDER BY ts ASC LIMIT ?1)",
-            params![to_del],
+        // RETURNING 带出被淘汰条目的数据文件路径，行删文件也删（否则
+        // images/ 只进不出，截图类负载下 state 目录会无限膨胀）
+        let mut stmt = conn.prepare(
+            "DELETE FROM clips WHERE id IN (SELECT id FROM clips WHERE pinned=0 ORDER BY ts ASC LIMIT ?1) RETURNING image_path",
         )?;
+        let paths = stmt.query_map(params![to_del], |r| r.get::<_, Option<String>>(0))?;
+        for p in paths {
+            if let Some(p) = p? {
+                let _ = std::fs::remove_file(p);
+            }
+        }
     }
     Ok(())
+}
+
+/// 孤儿清扫：回收 images/ 下不被任何 clips.image_path 引用的数据文件。
+/// 两个来源：v0.5.0 及更早版本 delete/wipe/淘汰只删行不删文件的存量残留；
+/// insert_image 在 rename 成功但 UPDATE 失败窗口内留下的无主文件。
+/// `.tmp-` 前缀为入库中途崩溃的临时文件，一并清理。daemon 启动时调用一次。
+pub fn prune_orphan_images() -> Result<usize> {
+    let conn = connect()?;
+    let dir = Config::images_dir();
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let referenced: std::collections::HashSet<String> = {
+        let mut stmt =
+            conn.prepare("SELECT image_path FROM clips WHERE image_path IS NOT NULL")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut set = std::collections::HashSet::new();
+        for r in rows {
+            set.insert(r?);
+        }
+        set
+    };
+    let mut n = 0;
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        let p = entry.path();
+        let name = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !name.starts_with(".tmp-") && referenced.contains(&p.to_string_lossy().to_string()) {
+            continue;
+        }
+        if std::fs::remove_file(&p).is_ok() {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 const CLIP_COLS: &str = "id, hash, text, mime, ts, pinned, image_path";
@@ -382,13 +434,30 @@ pub fn list(limit: usize) -> Result<Vec<Clip>> {
 
 pub fn delete(id: i64) -> Result<()> {
     let conn = connect()?;
+    let img: Option<String> = conn
+        .query_row(
+            "SELECT image_path FROM clips WHERE id=?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .ok();
     conn.execute("DELETE FROM clips WHERE id=?1", params![id])?;
+    // 行删文件也删；文件清理失败不阻断（残留由 prune_orphan_images 兜底）
+    if let Some(p) = img {
+        let _ = std::fs::remove_file(p);
+    }
     Ok(())
 }
 
 pub fn wipe() -> Result<()> {
     let conn = connect()?;
     conn.execute("DELETE FROM clips", [])?;
+    // 全库清空后 images/ 下不再有任何引用者，整个目录内容可安全清空
+    if let Ok(rd) = std::fs::read_dir(Config::images_dir()) {
+        for e in rd.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
     Ok(())
 }
 
@@ -777,6 +846,66 @@ mod tests {
             assert!(after[0].pinned);
             let few = list(3).unwrap();
             assert_eq!(few.len(), 3);
+        });
+    }
+
+    #[test]
+    fn delete_and_wipe_remove_image_files() {
+        with_env(|_| {
+            clear_db();
+            let a = insert_image("image/png", b"\x89PNG-a")
+                .unwrap()
+                .expect("insert a");
+            let b = insert_image("image/png", b"\x89PNG-b")
+                .unwrap()
+                .expect("insert b");
+            assert!(a.path.exists() && b.path.exists());
+            delete(a.id).unwrap();
+            assert!(!a.path.exists(), "delete 应同步删除数据文件");
+            assert!(b.path.exists());
+            wipe().unwrap();
+            assert!(!b.path.exists(), "wipe 应清空所有数据文件");
+        });
+    }
+
+    #[test]
+    fn max_items_eviction_removes_image_files() {
+        with_env(|g| {
+            clear_db();
+            let cfg_dir = g.root.join("config/niri-clip");
+            std::fs::create_dir_all(&cfg_dir).unwrap();
+            std::fs::write(cfg_dir.join("config.toml"), "max_items = 1\n").unwrap();
+            let a = insert_image("image/png", b"\x89PNG-a")
+                .unwrap()
+                .expect("insert a");
+            let b = insert_image("image/png", b"\x89PNG-b")
+                .unwrap()
+                .expect("insert b");
+            // b 入库触发淘汰：a（未 pin、更旧）连行带文件一起消失
+            assert!(get(a.id).is_err(), "淘汰条目的行应被删除");
+            assert!(!a.path.exists(), "淘汰条目的数据文件应被删除");
+            assert!(b.path.exists());
+        });
+    }
+
+    #[test]
+    fn prune_orphan_images_removes_unreferenced_files() {
+        with_env(|_| {
+            clear_db();
+            let img = insert_image("image/png", b"\x89PNG-ok")
+                .unwrap()
+                .expect("insert");
+            let dir = Config::images_dir();
+            // 旧版本遗留的孤儿：文件在、行不在
+            let orphan = dir.join("9999.bin");
+            std::fs::write(&orphan, b"orphan").unwrap();
+            // 入库中途崩溃的临时文件
+            let tmp = dir.join(".tmp-1234.bin");
+            std::fs::write(&tmp, b"tmp").unwrap();
+            assert_eq!(prune_orphan_images().unwrap(), 2);
+            assert!(!orphan.exists() && !tmp.exists());
+            assert!(img.path.exists(), "被引用的文件不得误删");
+            assert_eq!(prune_orphan_images().unwrap(), 0, "二次清扫应无残留");
         });
     }
 }

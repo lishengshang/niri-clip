@@ -424,7 +424,13 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
     }
     let clip = store::get(id)?;
     store::touch_current(&clip.hash);
-    let mut wl = Command::new("wl-copy").stdin(Stdio::piped()).spawn()?;
+    let mut wl = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        // 与 fzf 路径同款：wl-copy fork 的守护进程不得继承终端 fd，
+        // 否则 fuzzel 退出后残留黑屏空窗口
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
     wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
     wl.wait()?;
     Ok(())
