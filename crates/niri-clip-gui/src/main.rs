@@ -46,6 +46,10 @@ enum Message {
     MouseMove,
     /// 鼠标点击行：定位并复制关闭（对齐 Enter 语义）
     Pick(usize),
+    /// 鼠标右键行：定位并连续复制（对齐 Ctrl-Y 语义，不退出）
+    PickStay(usize),
+    /// 滚动反馈：带上真实视口高度，修正滚动跟随的居中估算
+    Scrolled(scrollable::Viewport),
 }
 
 /// 把阻塞任务丢到后台线程执行（iced 默认执行器为 thread-pool，
@@ -83,13 +87,19 @@ struct App {
     preview_width: usize,
     /// 图片预览开关（对齐 fzf TUI 的 enable_image_preview 语义）
     image_preview_enabled: bool,
+    /// 底部预览窗格开关（enable_preview 配置）
+    enable_preview: bool,
+    /// 桌面通知开关（复制失败等反馈）
+    notify_enabled: bool,
+    /// 滚动视口实测半高（on_scroll 回填，resize 自适应），初始为估算值
+    viewport_half: f32,
     /// 鼠标悬停跟随开关：键盘导航时关闭——列表在静止指针下滑动会
     /// 逐行触发 on_enter，悬停跟随会反复抢走选中态（界面闪烁根因）
     mouse_follow: bool,
-    /// 图片 Handle 跨帧缓存：(clip id, Handle)。Handle::from_bytes 每次
+    /// 图片 Handle LRU 缓存（clip id → Handle）。Handle::from_bytes 每次
     /// 调用生成新 Id，若在 view 里现建会导致 tiny-skia 每帧重新解码；
     /// clip id 内容不可变，按 id 缓存安全。view(&self) 下用 RefCell。
-    image_cache: RefCell<Option<(i64, image::Handle)>>,
+    image_cache: RefCell<Vec<(i64, image::Handle)>>,
 }
 
 impl App {
@@ -105,26 +115,35 @@ impl App {
             confirm_delete: false,
             preview_width: cfg.preview_width,
             image_preview_enabled: cfg.enable_image_preview,
+            enable_preview: cfg.enable_preview,
+            notify_enabled: cfg.notify_enabled,
+            viewport_half: VIEWPORT_HALF,
             mouse_follow: false,
-            image_cache: RefCell::new(None),
+            image_cache: RefCell::new(Vec::new()),
         }
     }
 
     fn load_limit() -> usize {
+        // 全量载入（DB 本身受 max_items 约束）：搜索范围不再止于旧
+        // TUI_LIMIT=300，渲染侧另有 MAX_RENDER_ROWS 兜底
         let cfg = config::Config::load();
-        cfg.max_items.min(store::TUI_LIMIT)
+        cfg.max_items
     }
 
-    /// 过滤后的视图：fzf 风格子序列匹配（大小写归一，中文按字符）
+    /// 过滤后的视图：fzf 风格子序列匹配 + 简易评分排序
+    /// （连续命中/词首加权，命中越早越好）；空查询保持存储序
     fn filtered(&self) -> Vec<&store::Clip> {
         if self.query.is_empty() {
             return self.clips.iter().collect();
         }
         let q = self.query.to_lowercase();
-        self.clips
+        let mut scored: Vec<(i32, &store::Clip)> = self
+            .clips
             .iter()
-            .filter(|c| fuzzy_match(&q, &c.text.to_lowercase()))
-            .collect()
+            .filter_map(|c| fuzzy_score(&q, &c.text).map(|s| (s, c)))
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.into_iter().map(|(_, c)| c).collect()
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
@@ -156,6 +175,23 @@ impl App {
                     ]);
                 }
             }
+            Message::PickStay(idx) => {
+                // 右键行 = 定位到该行并连续复制（对齐 Ctrl-Y，不退出）
+                if idx < self.filtered().len() {
+                    self.selected = idx;
+                    return Task::batch([
+                        self.scroll_to_selected(),
+                        self.update(Message::Copy { exit: false }),
+                    ]);
+                }
+            }
+            Message::Scrolled(vp) => {
+                // 真实视口高度回填：resize / 预览高度变化后滚动跟随仍居中
+                let h = vp.bounds().height;
+                if h > 1.0 {
+                    self.viewport_half = (h / 2.0).clamp(120.0, 400.0);
+                }
+            }
             Message::Copy { exit } => {
                 // 复制链路（wl-copy fork/wait + sqlite 读）全部后台化，
                 // UI 线程零阻塞——同步 wait 是卡死根因
@@ -169,7 +205,15 @@ impl App {
             }
             Message::CopyFinished { exit, ok } => {
                 if !ok {
-                    eprintln!("[niri-clip gui] copy failed");
+                    // 通知开关：失败反馈（窗口即将退出，stderr 看不见）
+                    if self.notify_enabled {
+                        let _ = notify_rust::Notification::new()
+                            .summary("niri-clip")
+                            .body("复制失败")
+                            .show();
+                    } else {
+                        eprintln!("[niri-clip gui] copy failed");
+                    }
                 }
                 if exit {
                     // 后台复制已完成，wl-copy 守护进程持有数据，退出安全
@@ -282,9 +326,10 @@ impl App {
         Task::none()
     }
 
-    /// 把选中行滚动到可视区中部（行高定长 ROW_PITCH，偏移可精确计算）
+    /// 把选中行滚动到可视区中部（行高定长 ROW_PITCH，偏移可精确计算；
+    /// 视口半高用 on_scroll 回填的实测值，resize 自适应）
     fn scroll_to_selected(&self) -> Task<Message> {
-        let y = ((self.selected as f32) * ROW_PITCH - VIEWPORT_HALF).max(0.0);
+        let y = ((self.selected as f32) * ROW_PITCH - self.viewport_half).max(0.0);
         operation::scroll_to(
             self.list_id.clone(),
             operation::AbsoluteOffset { x: 0.0, y },
@@ -330,7 +375,7 @@ impl App {
         let hint_groups = [
             ("1-9,0", "快选"),
             ("⏎", "复制"),
-            ("Ctrl-Y", "连复"),
+            ("右键", "连复"),
             ("Ctrl-P", "固定"),
             ("Ctrl-X", "删除"),
             ("Esc", "清除/退出"),
@@ -343,7 +388,11 @@ impl App {
             hints.push(text::Span::new((*d).to_string()).color(MUTED));
         }
 
-        let rows = filtered.iter().enumerate().map(|(idx, clip)| {
+        let rows = filtered
+            .iter()
+            .enumerate()
+            .take(MAX_RENDER_ROWS)
+            .map(|(idx, clip)| {
             let selected = idx == self.selected;
             let cursor = if selected { "❯" } else { " " };
             let cur_mark = if cur.as_deref() == Some(clip.hash.as_str()) {
@@ -412,6 +461,7 @@ impl App {
                 }),
             )
             .on_press(Message::Pick(idx))
+            .on_right_press(Message::PickStay(idx))
             .on_enter(Message::Hover(idx))
             .on_move(|_| Message::MouseMove);
 
@@ -466,6 +516,7 @@ impl App {
                     .id(self.list_id.clone())
                     .height(Length::Fill)
                     .width(Length::Fill)
+                    .on_scroll(Message::Scrolled)
                     .style(scroll_style),
             );
 
@@ -489,7 +540,7 @@ impl App {
                 })
                 .into();
         };
-        if clip.mime.starts_with("image/") && self.image_preview_enabled {
+        if self.enable_preview && clip.mime.starts_with("image/") && self.image_preview_enabled {
             match self.image_handle(clip) {
                 Some(handle) => {
                     col = col.push(
@@ -510,7 +561,7 @@ impl App {
                     );
                 }
             }
-        } else {
+        } else if self.enable_preview {
             col = col.push(
                 container(text(self.preview_text(clip)).size(12))
                     .width(Length::Fill)
@@ -547,12 +598,12 @@ impl App {
     /// （旧实现 Handle::from_path 按扩展名猜格式，`.bin` 猜不出 →
     /// tiny-skia 渲染线程 panic "Image should be allocated"）。
     /// 无法识别魔数的文件回落 None，显示缺失提示而非崩溃。
+    /// LRU 上限 IMAGE_CACHE_CAP：上下移动时最近看过的图保持免解码
     fn image_handle(&self, clip: &store::Clip) -> Option<image::Handle> {
         let mut cache = self.image_cache.borrow_mut();
-        if let Some((id, handle)) = cache.as_ref() {
-            if *id == clip.id {
-                return Some(handle.clone());
-            }
+        if let Some(pos) = cache.iter().position(|(id, _)| *id == clip.id) {
+            let handle = cache[pos].1.clone();
+            return Some(handle);
         }
         let bytes = clip
             .image_path
@@ -561,7 +612,8 @@ impl App {
             .and_then(|r| r.ok())
             .filter(|b| is_image_magic(b))?;
         let handle = image::Handle::from_bytes(bytes);
-        *cache = Some((clip.id, handle.clone()));
+        cache.insert(0, (clip.id, handle.clone()));
+        cache.truncate(IMAGE_CACHE_CAP);
         Some(handle)
     }
 
@@ -575,10 +627,42 @@ impl App {
     }
 }
 
-/// fzf 风格子序列匹配：q 的字符按序全部出现在 t 中即可（大小写已归一）
-fn fuzzy_match(q: &str, t: &str) -> bool {
-    let mut chars = t.chars();
-    q.chars().all(|qc| chars.any(|tc| tc == qc))
+/// fzf 风格简易评分：连续命中 +4、词首/行首 +5、基础命中 +2、
+/// 位置弱惩罚。None = 子序列不匹配。
+/// q 需已 lowercase；t 逐字符 ci_eq 比较（免逐条 to_lowercase 分配）
+fn fuzzy_score(q: &str, t: &str) -> Option<i32> {
+    let mut qc = q.chars();
+    let mut want = qc.next();
+    let mut score = 0i32;
+    let mut prev_hit = false;
+    let mut prev_ch: Option<char> = None;
+    for (i, ch) in t.chars().enumerate() {
+        if want.is_some_and(|w| ci_eq(w, ch)) {
+            want = qc.next();
+            score += 2;
+            if prev_hit {
+                score += 4; // 连续命中：词组感
+            }
+            if prev_ch.map_or(true, |p| !p.is_alphanumeric()) {
+                score += 5; // 词首/行首
+            }
+            score -= (i as i32) / 64; // 位置弱惩罚
+            prev_hit = true;
+            if want.is_none() {
+                return Some(score);
+            }
+        } else {
+            prev_hit = false;
+        }
+        prev_ch = Some(ch);
+    }
+    None
+}
+
+/// 大小写不敏感比较：ASCII 归一，非 ASCII（中文等本身无大小写）直等
+#[inline]
+fn ci_eq(a: char, b: char) -> bool {
+    a == b || a.to_ascii_lowercase() == b.to_ascii_lowercase()
 }
 
 /// 同 fuzzy_match，但返回 t 每个字符是否命中（Vec 与 t.chars() 对齐）。
@@ -689,8 +773,13 @@ const RADIUS_PANEL: border::Radius = border::Radius {
 /// 分界线 1px → 行距（pitch）恒定 28，键盘导航的 scroll_to 据此精确计算
 const ROW_HEIGHT: f32 = 27.0;
 const ROW_PITCH: f32 = ROW_HEIGHT + 1.0;
-/// 视口半高估算（675 - 头行/提示符/预览窗格），选中行滚到可视区中部
+/// 视口半高初始估算（675 - 头行/提示符/预览窗格），on_scroll 回填实测值
 const VIEWPORT_HALF: f32 = 240.0;
+/// 渲染行数上限：全库载入后（max_items 可到 750）布局成本兜底；
+/// 过滤命中超过上限时只渲染相关度最高的前 300 行
+const MAX_RENDER_ROWS: usize = 300;
+/// 图片 Handle LRU 上限：最近浏览的图免重复解码
+const IMAGE_CACHE_CAP: usize = 8;
 
 /// 面板阴影（立体感）：黑色低透明 + 垂直偏移
 const SHADOW_PANEL: Shadow = Shadow {
@@ -832,7 +921,79 @@ fn theme_dark(_state: &App) -> iced::Theme {
     iced::Theme::Dark
 }
 
+/// 单实例保护：Mod+V 连按会并发拉起多个 GUI。state/gui.lock 存 PID——
+/// 活实例存在 → 聚焦其窗口后本进程退出；残留死锁（崩溃/强杀）→ 覆写接管
+fn ensure_single_instance() {
+    use std::io::Write;
+    let dir = config::Config::state_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("gui.lock");
+    let pid = std::process::id();
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(mut f) => {
+            let _ = write!(f, "{pid}");
+        }
+        Err(_) => {
+            let existing = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .filter(|p| *p != pid && pid_alive(*p));
+            if existing.is_some() {
+                let _ = focus_existing_window();
+                std::process::exit(0);
+            }
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+            {
+                let _ = write!(f, "{pid}");
+            }
+        }
+    }
+}
+
+/// PID 活性复核：/proc cmdline 含进程名（防 PID 回收误判）
+fn pid_alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+        .map(|s| s.replace('\0', " ").contains("niri-clip-gui"))
+        .unwrap_or(false)
+}
+
+/// 已开窗口聚焦到前台（niri IPC）：Mod+V 二连按 = 把它拉回来而非开新的
+fn focus_existing_window() -> bool {
+    let Ok(out) = std::process::Command::new("niri").args(["msg", "windows"]).output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut current_id: Option<String> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Window ID ") {
+            current_id = rest.split(':').next().map(|s| s.trim().to_string());
+        } else if line.contains("App ID:") && line.contains("niri-clip-gui") {
+            if let Some(id) = current_id.take() {
+                return std::process::Command::new("niri")
+                    .args(["msg", "action", "focus-window", "--id", &id])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+            }
+        }
+    }
+    false
+}
+
 fn main() -> iced::Result {
+    ensure_single_instance();
     // 常规 xdg 窗口：受 niri window-rule 约束（悬浮/位置/边框由用户
     // rule.kdl 约定，app-id = "niri-clip-gui"），winit 原生 IME
     iced::application(

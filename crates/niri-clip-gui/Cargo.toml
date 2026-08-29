@@ -11,3 +11,4 @@ repository.workspace = true
 niri-clip-core.workspace = true
 anyhow.workspace = true
 iced.workspace = true
+notify-rust.workspace = true
