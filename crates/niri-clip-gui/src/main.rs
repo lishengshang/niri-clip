@@ -279,14 +279,22 @@ impl App {
                     return Task::none();
                 };
                 let id = clip.id;
+                let notify = self.notify_enabled;
                 return run_bg(
                     move || {
                         let ok = store::toggle_pin(id).is_ok();
                         (ok, store::list(App::load_limit()).ok())
                     },
-                    |(ok, clips)| {
+                    move |(ok, clips)| {
                         if !ok {
-                            eprintln!("[niri-clip gui] pin failed");
+                            if notify {
+                                let _ = notify_rust::Notification::new()
+                                    .summary("niri-clip")
+                                    .body("固定/取消固定失败")
+                                    .show();
+                            } else {
+                                eprintln!("[niri-clip gui] pin failed");
+                            }
                         }
                         Message::ListReloaded(clips)
                     },
@@ -355,14 +363,22 @@ impl App {
         // 后台删除 + 重拉列表，UI 线程零阻塞（sqlite 写锁最长 busy_timeout 5s）
         self.confirm_delete = false;
         self.query.clear();
+        let notify = self.notify_enabled;
         run_bg(
             move || {
                 let ok = store::delete(id).is_ok();
                 (ok, store::list(App::load_limit()).ok())
             },
-            |(ok, clips)| {
+            move |(ok, clips)| {
                 if !ok {
-                    eprintln!("[niri-clip gui] delete failed");
+                    if notify {
+                        let _ = notify_rust::Notification::new()
+                            .summary("niri-clip")
+                            .body("删除失败")
+                            .show();
+                    } else {
+                        eprintln!("[niri-clip gui] delete failed");
+                    }
                 }
                 Message::ListReloaded(clips)
             },
@@ -568,11 +584,18 @@ impl App {
                 }
             }
         } else if self.enable_preview {
+            // 可滚预览窗格：定高小窗 + 内部滚动，长文不再截断丢失
             col = col.push(
-                container(text(self.preview_text(clip)).size(12))
-                    .width(Length::Fill)
-                    .padding([6, 8])
-                    .style(preview_style),
+                container(
+                    scrollable(text(self.preview_text(clip)).size(12))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(scroll_style),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(PREVIEW_HEIGHT))
+                .padding([6, 8])
+                .style(preview_style),
             );
         }
 
@@ -586,11 +609,12 @@ impl App {
             .into()
     }
 
-    /// 底部预览：选中条目全文多行截断（↵ → ⏎，同行的 tofu 规避）
+    /// 底部预览：可滚窗格内容（80 行 / 每行 300 字符上限，超出补 …）。
+    /// ↵ → ⏎，同行的 tofu 规避
     fn preview_text(&self, clip: &store::Clip) -> String {
         let mut out = String::new();
-        for line in clip.text.lines().take(14) {
-            let l: String = line.chars().take(200).collect();
+        for line in clip.text.lines().take(80) {
+            let l: String = line.chars().take(300).collect();
             out.push_str(&l);
             out.push('\n');
         }
@@ -658,6 +682,8 @@ const VIEWPORT_HALF: f32 = 240.0;
 const MAX_RENDER_ROWS: usize = 300;
 /// 图片 Handle LRU 上限：最近浏览的图免重复解码
 const IMAGE_CACHE_CAP: usize = 8;
+/// 底部预览窗格定高（内部 scrollable，长文可滚）
+const PREVIEW_HEIGHT: f32 = 220.0;
 
 fn theme_dark(_state: &App) -> iced::Theme {
     iced::Theme::Dark

@@ -2,13 +2,48 @@
 
 ## Unreleased
 
+### Added
+- **GUI 键鼠交互**：鼠标悬停跟随选中、左键点击行复制关闭（对齐 Enter）、
+  右键连复（对齐 Ctrl-Y）；搜索命中字符红色高亮（fzf hl 语义）；
+  空查询 `0` 键快选第 10 行（1-9,0）
+- **全库搜索与相关度排序**：GUI 搜索范围从最近 300 条扩到全库
+  （max_items，默认 750），渲染上限 300 行兜底；命中结果按 fzf 风格
+  评分排序（连续命中/词首加权 + 位置弱惩罚）
+- **单实例保护**：Mod+V 连按不再多开——`state/gui.lock` 存 PID，
+  活实例经 niri IPC 聚焦其窗口后自退；残留死锁自动覆写接管
+- 底部预览窗格可滚动（80 行 / 每行 300 字符），长文不再截断丢失
+- 复制/固定/删除失败走桌面通知（`notify_enabled` 门控，false 保持静默）
+- GUI 键盘导航滚动跟随：方向键把选中行滚进可视区中部（视口实测自适应），
+  行间分界线，行定高 27px 保证滚动偏移精确
+
 ### Changed
 - **原生 UI 架构修订（ADR-001 修订 1）**：layer-shell 覆盖层改为常规 xdg
   窗口（app-id = `niri-clip-gui`）——可被 niri window-rule 全量约束（悬浮/
   位置/边框/阴影由用户 rule.kdl 约定）；winit 原生 IME 解锁中文搜索；
   底部预览窗格直接渲染剪贴板图片（iced image widget）
+- **原生 UI 视觉重做**：JetBrainsMono Nerd Font 等宽 + 深色配色统一；
+  `剪贴板> ` 提示符式搜索行（去输入框边框）；提示行键位双色高亮 +
+  右上过滤计数（fzf header 风格）；圆角选中高亮、面板阴影立体化、
+  交互式滚动条（悬停/拖动才浮现）；窗口 760x420 → 500x675 左上浮层，
+  assets/niri-clip.kdl 补 window-rule 示例
 - **渲染器固定 tiny-skia 纯软件**：NVIDIA wgpu 冻结（上游 #360）与 GL
   启动失败双问题的彻底规避，二进制 -1/3，与显卡驱动解耦
+- GUI 图片预览遵循 `enable_image_preview` / `enable_preview` 配置
+- GUI 组件化：main.rs（1060 行）拆分 theme/search/instance 模块，
+  search 附评分/标记/大小写口径单元测试
+
+### Fixed
+- **图片条目必崩**：`images/{id}.bin` 扩展名无法被 `Handle::from_path`
+  识别 → tiny-skia 渲染线程 panic "Image should be allocated"；
+  改按字节内容解码 + 位图魔数门控（非图片数据回落缺失提示）
+- **图片每帧重复解码**：`Handle::from_bytes` 每次生成新 Id 导致
+  tiny-skia 缓存失效；按 clip id 跨帧 LRU（8 项）缓存，命中刷新顺序
+- **键盘滚动到底时选中态闪烁**：列表滚过静止指针逐行触发 on_enter
+  抢走选中；键盘导航期间暂停悬停跟随，真实移动恢复
+- **符号 tofu 方框**：❯▶◆⏎ 等字形缺失（Noto Sans Mono + fallback 失败），
+  主字体指定 JetBrainsMono Nerd Font；`↵`（系统级缺字形）统一替换 `⏎`
+- clippy 警告归零；xdg 迁移后 text_input/scrollable 落回浅色默认主题的
+  割裂观感（全部控件自定义深色样式）
 
 ## v0.5.0 - 2026-08-28
 
