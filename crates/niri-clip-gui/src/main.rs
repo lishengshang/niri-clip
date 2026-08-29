@@ -42,6 +42,8 @@ enum Message {
     ListReloaded(Option<Vec<store::Clip>>),
     /// 鼠标悬停行：跟随选中（高亮预览）
     Hover(usize),
+    /// 鼠标真实移动：恢复悬停跟随
+    MouseMove,
     /// 鼠标点击行：定位并复制关闭（对齐 Enter 语义）
     Pick(usize),
 }
@@ -79,6 +81,9 @@ struct App {
     /// 星标条目删除二段确认（对齐路线图 1.5：内嵌确认，去 fuzzel 依赖）
     confirm_delete: bool,
     preview_width: usize,
+    /// 鼠标悬停跟随开关：键盘导航时关闭——列表在静止指针下滑动会
+    /// 逐行触发 on_enter，悬停跟随会反复抢走选中态（界面闪烁根因）
+    mouse_follow: bool,
     /// 图片 Handle 跨帧缓存：(clip id, Handle)。Handle::from_bytes 每次
     /// 调用生成新 Id，若在 view 里现建会导致 tiny-skia 每帧重新解码；
     /// clip id 内容不可变，按 id 缓存安全。view(&self) 下用 RefCell。
@@ -97,6 +102,7 @@ impl App {
             selected: 0,
             confirm_delete: false,
             preview_width: cfg.preview_width,
+            mouse_follow: false,
             image_cache: RefCell::new(None),
         }
     }
@@ -129,10 +135,13 @@ impl App {
             }
             Message::Key(key, modifiers) => return self.on_key(key, modifiers),
             Message::Hover(idx) => {
-                // 鼠标悬停跟随选中：不触发滚动（避免和滚轮互相拉扯）
-                if idx < self.filtered().len() {
+                // 仅在鼠标活跃时跟随：键盘滚动中忽略 on_enter（防闪烁）
+                if self.mouse_follow && idx < self.filtered().len() {
                     self.selected = idx;
                 }
+            }
+            Message::MouseMove => {
+                self.mouse_follow = true;
             }
             Message::Pick(idx) => {
                 // 点击行 = 定位到该行并复制关闭（对齐 Enter）
@@ -254,6 +263,9 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: i32) -> Task<Message> {
+        // 键盘导航接管选中：暂停悬停跟随（列表滚过静止指针会触发
+        // 一串 on_enter，把选中态抢回去——闪烁根因）
+        self.mouse_follow = false;
         let n = self.filtered().len();
         if n > 0 {
             let next = self.selected as i64 + delta as i64;
@@ -378,7 +390,8 @@ impl App {
                 }),
             )
             .on_press(Message::Pick(idx))
-            .on_enter(Message::Hover(idx));
+            .on_enter(Message::Hover(idx))
+            .on_move(|_| Message::MouseMove);
 
             Element::from(row)
         });
