@@ -602,7 +602,9 @@ impl App {
     fn image_handle(&self, clip: &store::Clip) -> Option<image::Handle> {
         let mut cache = self.image_cache.borrow_mut();
         if let Some(pos) = cache.iter().position(|(id, _)| *id == clip.id) {
-            let handle = cache[pos].1.clone();
+            // 命中后移到头部——否则是 FIFO 而非 LRU，热点图会被新图挤出
+            let (id, handle) = cache.remove(pos);
+            cache.insert(0, (id, handle.clone()));
             return Some(handle);
         }
         let bytes = clip
