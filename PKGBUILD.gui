@@ -1,0 +1,32 @@
+# Maintainer: lishengshang <3490017805@qq.com>
+# 原生 GUI 分包（路线图 M5.4）：iced xdg 窗口，受 niri window-rule 约束。
+# CLI 由 niri-clip 主包承载（gui 依赖链需要 libxkbcommon，故独立分包）。
+pkgname=niri-clip-gui
+pkgver=0.5.0
+pkgrel=1
+pkgdesc="niri-clip 原生窗口前端（iced xdg 窗口，无终端秒开，支持中文 IME）"
+arch=('x86_64' 'aarch64')
+url="https://github.com/lishengshang/niri-clip"
+license=('MIT')
+depends=('niri-clip' 'wayland' 'libxkbcommon')
+makedepends=('cargo' 'git')
+# NOTE: 提交 AUR 正式包前需用 updpkgsums / makepkg -g 替换为真实校验值；
+# SKIP 仅适用于 *-git 包。入库的 Cargo.lock 保证 --locked 可复现构建。
+source=("$pkgname-$pkgver.tar.gz::https://github.com/lishengshang/niri-clip/archive/v$pkgver.tar.gz")
+sha256sums=('0b289503302b31d0979627f5f2b50d38e3ba31907f21e41e35b26694f9eea181')
+
+build() {
+  cd "$pkgname-$pkgver"
+  # 同主包：剥离 makepkg 注入的 -flto=auto（bundled sqlite3.c 编成 GCC
+  # LTO 字节码后 lld 无法链接）
+  export CFLAGS="${CFLAGS/-flto=auto/}" CXXFLAGS="${CXXFLAGS/-flto=auto/}" LDFLAGS="${LDFLAGS/-flto=auto/}"
+  cargo build --release --locked -p niri-clip-gui
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "target/release/niri-clip-gui" "$pkgdir/usr/bin/niri-clip-gui"
+  install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 "assets/niri-clip.kdl" "$pkgdir/usr/share/doc/$pkgname/niri-clip.kdl.example"
+  install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

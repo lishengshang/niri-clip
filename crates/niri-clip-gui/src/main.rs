@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
+use std::time::{Duration, Instant};
 
 mod instance;
 mod search;
@@ -102,6 +103,9 @@ struct App {
     /// 鼠标悬停跟随开关：键盘导航时关闭——列表在静止指针下滑动会
     /// 逐行触发 on_enter，悬停跟随会反复抢走选中态（界面闪烁根因）
     mouse_follow: bool,
+    /// 当前项指针 TTL 缓存：(读取时刻, 值)。▶ 标记的文件读收敛到
+    /// 至多 2 次/秒（TTL 内的滞后对 ▶ 展示无感知影响）
+    cur_cache: RefCell<Option<(Instant, Option<String>)>>,
     /// 图片 Handle LRU 缓存（clip id → Handle）。Handle::from_bytes 每次
     /// 调用生成新 Id，若在 view 里现建会导致 tiny-skia 每帧重新解码；
     /// clip id 内容不可变，按 id 缓存安全。view(&self) 下用 RefCell。
@@ -125,6 +129,7 @@ impl App {
             notify_enabled: cfg.notify_enabled,
             viewport_half: VIEWPORT_HALF,
             mouse_follow: false,
+            cur_cache: RefCell::new(None),
             image_cache: RefCell::new(Vec::new()),
         }
     }
@@ -386,7 +391,7 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let cur = store::current_hash();
+        let cur = self.cur_hash();
         let filtered = self.filtered();
         let q_lower = self.query.to_lowercase();
 
@@ -607,6 +612,20 @@ impl App {
                 ..Default::default()
             })
             .into()
+    }
+
+    /// 当前项指针（TTL 缓存）：▶ 标记每帧都取，缓存收敛文件 IO
+    fn cur_hash(&self) -> Option<String> {
+        const TTL: Duration = Duration::from_millis(500);
+        let mut cache = self.cur_cache.borrow_mut();
+        if let Some((at, v)) = cache.as_ref() {
+            if at.elapsed() < TTL {
+                return v.clone();
+            }
+        }
+        let v = store::current_hash();
+        *cache = Some((Instant::now(), v.clone()));
+        v
     }
 
     /// 底部预览：可滚窗格内容（80 行 / 每行 300 字符上限，超出补 …）。

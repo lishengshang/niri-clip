@@ -133,6 +133,25 @@ niri-clip install-service
 niri-clip status
 ```
 
+### 🖥️ 原生 GUI（`tui_backend = native` / `auto`）
+
+`niri-clip tui` 检测到 `niri-clip-gui` 时打开原生窗口：无终端、秒开、
+winit 原生 IME（中文搜索直打）、单实例（Mod+V 连按聚焦已开窗口）。
+
+| 按键 / 鼠标 | 作用 |
+|---|---|
+| ↑ / ↓ | 移动选中（列表自动滚动跟随） |
+| Enter / 左键点击行 | 复制并关闭 |
+| Ctrl-Y / 右键点击行 | 连续复制（不退出） |
+| Ctrl-P | 固定 / 取消固定 |
+| Ctrl-X | 删除（星标条目二段确认） |
+| 1-9,0 | 快选第 1-10 行（空查询时） |
+| 直接输入 | fzf 式子序列匹配 + 相关度排序（覆盖全库，含中文） |
+| Esc | 清除查询；空查询退出 |
+
+窗口打开位置/边框/阴影由 niri window-rule 控制，示例见
+`assets/niri-clip.kdl`（顶部浮动 + 无焦点环/阴影）。
+
 ### 🧩 systemd 托管（推荐）
 
 ```bash
