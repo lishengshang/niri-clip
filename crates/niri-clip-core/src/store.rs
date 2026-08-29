@@ -332,8 +332,7 @@ pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Optio
     tighten_dir_perms(&dir);
     let path = dir.join(format!("{}.bin", id));
     let tmp = dir.join(format!(".tmp-{}.bin", id));
-    std::fs::write(&tmp, bytes)
-        .with_context(|| format!("write image cache {}", tmp.display()))?;
+    std::fs::write(&tmp, bytes).with_context(|| format!("write image cache {}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("publish image cache {}", path.display()))?;
     tighten_file_perms(&path);
@@ -378,8 +377,7 @@ pub fn prune_orphan_images() -> Result<usize> {
         return Ok(0);
     }
     let referenced: std::collections::HashSet<String> = {
-        let mut stmt =
-            conn.prepare("SELECT image_path FROM clips WHERE image_path IS NOT NULL")?;
+        let mut stmt = conn.prepare("SELECT image_path FROM clips WHERE image_path IS NOT NULL")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut set = std::collections::HashSet::new();
         for r in rows {

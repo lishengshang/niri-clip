@@ -250,7 +250,10 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         let prev = std::env::var("XDG_STATE_HOME").ok();
         std::env::set_var("XDG_STATE_HOME", "/tmp/nc-ut-state");
-        assert_eq!(Config::state_dir(), PathBuf::from("/tmp/nc-ut-state/niri-clip"));
+        assert_eq!(
+            Config::state_dir(),
+            PathBuf::from("/tmp/nc-ut-state/niri-clip")
+        );
         assert_eq!(
             Config::db_path(),
             PathBuf::from("/tmp/nc-ut-state/niri-clip/db.sqlite")

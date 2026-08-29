@@ -104,7 +104,9 @@ mod tests {
     fn json_windows_parse_picks_app_id() {
         let sample = br#"[{"id":2,"app_id":"kitty"},{"id":17,"app_id":"niri-clip-gui"},{"id":3,"app_id":"niri-clip-gui"}]"#;
         let wins: Vec<NiriWindow> = serde_json::from_slice(sample).unwrap();
-        let hit = wins.iter().find(|w| w.app_id.as_deref() == Some("niri-clip-gui"));
+        let hit = wins
+            .iter()
+            .find(|w| w.app_id.as_deref() == Some("niri-clip-gui"));
         assert_eq!(hit.map(|w| w.id), Some(17), "取首个命中的窗口");
     }
 

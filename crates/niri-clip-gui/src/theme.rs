@@ -119,10 +119,7 @@ pub fn prompt_style(_theme: &iced::Theme, _status: text_input::Status) -> text_i
         icon: ACCENT,
         placeholder: MUTED,
         value: ROW_FG_SELECTED,
-        selection: Color {
-            a: 0.35,
-            ..ACCENT
-        },
+        selection: Color { a: 0.35, ..ACCENT },
     }
 }
 

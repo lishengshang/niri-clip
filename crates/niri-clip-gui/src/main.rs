@@ -24,8 +24,7 @@ use search::{fuzzy_flags, fuzzy_score};
 use theme::*;
 
 use iced::widget::{
-    column, container, image, mouse_area, operation, row, rule, scrollable, space, text,
-    text_input,
+    column, container, image, mouse_area, operation, row, rule, scrollable, space, text, text_input,
 };
 use iced::{keyboard, Background, Border, Element, Font, Length, Shadow, Subscription, Task};
 use niri_clip_core::{config, preview, store};
@@ -64,7 +63,11 @@ enum Message {
 /// worker panic 时回传 `on_panic`——由调用方指定兜底消息，保证语义正确
 /// （Copy 任务 panic 必须走 CopyFinished{ok:false} 触发失败通知，而非被
 /// ListReloaded(None) 静默吞掉）。
-fn run_bg<T, F>(f: F, wrap: impl Fn(T) -> Message + Send + 'static, on_panic: Message) -> Task<Message>
+fn run_bg<T, F>(
+    f: F,
+    wrap: impl Fn(T) -> Message + Send + 'static,
+    on_panic: Message,
+) -> Task<Message>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
@@ -292,12 +295,8 @@ impl App {
         // 仅导航/动作键；普通字符、Backspace、Space、IME 提交由持焦点的
         // text_input 自行处理（winit 原生 IME，中文可用）
         match key {
-            keyboard::Key::Named(keyboard::key::Named::ArrowUp) => {
-                return self.move_selection(-1)
-            }
-            keyboard::Key::Named(keyboard::key::Named::ArrowDown) => {
-                return self.move_selection(1)
-            }
+            keyboard::Key::Named(keyboard::key::Named::ArrowUp) => return self.move_selection(-1),
+            keyboard::Key::Named(keyboard::key::Named::ArrowDown) => return self.move_selection(1),
             keyboard::Key::Named(keyboard::key::Named::Escape) => {
                 // fzf 语义：有输入/确认时先取消，空查询才退出
                 if !self.query.is_empty() || self.confirm_delete {
@@ -457,80 +456,86 @@ impl App {
             .enumerate()
             .take(MAX_RENDER_ROWS)
             .map(|(idx, clip)| {
-            let selected = idx == self.selected;
-            let cursor = if selected { "❯" } else { " " };
-            let cur_mark = if cur.as_deref() == Some(clip.hash.as_str()) {
-                "▶"
-            } else {
-                " "
-            };
-            let star = if clip.pinned { "◆" } else { " " };
-            let quick = if self.query.is_empty() && idx < 9 {
-                format!("{}", idx + 1)
-            } else {
-                " ".to_string()
-            };
-            let prefix = format!("{cursor} {quick} {cur_mark}{star} ");
-            // ↵（U+21B5）字形覆盖差（tofu），GUI 侧换成 ⏎
-            let preview =
-                preview::preview_text(clip, self.preview_width).replace('↵', "⏎");
-            let base = if selected { ROW_FG_SELECTED } else { ROW_FG };
+                let selected = idx == self.selected;
+                let cursor = if selected { "❯" } else { " " };
+                let cur_mark = if cur.as_deref() == Some(clip.hash.as_str()) {
+                    "▶"
+                } else {
+                    " "
+                };
+                let star = if clip.pinned { "◆" } else { " " };
+                let quick = if self.query.is_empty() && idx < 9 {
+                    format!("{}", idx + 1)
+                } else {
+                    " ".to_string()
+                };
+                let prefix = format!("{cursor} {quick} {cur_mark}{star} ");
+                // ↵（U+21B5）字形覆盖差（tofu），GUI 侧换成 ⏎
+                let preview = preview::preview_text(clip, self.preview_width).replace('↵', "⏎");
+                let base = if selected { ROW_FG_SELECTED } else { ROW_FG };
 
-            // fzf 灵魂：命中查询子序列的字符用 hl 色点亮
-            let flags = if self.query.is_empty() {
-                None
-            } else {
-                fuzzy_flags(&q_lower, &preview)
-            };
+                // fzf 灵魂：命中查询子序列的字符用 hl 色点亮
+                let flags = if self.query.is_empty() {
+                    None
+                } else {
+                    fuzzy_flags(&q_lower, &preview)
+                };
 
-            let mut spans: Vec<text::Span<'static, (), Font>> = Vec::new();
-            spans.push(text::Span::new(prefix).color(base));
-            let mut run = String::new();
-            let mut run_hit = false;
-            for (i, ch) in preview.chars().enumerate() {
-                let hit = flags.as_ref().is_some_and(|f| f.get(i).copied().unwrap_or(false));
-                if i > 0 && hit != run_hit {
-                    spans.push(
-                        text::Span::new(std::mem::take(&mut run))
-                            .color(if run_hit { HL } else { base }),
-                    );
+                let mut spans: Vec<text::Span<'static, (), Font>> = Vec::new();
+                spans.push(text::Span::new(prefix).color(base));
+                let mut run = String::new();
+                let mut run_hit = false;
+                for (i, ch) in preview.chars().enumerate() {
+                    let hit = flags
+                        .as_ref()
+                        .is_some_and(|f| f.get(i).copied().unwrap_or(false));
+                    if i > 0 && hit != run_hit {
+                        spans.push(text::Span::new(std::mem::take(&mut run)).color(if run_hit {
+                            HL
+                        } else {
+                            base
+                        }));
+                    }
+                    run_hit = hit;
+                    run.push(ch);
                 }
-                run_hit = hit;
-                run.push(ch);
-            }
-            if !run.is_empty() {
-                spans.push(text::Span::new(run).color(if run_hit { HL } else { base }));
-            }
+                if !run.is_empty() {
+                    spans.push(text::Span::new(run).color(if run_hit { HL } else { base }));
+                }
 
-            // 鼠标交互：悬停跟随选中，点击复制关闭
-            let row = mouse_area(
-                container(
-                    text::Rich::with_spans(spans)
-                        .size(14)
-                        .font(UI_FONT)
-                        .width(Length::Fill)
-                        .wrapping(text::Wrapping::None),
-                )
-                .width(Length::Fill)
-                .height(Length::Fixed(ROW_HEIGHT))
-                .padding([4, 10])
-                .style(move |_| container::Style {
-                    background: Some(Background::Color(if selected { SEL_BG } else { BG })),
-                    border: Border {
-                        radius: RADIUS_ROW,
+                // 鼠标交互：悬停跟随选中，点击复制关闭
+                let row = mouse_area(
+                    container(
+                        text::Rich::with_spans(spans)
+                            .size(14)
+                            .font(UI_FONT)
+                            .width(Length::Fill)
+                            .wrapping(text::Wrapping::None),
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fixed(ROW_HEIGHT))
+                    .padding([4, 10])
+                    .style(move |_| container::Style {
+                        background: Some(Background::Color(if selected { SEL_BG } else { BG })),
+                        border: Border {
+                            radius: RADIUS_ROW,
+                            ..Default::default()
+                        },
+                        shadow: if selected {
+                            SHADOW_ROW
+                        } else {
+                            Shadow::default()
+                        },
                         ..Default::default()
-                    },
-                    shadow: if selected { SHADOW_ROW } else { Shadow::default() },
-                    ..Default::default()
-                }),
-            )
-            .on_press(Message::Pick(idx))
-            .on_right_press(Message::PickStay(idx))
-            .on_enter(Message::Hover(idx))
-            .on_move(|_| Message::MouseMove);
+                    }),
+                )
+                .on_press(Message::Pick(idx))
+                .on_right_press(Message::PickStay(idx))
+                .on_enter(Message::Hover(idx))
+                .on_move(|_| Message::MouseMove);
 
-            Element::from(row)
-        });
+                Element::from(row)
+            });
 
         // 行列表：行间细分界线（fzf 行分隔观感）
         let mut list = column![];
@@ -608,12 +613,10 @@ impl App {
             match self.image_handle(clip) {
                 Some(handle) => {
                     col = col.push(
-                        container(
-                            image(handle).height(Length::Fixed(260.0)),
-                        )
-                        .width(Length::Fill)
-                        .padding([6, 8])
-                        .style(preview_style),
+                        container(image(handle).height(Length::Fixed(260.0)))
+                            .width(Length::Fill)
+                            .padding([6, 8])
+                            .style(preview_style),
                     );
                 }
                 None => {

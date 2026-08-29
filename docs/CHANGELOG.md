@@ -83,6 +83,26 @@
   主字体指定 JetBrainsMono Nerd Font；`↵`（系统级缺字形）统一替换 `⏎`
 - clippy 警告归零；xdg 迁移后 text_input/scrollable 落回浅色默认主题的
   割裂观感（全部控件自定义深色样式）
+- **图片文件生命周期闭环（P1）**：delete/wipe/超限淘汰同步删除
+  `images/{id}.bin`（RETURNING 带出路径），新增 `prune_orphan_images`
+  孤儿清扫（daemon 启动执行，兼容存量残留与 `.tmp-` 崩溃残片）；
+  `insert_image` 写文件纳入事务窗口（`.tmp-` 先落盘再原子 rename），
+  杜绝"有行无图"导致 hash 占用该图无法重录
+- fuzzel 路径 `wl-copy` 补 `Stdio::null()`（对齐 fzf 路径防黑屏残留）；
+  GUI 后台任务 panic 按任务类型回传兜底消息（Copy panic 走失败通知
+  不被静默吞掉）；选中/快选/导航以可见行数为界
+
+### Changed
+- **热路径性能**：`ignore_regex` 编译产物随 `Config::load` 缓存（不再
+  每条入库重复 `Regex::new`）；`insert_with`/`insert_image_with` 复用
+  调用方配置（一次捕获 3 次读盘解析降为 1 次）；GUI `filtered()` 结果
+  按（列表代数, 查询）缓存，悬停/选中/复制等高频事件不再重算全库评分；
+  tokio 特性 `full` 收敛为 `rt/rt-multi-thread/macros/time/process`
+- **打包与遗留清理**：PKGBUILD.git 刷新 0.5.0 基线（去 fuzzel/nirius
+  硬依赖、补 -flto 剥离）、`.SRCINFO.example` 同步、`config.toml.example`
+  与代码默认值对齐；instance.rs 改 `niri msg -j` JSON 解析（附测试）、
+  PID 复核收紧为 argv[0] 精确匹配；`Clip.ts`/`legacy_cliphist_db` 等
+  死代码清理；config/preview 内联测试补齐
 
 ## v0.5.0 - 2026-08-28
 
