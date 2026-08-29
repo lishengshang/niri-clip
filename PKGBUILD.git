@@ -1,14 +1,19 @@
 # Maintainer: lishengshang <3490017805@qq.com>
 pkgname=niri-clip-git
-pkgver=0.2.0.r44.ba0bc
+pkgver=0.5.0.r
 pkgrel=1
-pkgdesc="为 niri + Wayland 设计的高性能剪贴板历史 - git 版"
+pkgdesc="为 niri 打造的全新高性能 Wayland 剪贴板 - git 版"
 arch=('x86_64' 'aarch64')
 url="https://github.com/lishengshang/niri-clip"
 license=('MIT')
-depends=('wl-clipboard' 'fzf' 'fuzzel')
+depends=('wl-clipboard' 'fzf>=0.71')
 makedepends=('cargo' 'git')
-optdepends=('kitty: fzf TUI' 'nirius: niri focus-or-spawn' 'chafa: 图片预览' 'cliphist: 迁移')
+optdepends=(
+  'fuzzel: 后备选择器（无 fzf 环境自动回退）'
+  'kitty: kitty icat 图片预览'
+  'chafa: 图形终端图片预览'
+  'cliphist: 可选, 一次性迁移旧数据'
+)
 provides=('niri-clip')
 conflicts=('niri-clip' 'niri-clip-bin')
 source=("git+https://github.com/lishengshang/niri-clip.git")
@@ -16,11 +21,15 @@ sha256sums=('SKIP')
 
 pkgver() {
   cd "niri-clip"
-  printf "%s.r%s.%s" "$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+  # workspace 版本号来自根 Cargo.toml 的 [workspace.package]
+  printf "%s.r%s.%s" "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)" \
+    "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
 }
 
 build() {
   cd "niri-clip"
+  # 同主包：剥离 makepkg 注入的 -flto=auto（bundled sqlite3.c 与 lld 不兼容）
+  export CFLAGS="${CFLAGS/-flto=auto/}" CXXFLAGS="${CXXFLAGS/-flto=auto/}" LDFLAGS="${LDFLAGS/-flto=auto/}"
   # 仅构建 CLI：gui 依赖链需要 libxkbcommon，由独立包承载
   cargo build --release -p niri-clip
 }
@@ -32,4 +41,5 @@ package() {
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 "assets/niri-clip.kdl" "$pkgdir/usr/share/doc/$pkgname/niri-clip.kdl.example"
   install -Dm644 "assets/niri-clip.service" "$pkgdir/usr/lib/systemd/user/niri-clip.service"
+  install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

@@ -16,14 +16,10 @@ const BUSY_TIMEOUT_MS: u64 = 5000;
 #[derive(Debug, Clone)]
 pub struct Clip {
     pub id: i64,
-    /// 去重指纹；对外暴露以镜像表结构，当前界面未展示
-    #[allow(dead_code)]
+    /// 去重指纹：TUI/GUI 的 ▶ 当前项标记与 copy 后指针刷新都依赖
     pub hash: String,
     pub text: String,
     pub mime: String,
-    /// 时间戳（毫秒）；同上
-    #[allow(dead_code)]
-    pub ts: i64,
     pub pinned: bool,
     /// v0.4：图片条目对应的数据文件（images/{id}.bin），修复预览错位的关键字段
     pub image_path: Option<String>,
@@ -408,7 +404,7 @@ pub fn prune_orphan_images() -> Result<usize> {
     Ok(n)
 }
 
-const CLIP_COLS: &str = "id, hash, text, mime, ts, pinned, image_path";
+const CLIP_COLS: &str = "id, hash, text, mime, pinned, image_path";
 
 fn row_to_clip(r: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
     Ok(Clip {
@@ -416,9 +412,8 @@ fn row_to_clip(r: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
         hash: r.get(1)?,
         text: r.get(2)?,
         mime: r.get(3)?,
-        ts: r.get(4)?,
-        pinned: r.get::<_, i64>(5)? != 0,
-        image_path: r.get(6)?,
+        pinned: r.get::<_, i64>(4)? != 0,
+        image_path: r.get(5)?,
     })
 }
 

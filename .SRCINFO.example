@@ -1,7 +1,7 @@
-# makepkg --printsrcinfo > .SRCINFO 后上传 AUR
+# makepkg --printsrcinfo > .SRCINFO 后上传 AUR（示例，版本号随发布更新）
 pkgbase = niri-clip
-	pkgdesc = 为 niri + Wayland 设计的高性能剪贴板历史 - 单进程 fzf 不跳顶
-	pkgver = 0.2.0
+	pkgdesc = 为 niri 打造的全新高性能 Wayland 剪贴板
+	pkgver = 0.5.0
 	pkgrel = 1
 	url = https://github.com/lishengshang/niri-clip
 	arch = x86_64
@@ -10,14 +10,12 @@ pkgbase = niri-clip
 	makedepends = cargo
 	makedepends = git
 	depends = wl-clipboard
-	depends = fzf
-	depends = fuzzel
-	depends = sqlite
-	optdepends = kitty: fzf TUI 终端
-	optdepends = nirius: niri focus-or-spawn
-	optdepends = chafa: 图片预览
-	optdepends = cliphist: 旧数据迁移
-	source = niri-clip-0.2.0.tar.gz::https://github.com/lishengshang/niri-clip/archive/v0.2.0.tar.gz
+	depends = fzf>=0.71
+	optdepends = fuzzel: 后备选择器（无 fzf 环境自动回退）
+	optdepends = kitty: kitty icat 图片预览
+	optdepends = chafa: 图形终端图片预览
+	optdepends = cliphist: 可选, 一次性迁移旧数据
+	source = niri-clip-0.5.0.tar.gz::https://github.com/lishengshang/niri-clip/archive/v0.5.0.tar.gz
 	sha256sums = SKIP
 
 pkgname = niri-clip

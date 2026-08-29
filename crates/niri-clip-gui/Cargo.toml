@@ -12,3 +12,5 @@ niri-clip-core.workspace = true
 anyhow.workspace = true
 iced.workspace = true
 notify-rust.workspace = true
+serde.workspace = true
+serde_json.workspace = true

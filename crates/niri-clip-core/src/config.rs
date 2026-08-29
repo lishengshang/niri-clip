@@ -147,13 +147,6 @@ impl Config {
             .join("niri-clip/db.sqlite")
     }
 
-    #[allow(dead_code)]
-    pub fn legacy_cliphist_db() -> PathBuf {
-        dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("cliphist/db")
-    }
-
     pub fn ensure_dirs() -> Result<()> {
         if let Some(p) = Self::path().parent() {
             std::fs::create_dir_all(p)?;
@@ -162,5 +155,117 @@ impl Config {
             std::fs::create_dir_all(p)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// 与 store.rs 测试同款：XDG 环境变量目录级隔离 + 串行化
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn default_config_compiles_ignore_regex() {
+        let cfg = Config::default();
+        assert_eq!(cfg.max_items, 750);
+        assert_eq!(cfg.max_clip_bytes, 1_048_576);
+        assert_eq!(cfg.max_image_bytes, 10_485_760);
+        assert!(!cfg.enable_image_preview, "图片捕获默认关");
+        assert_eq!(cfg.tui_backend, "auto");
+        // 编译产物就位：should_ignore 不必再 Regex::new
+        assert!(cfg.ignore_re.is_some(), "默认正则必须可编译");
+        assert!(cfg.ignore_re.as_ref().unwrap().is_match("my PASSWORD"));
+        assert!(!cfg.ignore_re.as_ref().unwrap().is_match("hello world"));
+    }
+
+    #[test]
+    fn load_parses_toml_and_compiles_custom_regex() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("niri-clip-cfg-{}", std::process::id()));
+        let cfg_dir = root.join("config");
+        std::fs::create_dir_all(cfg_dir.join("niri-clip")).unwrap();
+        std::fs::write(
+            cfg_dir.join("niri-clip/config.toml"),
+            "max_items = 42\nignore_regex = \"topsecret\"\n",
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+        let cfg = Config::load();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(cfg.max_items, 42);
+        // 未写的字段回落默认值
+        assert_eq!(cfg.preview_width, 100);
+        // 自定义正则已编译且生效
+        assert!(cfg.ignore_re.is_some());
+        assert!(cfg.ignore_re.as_ref().unwrap().is_match("topsecret-data"));
+        assert!(!cfg.ignore_re.as_ref().unwrap().is_match("password"));
+    }
+
+    #[test]
+    fn load_invalid_toml_falls_back_to_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("niri-clip-cfg-bad-{}", std::process::id()));
+        let cfg_dir = root.join("config");
+        std::fs::create_dir_all(cfg_dir.join("niri-clip")).unwrap();
+        std::fs::write(
+            cfg_dir.join("niri-clip/config.toml"),
+            "max_items = [broken\n",
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+        let cfg = Config::load();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(cfg.max_items, 750, "解析失败应回退默认值");
+    }
+
+    #[test]
+    fn load_invalid_regex_means_no_filter() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!("niri-clip-cfg-re-{}", std::process::id()));
+        let cfg_dir = root.join("config");
+        std::fs::create_dir_all(cfg_dir.join("niri-clip")).unwrap();
+        // 非法正则：编译失败 → ignore_re=None（过滤关闭），而不是整个配置崩掉
+        std::fs::write(
+            cfg_dir.join("niri-clip/config.toml"),
+            "ignore_regex = \"([unclosed\"\n",
+        )
+        .unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+        let cfg = Config::load();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(cfg.ignore_re.is_none(), "非法正则应得 None");
+        assert!(!crate::store::should_ignore("password", &cfg));
+    }
+
+    #[test]
+    fn state_dir_respects_xdg_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var("XDG_STATE_HOME").ok();
+        std::env::set_var("XDG_STATE_HOME", "/tmp/nc-ut-state");
+        assert_eq!(Config::state_dir(), PathBuf::from("/tmp/nc-ut-state/niri-clip"));
+        assert_eq!(
+            Config::db_path(),
+            PathBuf::from("/tmp/nc-ut-state/niri-clip/db.sqlite")
+        );
+        // 相对路径不被接受，回落 HOME
+        std::env::set_var("XDG_STATE_HOME", "relative/path");
+        let fallback = Config::state_dir();
+        assert!(
+            !fallback.starts_with("relative"),
+            "相对路径必须被拒绝: {:?}",
+            fallback
+        );
+        match prev {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
     }
 }

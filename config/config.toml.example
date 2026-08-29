@@ -5,11 +5,11 @@
 max_items = 750
 preview_width = 100
 min_store_length = 1
-enable_image_preview = true  # v0.3 chafa/kitty icat
+enable_image_preview = false  # 图片捕获/chafa 预览（默认关：开启后轮询兜底路径会尝试图片 MIME）
 ignore_regex = "(?i)password|secret|token|otp|auth"
 pinned_on_top = true
 tui_backend = "auto"      # auto | native | fzf | fuzzel
-                          # native: 原生 layer-shell 窗口（需 niri-clip-gui）
+                          # native: 原生 iced xdg 窗口（需 niri-clip-gui，见 ADR-001）
                           # auto: gui 可用优先 native，其次 fzf，最后 fuzzel
 notify_enabled = true     # v0.5（P1-4）：桌面通知开关（mako 等），false 完全静默
 enable_preview = true

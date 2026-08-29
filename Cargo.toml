@@ -24,6 +24,7 @@ notify-rust = "4"
 regex = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 # 只用到 rt（#[tokio::main] 多线程执行器）、time（sleep）、process（子进程）、
 # macros（#[tokio::main]）——full 会拉入 net/signal/io 等无关特性
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "process"] }
