@@ -81,6 +81,8 @@ struct App {
     /// 星标条目删除二段确认（对齐路线图 1.5：内嵌确认，去 fuzzel 依赖）
     confirm_delete: bool,
     preview_width: usize,
+    /// 图片预览开关（对齐 fzf TUI 的 enable_image_preview 语义）
+    image_preview_enabled: bool,
     /// 鼠标悬停跟随开关：键盘导航时关闭——列表在静止指针下滑动会
     /// 逐行触发 on_enter，悬停跟随会反复抢走选中态（界面闪烁根因）
     mouse_follow: bool,
@@ -102,6 +104,7 @@ impl App {
             selected: 0,
             confirm_delete: false,
             preview_width: cfg.preview_width,
+            image_preview_enabled: cfg.enable_image_preview,
             mouse_follow: false,
             image_cache: RefCell::new(None),
         }
@@ -246,12 +249,15 @@ impl App {
                 if self.query.is_empty()
                     && !modifiers.control()
                     && c.len() == 1
-                    && c.as_str() >= "1"
-                    && c.as_str() <= "9" =>
+                    && (c.as_str() >= "1" && c.as_str() <= "9" || c.as_str() == "0") =>
             {
-                // 空查询时 1-9 快选：定位到过滤列表第 n 行并复制关闭；
-                // 有输入时数字回落为查询字符（text_input 自行处理）
-                let n: usize = c.parse().unwrap_or(0);
+                // 空查询时 1-9,0 快选（0=第 10 行）：定位到过滤列表第 n 行并
+                // 复制关闭；有输入时数字回落为查询字符（text_input 自行处理）
+                let n: usize = if c.as_str() == "0" {
+                    10
+                } else {
+                    c.parse().unwrap_or(0)
+                };
                 if n >= 1 && n <= self.filtered().len() {
                     self.selected = n - 1;
                     return self.update(Message::Copy { exit: true });
@@ -318,8 +324,24 @@ impl App {
         let q_lower = self.query.to_lowercase();
 
         // 视觉对齐 fzf TUI：info 头行 → "剪贴板> " 提示符 → 行列表 → 底部预览
-        let header = "1-9快选 · Enter复制 · Ctrl-Y连复 · Ctrl-P固定 · Ctrl-X删除 · Esc清除/退出";
         let counter = format!("{}/{}", filtered.len(), self.clips.len());
+        // 提示行：键位 accent 高亮、说明 muted，紧凑单行（fzf header 风格）
+        let mut hints: Vec<text::Span<'static, (), Font>> = Vec::new();
+        let hint_groups = [
+            ("1-9,0", "快选"),
+            ("⏎", "复制"),
+            ("Ctrl-Y", "连复"),
+            ("Ctrl-P", "固定"),
+            ("Ctrl-X", "删除"),
+            ("Esc", "清除/退出"),
+        ];
+        for (i, (k, d)) in hint_groups.iter().enumerate() {
+            if i > 0 {
+                hints.push(text::Span::new(" · ").color(SCROLLBAR));
+            }
+            hints.push(text::Span::new((*k).to_string()).color(ACCENT));
+            hints.push(text::Span::new((*d).to_string()).color(MUTED));
+        }
 
         let rows = filtered.iter().enumerate().map(|(idx, clip)| {
             let selected = idx == self.selected;
@@ -410,9 +432,12 @@ impl App {
             .push(
                 container(
                     row![
-                        text(header).size(11).color(MUTED),
+                        text::Rich::with_spans(hints)
+                            .size(10)
+                            .font(UI_FONT)
+                            .wrapping(text::Wrapping::None),
                         space::horizontal(),
-                        text(counter).size(11).color(MUTED)
+                        text(counter).size(10).color(MUTED)
                     ]
                     .width(Length::Fill),
                 )
@@ -464,12 +489,12 @@ impl App {
                 })
                 .into();
         };
-        if clip.mime.starts_with("image/") {
+        if clip.mime.starts_with("image/") && self.image_preview_enabled {
             match self.image_handle(clip) {
                 Some(handle) => {
                     col = col.push(
                         container(
-                            image(handle).height(Length::Fixed(140.0)),
+                            image(handle).height(Length::Fixed(260.0)),
                         )
                         .width(Length::Fill)
                         .padding([6, 8])
@@ -504,18 +529,18 @@ impl App {
             .into()
     }
 
-    /// 底部预览：选中条目全文多行截断
+    /// 底部预览：选中条目全文多行截断（↵ → ⏎，同行的 tofu 规避）
     fn preview_text(&self, clip: &store::Clip) -> String {
         let mut out = String::new();
-        for line in clip.text.lines().take(8) {
-            let l: String = line.chars().take(160).collect();
+        for line in clip.text.lines().take(14) {
+            let l: String = line.chars().take(200).collect();
             out.push_str(&l);
             out.push('\n');
         }
         if clip.text.len() > out.len() {
             out.push('…');
         }
-        out
+        out.replace('↵', "⏎")
     }
 
     /// 图片条目的渲染 Handle：从 images/{id}.bin 读字节按内容解码
