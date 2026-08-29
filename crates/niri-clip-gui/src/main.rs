@@ -402,7 +402,9 @@ impl App {
         let id = clip.id;
         // 后台删除 + 重拉列表，UI 线程零阻塞（sqlite 写锁最长 busy_timeout 5s）
         self.confirm_delete = false;
-        self.query.clear();
+        // 保留查询与选中索引（fzf --track 删除跟随语义）：ListReloaded 后
+        // 同索引 = 下一行顶上，删可见区末尾则 clamp 到上一行。清查询会让
+        // 过滤列表突变为全库，选中看起来"弹回顶部"
         let notify = self.notify_enabled;
         run_bg(
             move || {
