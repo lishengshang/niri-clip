@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
-use regex::Regex;
 use rusqlite::{params, Connection, OpenFlags};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -178,7 +177,8 @@ pub fn should_ignore(text: &str, cfg: &Config) -> bool {
     if text.chars().count() < cfg.min_store_length {
         return true;
     }
-    if let Ok(re) = Regex::new(&cfg.ignore_regex) {
+    // 编译产物随 Config::load 缓存（见 config.rs ignore_re）；None = 模式非法，不过滤
+    if let Some(re) = &cfg.ignore_re {
         if re.is_match(text) {
             return true;
         }
@@ -217,7 +217,15 @@ pub fn touch_current(hash: &str) {
     }
 }
 
+/// 入库文本（自带配置加载）。便利入口供 CLI/测试使用；
+/// daemon 等已持有 Config 的调用方请用 `insert_with` 免去重复读盘解析。
 pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
+    insert_with(text, mime, &Config::load())
+}
+
+/// 同 insert，但复用调用方已加载的配置（捕获热路径上 Config::load 的
+/// 同步读盘 + TOML 解析是每次捕获都要付的成本，能省则省）
+pub fn insert_with(text: String, mime: Option<String>, cfg: &Config) -> Result<bool> {
     // 统一空白语义：所有捕获路径（watch 管道 / try_system_capture / native
     // 轮询）必须在同一 hash 口径下去重。此前仅 try_system_capture 做 trim，
     // 同一次剪贴板变化的竞态双触发会以"原文版 + trim 版"两份入库（真实库
@@ -227,8 +235,7 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
     if text.is_empty() {
         return Ok(false);
     }
-    let cfg = Config::load();
-    if should_ignore(&text, &cfg) {
+    if should_ignore(&text, cfg) {
         return Ok(false);
     }
     // v0.5：单条体积上限。守卫放 store 层（单一真相源）——除 daemon 三个捕获
@@ -283,7 +290,11 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
 ///
 /// 注意：图片不做 ignore_regex 内容过滤（无法对二进制语义扫描）；上限裁剪共用。
 pub fn insert_image(mime: &str, bytes: &[u8]) -> Result<Option<InsertedImage>> {
-    let cfg = Config::load();
+    insert_image_with(mime, bytes, &Config::load())
+}
+
+/// 同 insert_image，但复用调用方已加载的配置（见 insert_with）
+pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Option<InsertedImage>> {
     // v0.5：图片单张体积上限（截图通常 1–3MB，默认 10MiB 给足余量）
     if bytes.len() > cfg.max_image_bytes {
         eprintln!(
@@ -522,6 +533,7 @@ pub fn migrate_from_cliphist() -> Result<usize> {
         _ => return Ok(0),
     };
     let s = String::from_utf8_lossy(&out.stdout);
+    let cfg = Config::load();
     let mut n = 0;
     for line in s.lines() {
         if let Some((id_str, preview)) = line.split_once('\t') {
@@ -534,7 +546,7 @@ pub fn migrate_from_cliphist() -> Result<usize> {
                     .ok()
                     .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
                     .unwrap_or_else(|| preview.to_string());
-                if insert(decoded, None)? {
+                if insert_with(decoded, None, &cfg)? {
                     n += 1;
                 }
             }

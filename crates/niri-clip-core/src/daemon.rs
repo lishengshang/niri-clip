@@ -72,7 +72,7 @@ pub fn store_from_stdin() -> Result<()> {
     if !buf.is_empty() {
         match String::from_utf8(buf) {
             Ok(text) => {
-                ingest_text(&text)?;
+                ingest_text(&text, &cfg)?;
                 return Ok(());
             }
             Err(broken) => {
@@ -90,9 +90,9 @@ pub fn store_from_stdin() -> Result<()> {
     try_system_capture().map(|_| ())
 }
 
-/// 文本入库（含 ignore 规则），统一入口便于测试
-fn ingest_text(text: &str) -> Result<bool> {
-    let inserted = store::insert(text.to_string(), None)?;
+/// 文本入库（含 ignore 规则），统一入口便于测试。复用调用方已加载的配置
+fn ingest_text(text: &str, cfg: &Config) -> Result<bool> {
+    let inserted = store::insert_with(text.to_string(), None, cfg)?;
     if inserted {
         eprintln!("[niri-clip store] inserted");
     } else {
@@ -104,7 +104,8 @@ fn ingest_text(text: &str) -> Result<bool> {
 /// 无 stdin 数据时的系统剪贴板探测：先文本，后图片（受开关约束）。
 /// 所有失败在此收敛为“本次未捕获”，由调用方决定是否报错。
 fn try_system_capture() -> Result<bool> {
-    let max = Config::load().max_clip_bytes;
+    let cfg = Config::load();
+    let max = cfg.max_clip_bytes;
     let cap = max as u64 + 1;
     match get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text) {
         Ok((pipe, _)) => {
@@ -118,7 +119,7 @@ fn try_system_capture() -> Result<bool> {
                     .map_err(|_| anyhow!("clipboard payload is not valid utf-8"))?;
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    return ingest_text(trimmed);
+                    return ingest_text(trimmed, &cfg);
                 }
             }
             Ok(false)
@@ -150,7 +151,7 @@ fn capture_image_if_enabled() -> Result<bool> {
                     notify_oversize(&format!("图片超过 max_image_bytes={max} 字节"));
                     return Ok(false);
                 }
-                match store::insert_image(mime, &v) {
+                match store::insert_image_with(mime, &v, &cfg) {
                     Ok(Some(img)) => {
                         eprintln!(
                             "[niri-clip store] stored image #{} -> {}",

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -33,6 +34,12 @@ pub struct Config {
     /// v0.5（P1-4）：桌面通知开关（mako 等）。关闭后完全静默运行
     #[serde(default = "default_true")]
     pub notify_enabled: bool,
+    /// ignore_regex 的编译产物：每条入库热路径都要过一遍过滤，不能在
+    /// should_ignore 里反复 Regex::new。编译失败为 None（同旧行为：不过滤）。
+    /// 注意：直接改字段赋值 ignore_regex 时需同步重编译（代码内无此用法）
+    #[serde(skip)]
+    #[serde(default)]
+    pub ignore_re: Option<Regex>,
 }
 
 fn default_max_items() -> usize {
@@ -65,12 +72,14 @@ fn default_max_image_bytes() -> usize {
 
 impl Default for Config {
     fn default() -> Self {
+        let ignore_regex = r"(?i)password|secret|token|otp|auth".to_string();
         Self {
             max_items: 750,
             preview_width: 100,
             min_store_length: 1,
             enable_image_preview: false,
-            ignore_regex: r"(?i)password|secret|token|otp|auth".to_string(),
+            ignore_re: Regex::new(&ignore_regex).ok(),
+            ignore_regex,
             pinned_on_top: true,
             tui_backend: "auto".to_string(),
             enable_preview: true,
@@ -88,7 +97,10 @@ impl Config {
         if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(s) => match toml::from_str::<Config>(&s) {
-                    Ok(c) => return c,
+                    Ok(mut c) => {
+                        c.ignore_re = Regex::new(&c.ignore_regex).ok();
+                        return c;
+                    }
                     Err(e) => eprintln!("[niri-clip] config parse error {e}, using default"),
                 },
                 Err(e) => eprintln!("[niri-clip] read config error {e}"),

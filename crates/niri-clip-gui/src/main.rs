@@ -89,7 +89,13 @@ struct App {
     /// 行列表 scrollable 的 Id：键盘导航时 scroll_to 跟随选中
     list_id: iced::widget::Id,
     clips: Vec<store::Clip>,
+    /// clips 更替代数：每次整表重载 +1，作为过滤缓存的失效键之一
+    /// （pin/delete/copy 后列表都会整表重拉，长度可能不变，不能只比长度）
+    clips_gen: u64,
     query: String,
+    /// 过滤结果缓存：(代数, 查询, 命中的 clips 下标)。悬停/选中/复制等
+    /// 高频事件都会调 filtered()，750 条全量评分排序 O(n·m) 不能每事件重算
+    filtered_cache: RefCell<Option<(u64, String, Vec<usize>)>>,
     selected: usize,
     /// 星标条目删除二段确认（对齐路线图 1.5：内嵌确认，去 fuzzel 依赖）
     confirm_delete: bool,
@@ -122,7 +128,9 @@ impl App {
             search_id: iced::widget::Id::unique(),
             list_id: iced::widget::Id::unique(),
             clips,
+            clips_gen: 0,
             query: String::new(),
+            filtered_cache: RefCell::new(None),
             selected: 0,
             confirm_delete: false,
             preview_width: cfg.preview_width,
@@ -144,19 +152,34 @@ impl App {
     }
 
     /// 过滤后的视图：fzf 风格子序列匹配 + 简易评分排序
-    /// （连续命中/词首加权，命中越早越好）；空查询保持存储序
+    /// （连续命中/词首加权，命中越早越好）；空查询保持存储序。
+    /// 结果按 (clips 代数, 查询) 缓存——同一输入下悬停/选中/复制等
+    /// 事件重复调用直接复用，不在事件路径上重算全库评分
     fn filtered(&self) -> Vec<&store::Clip> {
-        if self.query.is_empty() {
-            return self.clips.iter().collect();
+        {
+            let cache = self.filtered_cache.borrow();
+            if let Some((gen, q, idxs)) = cache.as_ref() {
+                if *gen == self.clips_gen && *q == self.query {
+                    return idxs.iter().map(|&i| &self.clips[i]).collect();
+                }
+            }
         }
-        let q = self.query.to_lowercase();
-        let mut scored: Vec<(i32, &store::Clip)> = self
-            .clips
-            .iter()
-            .filter_map(|c| fuzzy_score(&q, &c.text).map(|s| (s, c)))
-            .collect();
-        scored.sort_by_key(|s| Reverse(s.0));
-        scored.into_iter().map(|(_, c)| c).collect()
+        let idxs: Vec<usize> = if self.query.is_empty() {
+            (0..self.clips.len()).collect()
+        } else {
+            let q = self.query.to_lowercase();
+            let mut scored: Vec<(i32, usize)> = self
+                .clips
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| fuzzy_score(&q, &c.text).map(|s| (s, i)))
+                .collect();
+            scored.sort_by_key(|s| Reverse(s.0));
+            scored.into_iter().map(|(_, i)| i).collect()
+        };
+        *self.filtered_cache.borrow_mut() =
+            Some((self.clips_gen, self.query.clone(), idxs.clone()));
+        idxs.into_iter().map(|i| &self.clips[i]).collect()
     }
 
     /// 可渲染行数：过滤结果与渲染上限取小。选中态/快选/导航必须以此为界——
@@ -254,6 +277,7 @@ impl App {
             }
             Message::ListReloaded(Some(clips)) => {
                 self.clips = clips;
+                self.clips_gen += 1;
                 if self.selected >= self.visible_len() {
                     self.selected = self.visible_len().saturating_sub(1);
                 }
