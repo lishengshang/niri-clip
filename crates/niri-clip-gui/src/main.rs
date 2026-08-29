@@ -46,6 +46,9 @@ enum Message {
     CopyFinished { exit: bool, ok: bool },
     /// 后台 pin/delete 完成，带回重拉后的列表（None = worker 异常，放弃）
     ListReloaded(Option<Vec<store::Clip>>),
+    /// 删除后的重载：与 ListReloaded 不同——不主动滚动（行上移自然带动
+    /// 选中，fzf --track 同款），并抑制悬停跟随
+    DeleteReloaded(Option<Vec<store::Clip>>),
     /// 鼠标悬停行：跟随选中（高亮预览）
     Hover(usize),
     /// 鼠标真实移动：恢复悬停跟随
@@ -286,6 +289,18 @@ impl App {
                 }
                 return self.scroll_to_selected();
             }
+            Message::DeleteReloaded(Some(clips)) => {
+                self.clips = clips;
+                self.clips_gen += 1;
+                // 行上移会让静止指针下换行，抑制悬停跟随直到真实移动
+                self.mouse_follow = false;
+                if self.selected >= self.visible_len() {
+                    // 删的是可见区末行：退到上一行
+                    self.selected = self.visible_len().saturating_sub(1);
+                }
+                // 不发 scroll_to：保持滚动位置，选中由行上移自然锚定
+            }
+            Message::DeleteReloaded(None) => {}
             Message::ListReloaded(None) => {}
         }
         Task::none()
@@ -422,9 +437,9 @@ impl App {
                         eprintln!("[niri-clip gui] delete failed");
                     }
                 }
-                Message::ListReloaded(clips)
+                Message::DeleteReloaded(clips)
             },
-            Message::ListReloaded(None),
+            Message::DeleteReloaded(None),
         )
     }
 
