@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Added
+- **AGENTS.md AI 协作开发约定**：Git 写面（commit/push/PR/issue/发布链/系统级部署）默认请示制，
+  每轮收尾输出"建议 Git 动作清单"由用户逐项决策
+- **GUI 重新聚焦刷新**：窗口重聚焦即重拉列表——daemon 在失焦期间捕获的新内容不再缺失；
+  不滚动、选中按 id 重定位，浏览位置不受影响
 - **图片文件孤儿清扫**：`store::prune_orphan_images` 回收 images/ 下无主
   数据文件（daemon 启动时执行一次），兼容旧版本存量残留与 `.tmp-` 崩溃残片
 - **config/preview 单元测试补齐**：默认值/自定义正则/非法 TOML 回退/
@@ -29,6 +33,17 @@
   的 `enable_image_preview` 与代码默认值（false）对齐
 
 ### Fixed
+- **GUI Ctrl-X 删错行/跳顶（真根因，E2E 实锤）**：搜索框持有焦点时 iced text_input
+  把 Ctrl+X 当剪切处理，空输入无编辑也发 `on_input("")` 且先于按键订阅到达，
+  Query 处理器无条件 `set_selection(0)` 使删除执行时选中已归零——表现为永远删掉
+  顶部行、高亮跳顶。现同值 Query 回调直接忽略；选中改为按 clip id 跟踪
+  （重载后 `relocate_selected` 按 id 重定位，防 daemon 捕获/固定操作重排行序
+  导致高亮漂移）；星标二段确认随选中移动自动取消，防确认残留误删下一行
+- **图片条目复制写占位文本**：`copy_to_clipboard` 对图片条目把
+  "[image mime N bytes]" 占位文本顶进剪贴板（并毁掉真实截图）——现按 mime
+  以 `wl-copy --type` 灌入 `images/{id}.bin` 文件字节
+- **CLI SIGPIPE panic**：`niri-clip status | head` 等管道截断时 println! 写入
+  EPIPE 直接 panic（Rust 默认 SIGPIPE=SIG_IGN）——改用忽略写失败的 outln!
 - **图片数据文件生命周期闭环**：delete/wipe/超限淘汰此前只删 clips 行、
   不删 `images/{id}.bin`（state 目录只进不出）——现在行删文件也删
 - **图片入库"有行无图"残缺状态**：`insert_image` 数据文件写入纳入事务
