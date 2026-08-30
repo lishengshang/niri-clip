@@ -46,9 +46,12 @@ enum Message {
     CopyFinished { exit: bool, ok: bool },
     /// 后台 pin/delete 完成，带回重拉后的列表（None = worker 异常，放弃）
     ListReloaded(Option<Vec<store::Clip>>),
-    /// 删除后的重载：与 ListReloaded 不同——不主动滚动（行上移自然带动
-    /// 选中，fzf --track 同款），并抑制悬停跟随
+    /// 删除/外部变更后的重载：与 ListReloaded 不同——不主动滚动（选中按
+    /// id 重定位，行上移自然带动，fzf --track 同款），并抑制悬停跟随
     DeleteReloaded(Option<Vec<store::Clip>>),
+    /// 窗口重新聚焦：打开期间 daemon 可能捕获了新内容，重拉列表
+    /// （走 DeleteReloaded 路径：不滚动，选中按 id 重定位）
+    Refocus,
     /// 鼠标悬停行：跟随选中（高亮预览）
     Hover(usize),
     /// 鼠标真实移动：恢复悬停跟随
@@ -103,6 +106,12 @@ struct App {
     /// 高频事件都会调 filtered()，750 条全量评分排序 O(n·m) 不能每事件重算
     filtered_cache: RefCell<Option<(u64, String, Vec<usize>)>>,
     selected: usize,
+    /// 选中项身份（fzf --track 的确定性实现）：clips 只增代数不保序——
+    /// store::list 把 ▶ 当前项置顶、星标可置顶，daemon 捕获/其他窗口操作
+    /// 都会重排列表。仅靠索引维持选中时，重载后同索引 ≠ 同条目：
+    /// 高亮漂移到别的行，Ctrl-X 就会删掉"看起来选中"以外的记录。
+    /// 重载后一律按 selected_id 在新列表重新定位（relocate_selected）。
+    selected_id: Option<i64>,
     /// 星标条目删除二段确认（对齐路线图 1.5：内嵌确认，去 fuzzel 依赖）
     confirm_delete: bool,
     preview_width: usize,
@@ -130,6 +139,7 @@ impl App {
     fn new() -> Self {
         let cfg = config::Config::load();
         let clips = store::list(Self::load_limit()).unwrap_or_default();
+        let first_id = clips.first().map(|c| c.id);
         Self {
             search_id: iced::widget::Id::unique(),
             list_id: iced::widget::Id::unique(),
@@ -138,6 +148,8 @@ impl App {
             query: String::new(),
             filtered_cache: RefCell::new(None),
             selected: 0,
+            // 打开即高亮第 1 行（▶ 当前项）：记录其身份供重载后重定位
+            selected_id: first_id,
             confirm_delete: false,
             preview_width: cfg.preview_width,
             image_preview_enabled: cfg.enable_image_preview,
@@ -194,11 +206,58 @@ impl App {
         self.filtered().len().min(MAX_RENDER_ROWS)
     }
 
+    /// 设置选中（索引 + 身份同步）。所有选中变更的唯一入口：
+    /// 索引与 selected_id 永远成对更新，Ctrl-X/Copy 取的是高亮行本身
+    fn set_selection(&mut self, idx: usize) {
+        self.selected = idx;
+        let id = self.filtered().get(idx).map(|c| c.id);
+        self.selected_id = id;
+    }
+
+    /// 重载后重定位选中（fzf --track 的确定性实现）：
+    /// 1) selected_id 仍在 → 高亮跟随该条目。防重排漂移：store::list 依赖
+    ///    current 指针/星标排序，daemon 捕获、Ctrl-P 固定都会重排行序，
+    ///    同索引 ≠ 同条目——索引维持会把高亮留在别的行，Ctrl-X 即删错行；
+    /// 2) id 消失（已被删）→ 保留索引让下一行自然顶上，末行回退一位；
+    ///    随后回写当前索引处的 id，保证一致性不变式成立
+    fn relocate_selected(&mut self) {
+        let n = self.visible_len();
+        if n == 0 {
+            self.selected = 0;
+            self.selected_id = None;
+            return;
+        }
+        if let Some(id) = self.selected_id {
+            let found = self.filtered().iter().position(|c| c.id == id);
+            if let Some(idx) = found {
+                if idx < n {
+                    self.selected = idx;
+                    return;
+                }
+            }
+        }
+        if self.selected >= n {
+            self.selected = n - 1;
+        }
+        let id = self.filtered().get(self.selected).map(|c| c.id);
+        self.selected_id = id;
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
+        if std::env::var_os("NIRI_CLIP_DEBUG").is_some() {
+            eprintln!("[dbg] msg={message:?} sel={} sid={:?}", self.selected, self.selected_id);
+        }
         match message {
             Message::Query(q) => {
+                // 同值回调必须忽略：搜索框持有焦点时，iced text_input 把
+                // Ctrl+X 当"剪切"处理——空输入无编辑也发 on_input("")，且
+                // 该消息先于订阅的 Key 到达。若在此复位选中，Ctrl-X 实际
+                // 执行时 selected 已被归零 → 永远删掉顶部行（跳顶根因）
+                if q == self.query {
+                    return Task::none();
+                }
                 self.query = q;
-                self.selected = 0;
+                self.set_selection(0);
                 self.confirm_delete = false;
                 // 重新过滤后回到顶部
                 return self.scroll_to_selected();
@@ -207,7 +266,9 @@ impl App {
             Message::Hover(idx) => {
                 // 仅在鼠标活跃时跟随：键盘滚动中忽略 on_enter（防闪烁）
                 if self.mouse_follow && idx < self.visible_len() {
-                    self.selected = idx;
+                    self.set_selection(idx);
+                    // 选中已离开星标行：挂起的二段确认随之作废
+                    self.confirm_delete = false;
                 }
             }
             Message::MouseMove => {
@@ -216,7 +277,7 @@ impl App {
             Message::Pick(idx) => {
                 // 点击行 = 定位到该行并复制关闭（对齐 Enter）
                 if idx < self.visible_len() {
-                    self.selected = idx;
+                    self.set_selection(idx);
                     return Task::batch([
                         self.scroll_to_selected(),
                         self.update(Message::Copy { exit: true }),
@@ -226,7 +287,7 @@ impl App {
             Message::PickStay(idx) => {
                 // 右键行 = 定位到该行并连续复制（对齐 Ctrl-Y，不退出）
                 if idx < self.visible_len() {
-                    self.selected = idx;
+                    self.set_selection(idx);
                     return Task::batch([
                         self.scroll_to_selected(),
                         self.update(Message::Copy { exit: false }),
@@ -269,24 +330,25 @@ impl App {
                     // 后台复制已完成，wl-copy 守护进程持有数据，退出安全
                     std::process::exit(0);
                 }
-                // Ctrl-Y 连续复制：重拉列表，▶ 已随 copy 刷新到刚复制的条目
+                // Ctrl-Y 连续复制：重拉列表，▶ 已随 copy 刷新到刚复制的条目。
+                // selected_id 先记到旧列表第 1 行（复制目标），重载后由
+                // relocate_selected 跟随——即使它已因 ▶ 置顶排序移动
                 self.query.clear();
-                self.selected = 0;
+                self.set_selection(0);
                 return Task::batch([
-                    self.scroll_to_selected(),
                     run_bg(
                         move || store::list(Self::load_limit()).ok(),
                         Message::ListReloaded,
                         Message::ListReloaded(None),
                     ),
+                    self.scroll_to_selected(),
                 ]);
             }
             Message::ListReloaded(Some(clips)) => {
                 self.clips = clips;
                 self.clips_gen += 1;
-                if self.selected >= self.visible_len() {
-                    self.selected = self.visible_len().saturating_sub(1);
-                }
+                // Ctrl-P 等操作会重排行序：按 id 跟随选中，而非保留索引
+                self.relocate_selected();
                 return self.scroll_to_selected();
             }
             Message::DeleteReloaded(Some(clips)) => {
@@ -294,14 +356,23 @@ impl App {
                 self.clips_gen += 1;
                 // 行上移会让静止指针下换行，抑制悬停跟随直到真实移动
                 self.mouse_follow = false;
-                if self.selected >= self.visible_len() {
-                    // 删的是可见区末行：退到上一行
-                    self.selected = self.visible_len().saturating_sub(1);
-                }
+                self.confirm_delete = false;
+                // 被删条目的 id 已不在 → 保留索引由下一行顶上，末行回退；
+                // 若 delete 失败（列表未变）则按 id 精确回到原选中
+                self.relocate_selected();
                 // 不发 scroll_to：保持滚动位置，选中由行上移自然锚定
             }
             Message::DeleteReloaded(None) => {}
             Message::ListReloaded(None) => {}
+            Message::Refocus => {
+                // 重新聚焦重拉：daemon 在窗口失焦期间捕获的新内容补进来。
+                // 不滚动、按 id 重定位——打开期间的浏览位置不受影响
+                return run_bg(
+                    move || store::list(Self::load_limit()).ok(),
+                    Message::DeleteReloaded,
+                    Message::DeleteReloaded(None),
+                );
+            }
         }
         Task::none()
     }
@@ -372,7 +443,7 @@ impl App {
                     c.parse().unwrap_or(0)
                 };
                 if n >= 1 && n <= self.visible_len() {
-                    self.selected = n - 1;
+                    self.set_selection(n - 1);
                     return self.update(Message::Copy { exit: true });
                 }
             }
@@ -388,7 +459,12 @@ impl App {
         let n = self.visible_len();
         if n > 0 {
             let next = self.selected as i64 + delta as i64;
-            self.selected = next.clamp(0, n as i64 - 1) as usize;
+            let next = next.clamp(0, n as i64 - 1) as usize;
+            if next != self.selected {
+                // 选中已离开星标行：挂起的二段确认随之作废
+                self.confirm_delete = false;
+                self.set_selection(next);
+            }
             // 键盘导航滚动跟随：把选中行滚进可视区（视口半高估算）
             return self.scroll_to_selected();
         }
@@ -409,6 +485,12 @@ impl App {
         let Some(clip) = self.filtered().get(self.selected).cloned() else {
             return Task::none();
         };
+        if std::env::var_os("NIRI_CLIP_DEBUG").is_some() {
+            eprintln!(
+                "[dbg] delete_selected sel={} sid={:?} -> id={} pinned={}",
+                self.selected, self.selected_id, clip.id, clip.pinned
+            );
+        }
         // 星标条目二段确认：第一次 Ctrl-X 仅挂起确认，再按才执行
         if clip.pinned && !self.confirm_delete {
             self.confirm_delete = true;
@@ -730,6 +812,9 @@ impl App {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 Some(Message::Key(key, modifiers))
             }
+            // 重新聚焦即重拉列表：窗口开着的时候 daemon 照常捕获，
+            // 不刷新则列表陈旧（看不到新条目、▶ 指针滞后）
+            iced::Event::Window(iced::window::Event::Focused) => Some(Message::Refocus),
             _ => None,
         })
     }
