@@ -496,8 +496,31 @@ pub fn get(id: i64) -> Result<Clip> {
 /// 复制指定条目到剪贴板（wl-copy 子进程），并刷新当前项指针。
 /// CLI `copy` 子命令与原生 UI 的 Enter/Ctrl-Y 共用此唯一路径，
 /// 保证 ▶ 跟随语义在所有复制入口一致。
+///
+/// 图片条目：clips.text 只是 "[image mime N bytes]" 占位符，真实载荷在
+/// images/{id}.bin——必须以 `wl-copy --type {mime}` 灌入文件字节。
+/// 此前一律写 text，把占位文本顶进剪贴板（还顺带毁掉当前真实的截图），
+/// 粘贴出来的是一行字而不是图。
 pub fn copy_to_clipboard(id: i64) -> Result<()> {
     let clip = get(id)?;
+    if clip.mime.starts_with("image/") {
+        let path = clip
+            .image_path
+            .as_deref()
+            .context("图片条目缺少数据文件路径")?;
+        let file = std::fs::File::open(path).with_context(|| format!("open {path}"))?;
+        let mut wl = std::process::Command::new("wl-copy")
+            .arg(format!("--type={}", clip.mime))
+            // wl-copy 直接读 fd，无需内存中转 stdin 管道
+            .stdin(std::process::Stdio::from(file))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("wl-copy")?;
+        wl.wait()?;
+        touch_current(&clip.hash);
+        return Ok(());
+    }
     let mut wl = std::process::Command::new("wl-copy")
         .stdin(std::process::Stdio::piped())
         // wl-copy 会 fork 守护进程常驻服务剪贴板，不得持有调用方终端 fd
