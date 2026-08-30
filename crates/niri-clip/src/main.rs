@@ -42,6 +42,16 @@ enum Commands {
     Status,
 }
 
+/// println! 的 EPIPE 安全版：stdout 管道被下游截断（`niri-clip status | head`）
+/// 时 Rust 默认 SIGPIPE=SIG_IGN，写入返回 EPIPE 而 println! 会 panic。
+/// CLI 输出仅是给人看的，写失败静默忽略即可
+macro_rules! outln {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -51,17 +61,17 @@ async fn main() -> Result<()> {
         Some(Commands::Store) => daemon::store_from_stdin()?,
         Some(Commands::InstallService) => {
             let path = daemon::install_service()?;
-            println!("已写入 {}", path.display());
-            println!("下一步执行：");
-            println!("  systemctl --user daemon-reload");
-            println!("  systemctl --user enable --now niri-clip.service");
-            println!("查看日志： journalctl --user -u niri-clip -f");
+            outln!("已写入 {}", path.display());
+            outln!("下一步执行：");
+            outln!("  systemctl --user daemon-reload");
+            outln!("  systemctl --user enable --now niri-clip.service");
+            outln!("查看日志： journalctl --user -u niri-clip -f");
         }
         Some(Commands::ListRaw) => tui::list_raw()?,
         Some(Commands::Preview { id }) => tui::preview_id(id)?,
         Some(Commands::Copy { id }) => {
             store::copy_to_clipboard(id)?;
-            println!("copied {}", id);
+            outln!("copied {}", id);
         }
         Some(Commands::Pin { id }) => {
             let pinned = store::toggle_pin(id)?;
@@ -76,7 +86,7 @@ async fn main() -> Result<()> {
                     .body(&format!("{} {}", msg, id))
                     .show();
             }
-            println!("{} {}", msg, id);
+            outln!("{} {}", msg, id);
         }
         Some(Commands::Delete { id, force }) => {
             // 星标条目默认要求 GUI 确认；--force 供脚本/CI 等无头场景。
@@ -108,33 +118,33 @@ async fn main() -> Result<()> {
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .unwrap_or_default();
                 if choice != "确认" {
-                    println!("cancelled");
+                    outln!("cancelled");
                     return Ok(());
                 }
             }
             store::delete(id)?;
-            println!("deleted {}", id);
+            outln!("deleted {}", id);
         }
         Some(Commands::Wipe) => {
             store::wipe()?;
-            println!("wiped");
+            outln!("wiped");
         }
         Some(Commands::Migrate) => {
             let n = store::migrate_from_cliphist()?;
-            println!("migrated {} items from cliphist", n);
+            outln!("migrated {} items from cliphist", n);
         }
         Some(Commands::Status) => {
             let cfg = config::Config::load();
-            println!(
+            outln!(
                 "niri-clip v{} - {:?}",
                 env!("CARGO_PKG_VERSION"),
                 config::Config::db_path()
             );
-            println!("config: {:?}", cfg);
+            outln!("config: {:?}", cfg);
             let clips = store::list(5)?;
-            println!("recent {} clips:", clips.len());
+            outln!("recent {} clips:", clips.len());
             for c in clips {
-                println!(
+                outln!(
                     "  {} {} {}",
                     if c.pinned { "★" } else { " " },
                     c.id,
