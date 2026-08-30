@@ -6,15 +6,13 @@ binds {
     }
 }
 
-// niri-clip-gui（xdg 窗口）打开效果规则：浮动、无焦点环/阴影。
-// 窗口默认 500x675（gui 二进制内置），位置按喜好调整
+// niri-clip-gui（xdg 窗口）打开效果规则：浮动、定位。
+// 焦点环保持系统默认——打开剪贴板时 niri 高亮描边窗口，便于定位；
+// 此前显式 focus-ring off 导致它成为全屏唯一没有描边的窗口
 window-rule {
     match app-id="niri-clip-gui"
     open-floating true
     default-floating-position x=50 y=100 relative-to="top"
-    focus-ring {
-        off
-    }
     shadow {
         off
     }
