@@ -101,7 +101,7 @@
 | 1.9 | ✅ 当前项置顶与 ▶ 标识 | "当前项"（最后一次成功捕获 ≈ Ctrl+V 内容）经 `state/current` 指针跟踪，排序固定第 1 行（星标之上），行首 `▶` 与 `★` 可叠加；copy/Enter/Ctrl-Y 路径刷新指针；被过滤/超限时 header 提示缺席 | CLI 冒烟验证 ▶ 置顶压过 ★、copy 后 `▶★` 合并上顶（已过）；指针行为单测 2 例 |
 | 1.3 | ✅ 图片磁盘配额 GC | `store::gc_images`：`max_image_total_bytes`（默认 200 MiB，0 不限）超限按 ts LRU 整行淘汰（行删文件也删），星标/当前项受保护；daemon 启动随孤儿清扫执行；单测覆盖淘汰顺序与保护语义 | GC 后预览不串图（按 id 关联，v0.4 已保障） |
 | 1.4 | ✅ `notify_enabled` 开关 | 桌面通知可关——已核实 config/daemon/tui/gui 全链路门控（false 完全静默），`config.toml.example` 与 README 已同步 | 配置生效（已过） |
-| 1.5 | 星标删除二段确认（部分） | GUI 已有星标二段确认（随选中移动自动取消）；fzf `--expect` 内嵌确认待做（去 fuzzel 依赖路径，裁剪与否待评审） | 删除误操作率归零（manual.sh 验证） |
+| 1.5 | ✅ 星标删除二段确认（fzf 内嵌，去 fuzzel 依赖） | 两次 Ctrl-X：首次挂起（state/pending_delete，15s TTL 防分心误删），list-raw reload 打 "◆ 再按Ctrl-X确认删除" 行内标记，同行再按真删；`delete --fzf` 旗标承载，原 fuzzel 路径保留；二段确认全流程单测（GUI 内嵌确认见 5.3.3） | 删除误操作率归零（单测锁定挂起/确认/过期语义） |
 | 1.6 | ✅ criterion 基准进 CI | `crates/niri-clip-core/benches/store.rs`（list_300_of_10k ≈0.95ms / sqlite_select_300_of_10k ≈0.47ms，见 ARCHITECTURE）；CI 第 6 道 bench 工序：bencher 格式输出 + 绝对预算断言（11ms / 4ms），超限即红 | CI 输出耗时，回归 >20% 报警（绝对阈值先行） |
 | 1.7 | ✅ man page + shell 补全 | `niri-clip man` / `niri-clip completions <shell>`（clap_mangen/clap_complete，闭包 +3 crate）；PKGBUILD 由二进制自生成安装到 man1 与 bash/zsh/fish 补全路径 | PKGBUILD 安装路径正确（本地验证输出） |
 | 1.8 | 依赖与构建开销审计 | `cargo tree` 梳理 wl-clipboard-rs/wayland-client 闭包（~40 crate 已知大头），关无用 feature；PKGBUILD 确认 `--locked`；记录 release 编译时间基线（bundled sqlite ~40s） | 审计结论记入 ARCHITECTURE；编译时间进开销预算表 |

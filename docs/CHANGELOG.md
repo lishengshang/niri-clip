@@ -3,6 +3,15 @@
 ## Unreleased
 
 ### Added
+- **★ 条目删除 fzf 内嵌二段确认（1.5，去 fuzzel 依赖路径）**：fzf TUI
+  删星标条目改为两次 Ctrl-X——首次仅挂起（state/pending_delete 记
+  id+时间戳，15s TTL），list-raw reload 后该行预览尾追 "◆
+  再按Ctrl-X确认删除" 标记，同行再按才真删；按在别的 ★ 行挂起转移，
+  过期自动作哑防分心误删，fzf 启动清残留。AUR 主包（仅 CLI，fzf TUI
+  即主界面）从此无 fuzzel 也能删 ★；CLI `delete --fzf` 旗标承载此
+  逻辑，原 fuzzel 确认路径保留（供手动键绑定用户）；新增二段确认
+  全流程单测。附带修复：store/config/tui 三处测试各自持有独立 XDG
+  环境锁并行时互相踩踏（新增测试暴露）——统一为共享全局锁
 - **PRIMARY selection 捕获（1.1）**：新配置 `capture_primary`（默认关，
   划选噪声大）。开启后 daemon 拉起双 watcher（剪贴板 + `wl-paste --watch
   --primary`），鼠标划选的文本也入库（中键粘贴语义）；主选区与剪贴板

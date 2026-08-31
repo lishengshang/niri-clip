@@ -29,11 +29,13 @@ enum Commands {
     Copy { id: i64 },
     /// 切换固定
     Pin { id: i64 },
-    /// 删除指定条目（--force/-f 跳过星标确认，供脚本与无头环境使用）
+    /// 删除指定条目（--force/-f 跳过星标确认；--fzf 走 fzf 内嵌二段确认）
     Delete {
         id: i64,
         #[arg(short, long)]
         force: bool,
+        #[arg(long)]
+        fzf: bool,
     },
     /// 清空历史
     Wipe,
@@ -94,7 +96,17 @@ async fn main() -> Result<()> {
             }
             outln!("{} {}", msg, id);
         }
-        Some(Commands::Delete { id, force }) => {
+        Some(Commands::Delete { id, force, fzf }) => {
+            if fzf {
+                // fzf 内嵌二段确认（任务 1.5）：★ 行第一次按仅挂起
+                // （list-raw reload 后该行打 "再按Ctrl-X确认删除" 标记），
+                // 同行再按才真删；无 fuzzel 依赖。挂起时静默（execute-silent）
+                match tui::delete_with_fzf_confirm(id)? {
+                    tui::DeleteConfirm::Deleted => outln!("deleted {}", id),
+                    tui::DeleteConfirm::Pending => {}
+                }
+                return Ok(());
+            }
             // 星标条目默认要求 GUI 确认；--force 供脚本/CI 等无头场景。
             // 无头环境的 CI 已由 smoke job 用 -f 覆盖（issue #2 评审项）
             if !force && store::is_pinned(id).unwrap_or(false) {

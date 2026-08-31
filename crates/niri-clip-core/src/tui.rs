@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::Config;
 use crate::store;
@@ -97,6 +99,80 @@ fn backend(cfg: &Config) -> &'static str {
 /// 不再区分缓存/非缓存分支（缓存层已移除）
 fn menu_clips(cfg: &Config) -> Result<Vec<store::Clip>> {
     store::list(cfg.max_items.min(store::TUI_LIMIT))
+}
+
+// =====================================================================
+// 任务 1.5：★ 条目删除的 fzf 内嵌二段确认（去 fuzzel 依赖路径）。
+//
+// AUR 主包只装 CLI 不装 GUI——fzf TUI 就是主界面，而旧实现删 ★ 必须
+// 有 fuzzel 弹窗确认，无 fuzzel 环境直接删不掉。
+//
+// 语义：第一次 Ctrl-X 只挂起（state/pending_delete 记 id+时间戳，15s
+// TTL），list-raw reload 后该行预览尾追 "◆ 再按Ctrl-X确认删除" 标记；
+// 同一行再按一次才真删；按在别的 ★ 行则挂起转移；非 ★ 行单击直删。
+// =====================================================================
+
+/// 挂起删除的有效期：超时自动作哑——防止用户分心后回来误触真删
+const PENDING_TTL_MS: u128 = 15_000;
+
+fn pending_delete_path() -> PathBuf {
+    Config::state_dir().join("pending_delete")
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn write_pending_delete(id: i64) {
+    let _ = std::fs::write(pending_delete_path(), format!("{id} {}", now_ms()));
+}
+
+/// 读取挂起中的删除目标；过期/损坏一律视作无挂起并清文件
+fn read_pending_delete() -> Option<i64> {
+    let raw = std::fs::read_to_string(pending_delete_path()).ok()?;
+    let mut it = raw.split_whitespace();
+    let id: i64 = it.next()?.parse().ok()?;
+    let ts: u128 = it.next()?.parse().ok()?;
+    if now_ms().saturating_sub(ts) > PENDING_TTL_MS {
+        let _ = std::fs::remove_file(pending_delete_path());
+        return None;
+    }
+    Some(id)
+}
+
+fn clear_pending_delete() {
+    let _ = std::fs::remove_file(pending_delete_path());
+}
+
+/// fzf 二段确认删除：返回是否已真删（Pending = 仅挂起，等待同行再按）
+pub enum DeleteConfirm {
+    Deleted,
+    Pending,
+}
+
+pub fn delete_with_fzf_confirm(id: i64) -> Result<DeleteConfirm> {
+    let pinned = store::is_pinned(id).unwrap_or(false);
+    if !pinned {
+        // 非 ★ 行维持单击直删；顺带清掉可能残留的挂起状态
+        clear_pending_delete();
+        store::delete(id)?;
+        return Ok(DeleteConfirm::Deleted);
+    }
+    if read_pending_delete() == Some(id) {
+        clear_pending_delete();
+        store::delete(id)?;
+        return Ok(DeleteConfirm::Deleted);
+    }
+    write_pending_delete(id);
+    Ok(DeleteConfirm::Pending)
+}
+
+/// list-raw 标记：挂起中的行在预览尾追提示（列布局不变，安全追加）
+pub fn pending_delete_marker() -> Option<i64> {
+    read_pending_delete()
 }
 
 /// fzf 的全屏 UI 依赖控制终端（/dev/tty）。niri `spawn` 拉起的进程
@@ -237,6 +313,8 @@ fn row_marks(cur: Option<&str>, c: &store::Clip) -> (String, String) {
 }
 
 fn run_fzf(cfg: &Config) -> Result<()> {
+    // 清理上次会话可能残留的挂起删除（进程退出不会自动清）
+    clear_pending_delete();
     let clips = menu_clips(cfg)?;
     if clips.is_empty() {
         if cfg.notify_enabled {
@@ -264,7 +342,8 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // header 缺席提示：指针存在但列表第 1 行不匹配 → 当前内容被过滤/超限，
     // 不在历史中（在库中则必因置顶排序出现在第 1 行）
     let mut header =
-        "Alt+1..9快选 · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出 · ▶=当前".to_string();
+        "Alt+1..9快选 · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出 · ▶=当前 · ★删=两次Ctrl-X"
+            .to_string();
     if cur
         .as_ref()
         .is_some_and(|h| clips.first().is_some_and(|c| c.hash != *h))
@@ -283,7 +362,7 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // 注意：reload 命令需要重新从 DB 读取，所以用 `niri-clip list-raw` 子命令
     let reload_cmd = format!("{} list-raw", exe);
     let pin_cmd = format!("{} pin {{4}}", exe);
-    let del_cmd = format!("{} delete {{4}}", exe);
+    let del_cmd = format!("{} delete --fzf {{4}}", exe);
     let wipe_cmd = format!("{} wipe", exe);
 
     let preview_cmd = if cfg.enable_preview {
@@ -423,13 +502,18 @@ pub fn list_raw() -> Result<()> {
     let cfg = Config::load();
     let clips = menu_clips(&cfg)?;
     let cur = store::current_hash();
+    let pending = pending_delete_marker();
     use std::io::{self, Write};
     let stdout = io::stdout();
     let mut out = stdout.lock();
     for (idx, c) in clips.iter().enumerate() {
         let num = idx + 1;
         let (cur_mark, star) = row_marks(cur.as_deref(), c);
-        let preview = crate::preview::preview_text(c, cfg.preview_width);
+        let mut preview = crate::preview::preview_text(c, cfg.preview_width);
+        if pending == Some(c.id) {
+            // 二段确认标记：追加在第 5 列尾部，不破坏 tab 列布局
+            preview.push_str("  ◆ 再按Ctrl-X确认删除");
+        }
         if writeln!(
             out,
             "{}\t{}\t{}\t{}\t{}",
@@ -502,5 +586,66 @@ mod tests {
         assert!((0, 70) < FZF_MIN);
         assert!((0, 71) >= FZF_MIN);
         assert!((0, 74) >= FZF_MIN);
+    }
+
+    /// ★ 条目二段确认全流程：首次挂起不真删 → 同 id 再按真删 → 过期
+    /// 挂起不作数。XDG 环境隔离（共享全局锁，见 lib.rs test_util 注释）
+    #[test]
+    fn fzf_delete_two_step_confirm_on_pinned() {
+        use crate::test_util::ENV_LOCK;
+        let _g = ENV_LOCK.lock().unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "niri-clip-tui-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        let prev = std::env::var("XDG_STATE_HOME").ok();
+        std::env::set_var("XDG_STATE_HOME", root.join("state"));
+
+        store::insert("tui-del-entry-甲".into(), None).unwrap();
+        let clip = store::list(10)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.text.starts_with("tui-del-entry-甲"))
+            .expect("seeded");
+        store::toggle_pin(clip.id).unwrap();
+
+        // 第一次 Ctrl-X：仅挂起，不真删；list-raw 标记指向该行
+        assert!(matches!(
+            delete_with_fzf_confirm(clip.id).unwrap(),
+            DeleteConfirm::Pending
+        ));
+        assert!(store::get(clip.id).is_ok(), "挂起阶段不得真删");
+        assert_eq!(pending_delete_marker(), Some(clip.id));
+
+        // 第二次 Ctrl-X：真删，挂起清空
+        assert!(matches!(
+            delete_with_fzf_confirm(clip.id).unwrap(),
+            DeleteConfirm::Deleted
+        ));
+        assert!(store::get(clip.id).is_err());
+        assert_eq!(pending_delete_marker(), None);
+
+        // 过期挂起（时间戳写 0）不作数：仍走挂起而不是误删
+        store::insert("tui-del-entry-乙".into(), None).unwrap();
+        let clip2 = store::list(10)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.text.starts_with("tui-del-entry-乙"))
+            .expect("seeded 2");
+        store::toggle_pin(clip2.id).unwrap();
+        std::fs::write(pending_delete_path(), format!("{} 0", clip2.id)).unwrap();
+        assert!(matches!(
+            delete_with_fzf_confirm(clip2.id).unwrap(),
+            DeleteConfirm::Pending
+        ));
+        assert!(store::get(clip2.id).is_ok(), "过期挂起不得触发真删");
+
+        match prev {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
