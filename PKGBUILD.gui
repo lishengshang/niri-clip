@@ -13,7 +13,7 @@ makedepends=('cargo' 'git')
 # NOTE: 提交 AUR 正式包前需用 updpkgsums / makepkg -g 替换为真实校验值；
 # SKIP 仅适用于 *-git 包。入库的 Cargo.lock 保证 --locked 可复现构建。
 source=("$pkgname-$pkgver.tar.gz::https://github.com/lishengshang/niri-clip/archive/v$pkgver.tar.gz")
-sha256sums=('0b289503302b31d0979627f5f2b50d38e3ba31907f21e41e35b26694f9eea181')
+sha256sums=('e0f66d293150d63d12cc7259a801a3dedd28799a5bf9b8b9af48cb769339f147')
 
 build() {
   cd "$pkgname-$pkgver"
