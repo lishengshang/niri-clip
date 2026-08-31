@@ -323,6 +323,14 @@ pub async fn run() -> Result<()> {
         Err(e) => eprintln!("[niri-clip daemon] prune orphan images failed: {e:#}"),
     }
 
+    // 图片磁盘配额 GC（1.3）：超 max_image_total_bytes 按 LRU 淘汰最旧图片
+    // 条目（星标/当前项保护）。失败不阻断捕获，仅记日志
+    match store::gc_images(cfg.max_image_total_bytes as u64) {
+        Ok(0) => {}
+        Ok(n) => println!("[niri-clip daemon] 图片配额 GC 淘汰 {n} 条"),
+        Err(e) => eprintln!("[niri-clip daemon] image quota gc failed: {e:#}"),
+    }
+
     if which::which("wl-paste").is_ok() {
         return run_watch(cfg.capture_timeout_secs).await;
     }

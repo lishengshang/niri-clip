@@ -99,10 +99,10 @@
 | 1.1 | PRIMARY selection 支持 | `ClipboardType::Primary` 捕获与粘贴；区分 mouse-paste 语义 | 选中即捕获，中键粘贴可选历史 |
 | 1.2 | ✅ `max_clip_bytes` 上限 | **P0**：daemon/store 入库前限流，超限拒绝 + 通知提示，防 DB 膨胀与 `read_to_end` 全内存直通；图片同理（store 层守卫 + `Read::take` 有界读） | 单元测试覆盖边界值（已过）；超限载荷不落库不产生数据文件 |
 | 1.9 | ✅ 当前项置顶与 ▶ 标识 | "当前项"（最后一次成功捕获 ≈ Ctrl+V 内容）经 `state/current` 指针跟踪，排序固定第 1 行（星标之上），行首 `▶` 与 `★` 可叠加；copy/Enter/Ctrl-Y 路径刷新指针；被过滤/超限时 header 提示缺席 | CLI 冒烟验证 ▶ 置顶压过 ★、copy 后 `▶★` 合并上顶（已过）；指针行为单测 2 例 |
-| 1.3 | 图片磁盘配额 GC（半完成） | `images/` 按 LRU 清理，配额可配（默认 200MB）；孤儿数据文件清扫 `prune_orphan_images` 已交付（daemon 启动执行一次），LRU 配额淘汰待做 | GC 后预览不串图（按 id 关联） |
+| 1.3 | ✅ 图片磁盘配额 GC | `store::gc_images`：`max_image_total_bytes`（默认 200 MiB，0 不限）超限按 ts LRU 整行淘汰（行删文件也删），星标/当前项受保护；daemon 启动随孤儿清扫执行；单测覆盖淘汰顺序与保护语义 | GC 后预览不串图（按 id 关联，v0.4 已保障） |
 | 1.4 | ✅ `notify_enabled` 开关 | 桌面通知可关——已核实 config/daemon/tui/gui 全链路门控（false 完全静默），`config.toml.example` 与 README 已同步 | 配置生效（已过） |
 | 1.5 | 星标删除二段确认（部分） | GUI 已有星标二段确认（随选中移动自动取消）；fzf `--expect` 内嵌确认待做（去 fuzzel 依赖路径，裁剪与否待评审） | 删除误操作率归零（manual.sh 验证） |
-| 1.6 | criterion 基准进 CI（部分） | ✅ 本地基准已交付：`crates/niri-clip-core/benches/store.rs`，实测 list ≈0.95ms / sqlite ≈0.47ms（远低于预算，见 ARCHITECTURE）；CI 阈值门禁改动属发布链，草案待批准 | CI 输出耗时，回归 >20% 报警 |
+| 1.6 | ✅ criterion 基准进 CI | `crates/niri-clip-core/benches/store.rs`（list_300_of_10k ≈0.95ms / sqlite_select_300_of_10k ≈0.47ms，见 ARCHITECTURE）；CI 第 6 道 bench 工序：bencher 格式输出 + 绝对预算断言（11ms / 4ms），超限即红 | CI 输出耗时，回归 >20% 报警（绝对阈值先行） |
 | 1.7 | man page + shell 补全 | clap 生成的 man/completions 进包 | PKGBUILD 安装到对应路径 |
 | 1.8 | 依赖与构建开销审计 | `cargo tree` 梳理 wl-clipboard-rs/wayland-client 闭包（~40 crate 已知大头），关无用 feature；PKGBUILD 确认 `--locked`；记录 release 编译时间基线（bundled sqlite ~40s） | 审计结论记入 ARCHITECTURE；编译时间进开销预算表 |
 

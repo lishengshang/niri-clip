@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Added
+- **图片磁盘配额 GC（1.3）**：新配置 `max_image_total_bytes`（默认 200 MiB，
+  0 = 不限），daemon 启动时随孤儿清扫一并执行 `store::gc_images`：images/
+  总量超配额按时间戳 LRU 整行淘汰最旧图片条目（行删文件也删），星标与
+  当前项（≈ Ctrl+V 内容）受保护；可淘汰集合为空时宁超配额不丢数据
 - **criterion 基准设施（1.6）**：新增 `crates/niri-clip-core/benches/store.rs`，
   覆盖 `list_300_of_10k`（端到端含 Config::load/connect）与
   `sqlite_select_300_of_10k`（裸查询）两组基准；种子经公开入库 API 写入

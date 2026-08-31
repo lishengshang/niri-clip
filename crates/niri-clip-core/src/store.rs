@@ -402,6 +402,56 @@ pub fn prune_orphan_images() -> Result<usize> {
     Ok(n)
 }
 
+/// 图片磁盘配额 GC（路线图 1.3）：images/ 总量超过 max_image_total_bytes 时，
+/// 按时间戳 LRU（最旧优先）整行淘汰图片条目，行删文件也删（同
+/// enforce_max_items 的联动语义）。保护两类条目：星标（pinned=0 过滤）
+/// 与当前项（state/current 指针 ≈ Ctrl+V 会粘出的内容，删了会粘出空气）。
+/// 0 = 不限制。daemon 启动时随 prune_orphan_images 一并执行一次，
+/// 运行期不重复触发（图片入库频率低，避免捕获路径额外开销）。
+pub fn gc_images(max_bytes: u64) -> Result<usize> {
+    if max_bytes == 0 {
+        return Ok(0);
+    }
+    let conn = connect()?;
+    let cur_hash = current_hash().unwrap_or_default();
+    // size 列对图片条目即数据文件字节数（见 insert_image_with），
+    // SUM 即 images/ 目录总量
+    let total: i64 = conn.query_row(
+        "SELECT COALESCE(SUM(size),0) FROM clips WHERE image_path IS NOT NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let mut need: i128 = total as i128 - max_bytes as i128;
+    if need <= 0 {
+        return Ok(0);
+    }
+    let mut n = 0usize;
+    while need > 0 {
+        // 逐条淘汰最旧的可淘汰图片行（ts ASC, id ASC：同毫秒内先入先出）。
+        // 候选数远小于库规模，逐条成本可忽略；批量 DELETE 需按字节累计，
+        // 复杂度不划算。可淘汰集合为空时提前收手（全受保护时宁超配额不丢数据）
+        let victim: Option<(i64, Option<String>, i64)> = conn
+            .query_row(
+                "SELECT id, image_path, size FROM clips
+                 WHERE image_path IS NOT NULL AND pinned=0 AND hash != ?1
+                 ORDER BY ts ASC, id ASC LIMIT 1",
+                params![cur_hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .ok();
+        let Some((id, path, size)) = victim else {
+            break;
+        };
+        conn.execute("DELETE FROM clips WHERE id=?1", params![id])?;
+        if let Some(p) = path {
+            let _ = std::fs::remove_file(p);
+        }
+        need -= size as i128;
+        n += 1;
+    }
+    Ok(n)
+}
+
 const CLIP_COLS: &str = "id, hash, text, mime, pinned, image_path";
 
 fn row_to_clip(r: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
@@ -934,6 +984,51 @@ mod tests {
             assert!(!orphan.exists() && !tmp.exists());
             assert!(img.path.exists(), "被引用的文件不得误删");
             assert_eq!(prune_orphan_images().unwrap(), 0, "二次清扫应无残留");
+        });
+    }
+
+    #[test]
+    fn gc_images_evicts_oldest_first_and_protects_pinned_and_current() {
+        with_env(|_| {
+            clear_db();
+            // 三张 10 字节小图，间隔毫秒保证 ts 有序（淘汰按 ts ASC, id ASC）
+            let a = insert_image("image/png", &[7u8; 10]).unwrap().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(3));
+            let b = insert_image("image/png", &[8u8; 10]).unwrap().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(3));
+            let c = insert_image("image/png", &[9u8; 10]).unwrap().unwrap();
+
+            // b 星标、c 当前项，均应受保护
+            let conn = connect().unwrap();
+            conn.execute("UPDATE clips SET pinned=1 WHERE id=?1", params![b.id])
+                .unwrap();
+            drop(conn);
+            assert_eq!(
+                current_hash().unwrap(),
+                image_content_key("image/png", &[9u8; 10]),
+                "c 刚入库应为当前项"
+            );
+
+            // 总量 30、配额 25：需释放 ≥5 字节 → 淘汰最旧且未受保护的 a
+            assert_eq!(gc_images(25).unwrap(), 1);
+            assert!(!a.path.exists(), "被淘汰条目的数据文件应被删除");
+            assert!(b.path.exists() && c.path.exists(), "星标/当前项不得误删");
+            let conn = connect().unwrap();
+            let cnt: i64 = conn
+                .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(cnt, 2);
+        });
+    }
+
+    #[test]
+    fn gc_images_zero_means_unlimited_and_within_quota_is_noop() {
+        with_env(|_| {
+            clear_db();
+            insert_image("image/png", &[1u8; 10]).unwrap().unwrap();
+            // 0 = 不限制；配额内不动任何条目
+            assert_eq!(gc_images(0).unwrap(), 0);
+            assert_eq!(gc_images(1024).unwrap(), 0);
         });
     }
 }

@@ -34,6 +34,10 @@ pub struct Config {
     /// v0.5（P1-4）：桌面通知开关（mako 等）。关闭后完全静默运行
     #[serde(default = "default_true")]
     pub notify_enabled: bool,
+    /// v0.5.1（1.3）：images/ 目录总量配额（字节），超出后 daemon 启动时按
+    /// LRU 淘汰最旧图片条目（星标与当前项受保护）；0 = 不限制
+    #[serde(default = "default_max_image_total_bytes")]
+    pub max_image_total_bytes: usize,
     /// ignore_regex 的编译产物：每条入库热路径都要过一遍过滤，不能在
     /// should_ignore 里反复 Regex::new。编译失败为 None（同旧行为：不过滤）。
     /// 注意：直接改字段赋值 ignore_regex 时需同步重编译（代码内无此用法）
@@ -69,6 +73,9 @@ fn default_max_clip_bytes() -> usize {
 fn default_max_image_bytes() -> usize {
     10_485_760 // 10 MiB
 }
+fn default_max_image_total_bytes() -> usize {
+    209_715_200 // 200 MiB
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -86,6 +93,7 @@ impl Default for Config {
             capture_timeout_secs: 5,
             max_clip_bytes: 1_048_576,
             max_image_bytes: 10_485_760,
+            max_image_total_bytes: 209_715_200,
             notify_enabled: true,
         }
     }

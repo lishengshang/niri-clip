@@ -96,6 +96,7 @@ enable_preview = true
 capture_timeout_secs = 5   # v0.4.1 每次捕获子进程超时
 max_clip_bytes = 1048576   # v0.5 单条文本上限（字节），超限拒绝入库
 max_image_bytes = 10485760 # v0.5 单张图片上限（字节）
+max_image_total_bytes = 209715200 # v0.5.1 images/ 总量配额（字节），超限 LRU 淘汰，0 不限
 ```
 
 ---
