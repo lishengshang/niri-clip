@@ -245,7 +245,10 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         if std::env::var_os("NIRI_CLIP_DEBUG").is_some() {
-            eprintln!("[dbg] msg={message:?} sel={} sid={:?}", self.selected, self.selected_id);
+            eprintln!(
+                "[dbg] msg={message:?} sel={} sid={:?}",
+                self.selected, self.selected_id
+            );
         }
         match message {
             Message::Query(q) => {
