@@ -1,7 +1,7 @@
 # makepkg --printsrcinfo > .SRCINFO 后上传 AUR（示例，版本号随发布更新）
 pkgbase = niri-clip
 	pkgdesc = 为 niri 打造的全新高性能 Wayland 剪贴板
-	pkgver = 0.5.0
+	pkgver = 0.5.1
 	pkgrel = 1
 	url = https://github.com/lishengshang/niri-clip
 	arch = x86_64
@@ -15,7 +15,7 @@ pkgbase = niri-clip
 	optdepends = kitty: kitty icat 图片预览
 	optdepends = chafa: 图形终端图片预览
 	optdepends = cliphist: 可选, 一次性迁移旧数据
-	source = niri-clip-0.5.0.tar.gz::https://github.com/lishengshang/niri-clip/archive/v0.5.0.tar.gz
+	source = niri-clip-0.5.1.tar.gz::https://github.com/lishengshang/niri-clip/archive/v0.5.1.tar.gz
 	sha256sums = SKIP
 
 pkgname = niri-clip

@@ -2,62 +2,14 @@
 
 ## Unreleased
 
+## v0.5.1 - 2026-08-31
+
+> 亮点：原生 GUI 重构为常规 xdg 窗口（ADR-001 修订 1，window-rule 约束 + 原生 IME
+> 中文搜索）、全库搜索与 fzf 风格相关度排序、单实例保护、GUI 键鼠交互补齐；
+> 热路径性能优化；一批数据生命周期与 GUI 正确性修复。设计决策见 ADR-001 与 docs/NATIVE-UI.md。
+
 ### Added
-- **AGENTS.md AI 协作开发约定**：Git 写面（commit/push/PR/issue/发布链/系统级部署）默认请示制，
-  每轮收尾输出"建议 Git 动作清单"由用户逐项决策
-- **GUI 重新聚焦刷新**：窗口重聚焦即重拉列表——daemon 在失焦期间捕获的新内容不再缺失；
-  不滚动、选中按 id 重定位，浏览位置不受影响
-- **图片文件孤儿清扫**：`store::prune_orphan_images` 回收 images/ 下无主
-  数据文件（daemon 启动时执行一次），兼容旧版本存量残留与 `.tmp-` 崩溃残片
-- **config/preview 单元测试补齐**：默认值/自定义正则/非法 TOML 回退/
-  XDG 相对路径拒绝；预览截断（多字节字符对齐）/换行单行化/降级链
-- GUI instance 模块：niri windows JSON 解析与 app_id 匹配单元测试
-
-### Changed
-- **入库热路径配置缓存**：`ignore_regex` 编译产物随 Config 缓存
-  （`ignore_re` 字段），`should_ignore` 不再每条重复 `Regex::new`；
-  新增 `insert_with`/`insert_image_with`，daemon 捕获路径一次捕获从
-  3 次 Config 读盘解析降为 1 次
-- **GUI 过滤结果缓存**：`filtered()` 按 (clips 代数, 查询) 缓存命中下标，
-  悬停/选中/复制等高频事件不再对全库重复评分排序
-- **tokio 依赖收敛**：`full` → `rt + rt-multi-thread + macros + time +
-  process`（裁掉 net/signal/fs 等未用特性）
-- 单实例窗口聚焦改用 `niri msg -j windows` JSON 解析（app_id 精确匹配），
-  不再解析人类可读文本；PID 活性复核从 cmdline `contains` 收紧为
-  argv[0] 文件名精确相等（防 `cargo build -p niri-clip-gui` 假阳性拒启）
-- 清理死代码：`Clip.ts` 字段、`Config::legacy_cliphist_db`（`#[allow(dead_code)]`
-  全部移除）；preview.rs `replace("{}",…)` 改直白 `format!`
-- manual.sh 修正为 5 列 list-raw 格式（id 第 4 列），加临时 XDG 环境隔离
-  不再触碰真实历史库；PKGBUILD.git 刷新至 0.5.0（去 fuzzel 硬依赖/
-  nirius，补 -flto 剥离）；.SRCINFO.example 同步；config.toml.example
-  的 `enable_image_preview` 与代码默认值（false）对齐
-
-### Fixed
-- **GUI Ctrl-X 删错行/跳顶（真根因，E2E 实锤）**：搜索框持有焦点时 iced text_input
-  把 Ctrl+X 当剪切处理，空输入无编辑也发 `on_input("")` 且先于按键订阅到达，
-  Query 处理器无条件 `set_selection(0)` 使删除执行时选中已归零——表现为永远删掉
-  顶部行、高亮跳顶。现同值 Query 回调直接忽略；选中改为按 clip id 跟踪
-  （重载后 `relocate_selected` 按 id 重定位，防 daemon 捕获/固定操作重排行序
-  导致高亮漂移）；星标二段确认随选中移动自动取消，防确认残留误删下一行
-- **图片条目复制写占位文本**：`copy_to_clipboard` 对图片条目把
-  "[image mime N bytes]" 占位文本顶进剪贴板（并毁掉真实截图）——现按 mime
-  以 `wl-copy --type` 灌入 `images/{id}.bin` 文件字节
-- **CLI SIGPIPE panic**：`niri-clip status | head` 等管道截断时 println! 写入
-  EPIPE 直接 panic（Rust 默认 SIGPIPE=SIG_IGN）——改用忽略写失败的 outln!
-- **图片数据文件生命周期闭环**：delete/wipe/超限淘汰此前只删 clips 行、
-  不删 `images/{id}.bin`（state 目录只进不出）——现在行删文件也删
-- **图片入库"有行无图"残缺状态**：`insert_image` 数据文件写入纳入事务
-  窗口（`.tmp-` 先落盘再原子 rename），任一步失败行即回滚，不再出现
-  hash 已占用导致该图永远无法重录的状态
-- **fuzzel 后端黑屏残留**：该路径 wl-copy 补 `Stdio::null()`（此前仅
-  fzf 路径修复；wl-copy fork 的守护进程占住终端 fd 导致空窗口残留）
-- **GUI 后台任务 panic 语义**：`run_bg` panic 回退消息由调用方指定——
-  Copy 任务 panic 现在触发失败通知，不再被 `ListReloaded(None)` 静默吞掉
-- **GUI 选中态越界**：选中/快选/导航以 `visible_len`（过滤结果 ×
-  MAX_RENDER_ROWS）为界，高亮不再落在未渲染的行上
-
-### GUI 键鼠交互（本轮早期）
-- **GUI 键鼠交互**：鼠标悬停跟随选中、左键点击行复制关闭（对齐 Enter）、
+- **原生 GUI 交互**：鼠标悬停跟随选中、左键点击行复制关闭（对齐 Enter）、
   右键连复（对齐 Ctrl-Y）；搜索命中字符红色高亮（fzf hl 语义）；
   空查询 `0` 键快选第 10 行（1-9,0）
 - **全库搜索与相关度排序**：GUI 搜索范围从最近 300 条扩到全库
@@ -65,10 +17,19 @@
   评分排序（连续命中/词首加权 + 位置弱惩罚）
 - **单实例保护**：Mod+V 连按不再多开——`state/gui.lock` 存 PID，
   活实例经 niri IPC 聚焦其窗口后自退；残留死锁自动覆写接管
+- **GUI 重新聚焦刷新**：窗口重聚焦即重拉列表——daemon 在失焦期间捕获的新内容不再缺失；
+  不滚动、选中按 id 重定位，浏览位置不受影响
+- **图片文件孤儿清扫**：`store::prune_orphan_images` 回收 images/ 下无主
+  数据文件（daemon 启动时执行一次），兼容旧版本存量残留与 `.tmp-` 崩溃残片
+- **AGENTS.md AI 协作开发约定**：Git 写面（commit/push/PR/issue/发布链/系统级部署）默认请示制，
+  每轮收尾输出"建议 Git 动作清单"由用户逐项决策
 - 底部预览窗格可滚动（80 行 / 每行 300 字符），长文不再截断丢失
 - 复制/固定/删除失败走桌面通知（`notify_enabled` 门控，false 保持静默）
 - GUI 键盘导航滚动跟随：方向键把选中行滚进可视区中部（视口实测自适应），
   行间分界线，行定高 27px 保证滚动偏移精确
+- config/preview 单元测试补齐：默认值/自定义正则/非法 TOML 回退/
+  XDG 相对路径拒绝；预览截断（多字节字符对齐）/换行单行化/降级链
+- GUI instance 模块：niri windows JSON 解析与 app_id 匹配单元测试
 
 ### Changed
 - **原生 UI 架构修订（ADR-001 修订 1）**：layer-shell 覆盖层改为常规 xdg
@@ -82,32 +43,6 @@
   assets/niri-clip.kdl 补 window-rule 示例
 - **渲染器固定 tiny-skia 纯软件**：NVIDIA wgpu 冻结（上游 #360）与 GL
   启动失败双问题的彻底规避，二进制 -1/3，与显卡驱动解耦
-- GUI 图片预览遵循 `enable_image_preview` / `enable_preview` 配置
-- GUI 组件化：main.rs（1060 行）拆分 theme/search/instance 模块，
-  search 附评分/标记/大小写口径单元测试
-
-### Fixed
-- **图片条目必崩**：`images/{id}.bin` 扩展名无法被 `Handle::from_path`
-  识别 → tiny-skia 渲染线程 panic "Image should be allocated"；
-  改按字节内容解码 + 位图魔数门控（非图片数据回落缺失提示）
-- **图片每帧重复解码**：`Handle::from_bytes` 每次生成新 Id 导致
-  tiny-skia 缓存失效；按 clip id 跨帧 LRU（8 项）缓存，命中刷新顺序
-- **键盘滚动到底时选中态闪烁**：列表滚过静止指针逐行触发 on_enter
-  抢走选中；键盘导航期间暂停悬停跟随，真实移动恢复
-- **符号 tofu 方框**：❯▶◆⏎ 等字形缺失（Noto Sans Mono + fallback 失败），
-  主字体指定 JetBrainsMono Nerd Font；`↵`（系统级缺字形）统一替换 `⏎`
-- clippy 警告归零；xdg 迁移后 text_input/scrollable 落回浅色默认主题的
-  割裂观感（全部控件自定义深色样式）
-- **图片文件生命周期闭环（P1）**：delete/wipe/超限淘汰同步删除
-  `images/{id}.bin`（RETURNING 带出路径），新增 `prune_orphan_images`
-  孤儿清扫（daemon 启动执行，兼容存量残留与 `.tmp-` 崩溃残片）；
-  `insert_image` 写文件纳入事务窗口（`.tmp-` 先落盘再原子 rename），
-  杜绝"有行无图"导致 hash 占用该图无法重录
-- fuzzel 路径 `wl-copy` 补 `Stdio::null()`（对齐 fzf 路径防黑屏残留）；
-  GUI 后台任务 panic 按任务类型回传兜底消息（Copy panic 走失败通知
-  不被静默吞掉）；选中/快选/导航以可见行数为界
-
-### Changed
 - **热路径性能**：`ignore_regex` 编译产物随 `Config::load` 缓存（不再
   每条入库重复 `Regex::new`）；`insert_with`/`insert_image_with` 复用
   调用方配置（一次捕获 3 次读盘解析降为 1 次）；GUI `filtered()` 结果
@@ -118,6 +53,43 @@
   与代码默认值对齐；instance.rs 改 `niri msg -j` JSON 解析（附测试）、
   PID 复核收紧为 argv[0] 精确匹配；`Clip.ts`/`legacy_cliphist_db` 等
   死代码清理；config/preview 内联测试补齐
+- GUI 图片预览遵循 `enable_image_preview` / `enable_preview` 配置
+- GUI 组件化：main.rs（1060 行）拆分 theme/search/instance 模块，
+  search 附评分/标记/大小写口径单元测试
+- manual.sh 修正为 5 列 list-raw 格式（id 第 4 列），加临时 XDG 环境隔离
+  不再触碰真实历史库
+
+### Fixed
+- **GUI Ctrl-X 删错行/跳顶（真根因，E2E 实锤）**：搜索框持有焦点时 iced text_input
+  把 Ctrl+X 当剪切处理，空输入无编辑也发 `on_input("")` 且先于按键订阅到达，
+  Query 处理器无条件 `set_selection(0)` 使删除执行时选中已归零——表现为永远删掉
+  顶部行、高亮跳顶。现同值 Query 回调直接忽略；选中改为按 clip id 跟踪
+  （重载后 `relocate_selected` 按 id 重定位，防 daemon 捕获/固定操作重排行序
+  导致高亮漂移）；星标二段确认随选中移动自动取消，防确认残留误删下一行
+- **图片条目复制写占位文本**：`copy_to_clipboard` 对图片条目把
+  "[image mime N bytes]" 占位文本顶进剪贴板（并毁掉真实截图）——现按 mime
+  以 `wl-copy --type` 灌入 `images/{id}.bin` 文件字节
+- **图片数据文件生命周期闭环（P1）**：delete/wipe/超限淘汰同步删除
+  `images/{id}.bin`（RETURNING 带出路径），新增 `prune_orphan_images`
+  孤儿清扫（daemon 启动执行，兼容存量残留与 `.tmp-` 崩溃残片）；
+  `insert_image` 写文件纳入事务窗口（`.tmp-` 先落盘再原子 rename），
+  杜绝"有行无图"导致 hash 占用该图无法重录
+- **图片条目必崩**：`images/{id}.bin` 扩展名无法被 `Handle::from_path`
+  识别 → tiny-skia 渲染线程 panic "Image should be allocated"；
+  改按字节内容解码 + 位图魔数门控（非图片数据回落缺失提示）
+- **图片每帧重复解码**：`Handle::from_bytes` 每次生成新 Id 导致
+  tiny-skia 缓存失效；按 clip id 跨帧 LRU（8 项）缓存，命中刷新顺序
+- **CLI SIGPIPE panic**：`niri-clip status | head` 等管道截断时 println! 写入
+  EPIPE 直接 panic（Rust 默认 SIGPIPE=SIG_IGN）——改用忽略写失败的 outln!
+- fuzzel 路径 `wl-copy` 补 `Stdio::null()`（对齐 fzf 路径防黑屏残留）
+- GUI 后台任务 panic 按任务类型回传兜底消息（Copy panic 走失败通知
+  不被静默吞掉）；选中/快选/导航以可见行数为界
+- 键盘滚动到底时选中态闪烁：列表滚过静止指针逐行触发 on_enter
+  抢走选中；键盘导航期间暂停悬停跟随，真实移动恢复
+- 符号 tofu 方框：❯▶◆⏎ 等字形缺失（Noto Sans Mono + fallback 失败），
+  主字体指定 JetBrainsMono Nerd Font；`↵`（系统级缺字形）统一替换 `⏎`
+- clippy 警告归零；xdg 迁移后 text_input/scrollable 落回浅色默认主题的
+  割裂观感（全部控件自定义深色样式）
 
 ## v0.5.0 - 2026-08-28
 

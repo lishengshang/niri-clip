@@ -2086,7 +2086,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "niri-clip"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2098,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "niri-clip-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2116,7 +2116,7 @@ dependencies = [
 
 [[package]]
 name = "niri-clip-gui"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "anyhow",
  "iced",
