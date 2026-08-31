@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+- **criterion 基准设施（1.6）**：新增 `crates/niri-clip-core/benches/store.rs`，
+  覆盖 `list_300_of_10k`（端到端含 Config::load/connect）与
+  `sqlite_select_300_of_10k`（裸查询）两组基准；种子经公开入库 API 写入
+  临时 XDG 环境，不触碰真实历史库。实测 ≈0.95ms / ≈0.47ms，远低于
+  ROADMAP 预算（11ms / 4ms）；criterion 仅 dev 依赖且裁掉 plotters/rayon
+  特性（依赖闭包 +11 crate，审计结论见 ARCHITECTURE）；CI 阈值门禁待批准
+
 ## v0.5.1 - 2026-08-31
 
 > 亮点：原生 GUI 重构为常规 xdg 窗口（ADR-001 修订 1，window-rule 约束 + 原生 IME

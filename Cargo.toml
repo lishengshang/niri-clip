@@ -37,6 +37,9 @@ iced = { version = "0.14", default-features = false, features = [
     "image",
 ] }
 wl-clipboard-rs = "0.9"
+# 仅供 core benches（基准门禁，路线图 1.6）。default 的 plotters/rayon 会拉入
+# 大量传递依赖，只留 cargo_bench_support 维持依赖闭包可控
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [profile.release]
 lto = true

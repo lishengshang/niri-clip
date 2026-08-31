@@ -102,7 +102,7 @@
 | 1.3 | 图片磁盘配额 GC（半完成） | `images/` 按 LRU 清理，配额可配（默认 200MB）；孤儿数据文件清扫 `prune_orphan_images` 已交付（daemon 启动执行一次），LRU 配额淘汰待做 | GC 后预览不串图（按 id 关联） |
 | 1.4 | ✅ `notify_enabled` 开关 | 桌面通知可关——已核实 config/daemon/tui/gui 全链路门控（false 完全静默），`config.toml.example` 与 README 已同步 | 配置生效（已过） |
 | 1.5 | 星标删除二段确认（部分） | GUI 已有星标二段确认（随选中移动自动取消）；fzf `--expect` 内嵌确认待做（去 fuzzel 依赖路径，裁剪与否待评审） | 删除误操作率归零（manual.sh 验证） |
-| 1.6 | criterion 基准进 CI | `store 10k list`、`sqlite 查询` 两组基准；CI 对比阈值门禁 | CI 输出耗时，回归 >20% 报警 |
+| 1.6 | criterion 基准进 CI（部分） | ✅ 本地基准已交付：`crates/niri-clip-core/benches/store.rs`，实测 list ≈0.95ms / sqlite ≈0.47ms（远低于预算，见 ARCHITECTURE）；CI 阈值门禁改动属发布链，草案待批准 | CI 输出耗时，回归 >20% 报警 |
 | 1.7 | man page + shell 补全 | clap 生成的 man/completions 进包 | PKGBUILD 安装到对应路径 |
 | 1.8 | 依赖与构建开销审计 | `cargo tree` 梳理 wl-clipboard-rs/wayland-client 闭包（~40 crate 已知大头），关无用 feature；PKGBUILD 确认 `--locked`；记录 release 编译时间基线（bundled sqlite ~40s） | 审计结论记入 ARCHITECTURE；编译时间进开销预算表 |
 

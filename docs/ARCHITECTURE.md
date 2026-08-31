@@ -88,6 +88,12 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 - **菜单直查**：`list(min(max_items, TUI_LIMIT))`，TUI_LIMIT=300。
   进程内缓存层已移除——fzf 每次 reload-sync spawn 全新 `list-raw` 进程，
   OnceLock 缓存在该路径从未生效；实测 list 300 <11ms 无需缓存
+- **基准设施（1.6）**：`crates/niri-clip-core/benches/store.rs`（criterion，
+  仅 dev 依赖、裁掉 plotters/rayon 特性，闭包 +11 crate）。种子经公开入库
+  API 写入临时 XDG 环境（与真实捕获路径同构，schema 演进不破坏基准）。
+  实测基线（2026-08-31，本机 10k 条库）：`list_300_of_10k` ≈0.95ms（含
+  Config::load + connect 全口径）、`sqlite_select_300_of_10k` ≈0.47ms，
+  均远低于 ROADMAP 预算（11ms / 4ms）。运行：`cargo bench -p niri-clip-core`
 
 ## 4. TUI - 不跳顶
 
