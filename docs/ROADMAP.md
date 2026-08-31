@@ -103,7 +103,7 @@
 | 1.4 | ✅ `notify_enabled` 开关 | 桌面通知可关——已核实 config/daemon/tui/gui 全链路门控（false 完全静默），`config.toml.example` 与 README 已同步 | 配置生效（已过） |
 | 1.5 | 星标删除二段确认（部分） | GUI 已有星标二段确认（随选中移动自动取消）；fzf `--expect` 内嵌确认待做（去 fuzzel 依赖路径，裁剪与否待评审） | 删除误操作率归零（manual.sh 验证） |
 | 1.6 | ✅ criterion 基准进 CI | `crates/niri-clip-core/benches/store.rs`（list_300_of_10k ≈0.95ms / sqlite_select_300_of_10k ≈0.47ms，见 ARCHITECTURE）；CI 第 6 道 bench 工序：bencher 格式输出 + 绝对预算断言（11ms / 4ms），超限即红 | CI 输出耗时，回归 >20% 报警（绝对阈值先行） |
-| 1.7 | man page + shell 补全 | clap 生成的 man/completions 进包 | PKGBUILD 安装到对应路径 |
+| 1.7 | ✅ man page + shell 补全 | `niri-clip man` / `niri-clip completions <shell>`（clap_mangen/clap_complete，闭包 +3 crate）；PKGBUILD 由二进制自生成安装到 man1 与 bash/zsh/fish 补全路径 | PKGBUILD 安装路径正确（本地验证输出） |
 | 1.8 | 依赖与构建开销审计 | `cargo tree` 梳理 wl-clipboard-rs/wayland-client 闭包（~40 crate 已知大头），关无用 feature；PKGBUILD 确认 `--locked`；记录 release 编译时间基线（bundled sqlite ~40s） | 审计结论记入 ARCHITECTURE；编译时间进开销预算表 |
 
 **技术要点：** fzf `--expect` 组合键；criterion + CI artifact 对比。

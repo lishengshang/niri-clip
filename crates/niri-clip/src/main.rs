@@ -1,5 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::Shell;
 use niri_clip_core::{config, daemon, preview, store, tui};
 
 #[derive(Parser)]
@@ -40,6 +41,10 @@ enum Commands {
     Migrate,
     /// 查看状态
     Status,
+    /// 生成 shell 补全脚本到 stdout（打包安装用：bash|zsh|fish|elvish|powershell）
+    Completions { shell: Shell },
+    /// 输出 man page 到 stdout（打包安装用：> niri-clip.1）
+    Man,
 }
 
 /// println! 的 EPIPE 安全版：stdout 管道被下游截断（`niri-clip status | head`）
@@ -54,6 +59,7 @@ macro_rules! outln {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use std::io::Write as _;
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Daemon) => daemon::run().await?,
@@ -151,6 +157,19 @@ async fn main() -> Result<()> {
                     preview::preview_text(&c, 60)
                 );
             }
+        }
+        Some(Commands::Completions { shell }) => {
+            // 生成器内部对 EPIPE 直接 panic（clap_complete shells/shell.rs），
+            // 先写内存缓冲再忽略错误输出，对齐 outln! 的"写失败不 panic"口径
+            let mut cmd = Cli::command();
+            let mut buf = Vec::new();
+            clap_complete::generate(shell, &mut cmd, "niri-clip", &mut buf);
+            let _ = std::io::stdout().write_all(&buf);
+        }
+        Some(Commands::Man) => {
+            let mut buf = Vec::new();
+            clap_mangen::Man::new(Cli::command()).render(&mut buf)?;
+            let _ = std::io::stdout().write_all(&buf);
         }
         None => {
             tui::run()?;

@@ -38,4 +38,15 @@ package() {
   install -Dm644 "assets/niri-clip.kdl" "$pkgdir/usr/share/doc/$pkgname/niri-clip.kdl.example"
   install -Dm644 "assets/niri-clip.service" "$pkgdir/usr/lib/systemd/user/niri-clip.service"
   install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
+  # 任务 1.7：man page 与 shell 补全（由二进制自生成，无需仓库内存文件）
+  for d in usr/share/man/man1 \
+           usr/share/bash-completion/completions \
+           usr/share/zsh/site-functions \
+           usr/share/fish/vendor_completions.d; do
+    mkdir -p "$pkgdir/$d"
+  done
+  "./target/release/niri-clip" man | gzip -c > "$pkgdir/usr/share/man/man1/niri-clip.1.gz"
+  "./target/release/niri-clip" completions bash > "$pkgdir/usr/share/bash-completion/completions/niri-clip"
+  "./target/release/niri-clip" completions zsh  > "$pkgdir/usr/share/zsh/site-functions/_niri-clip"
+  "./target/release/niri-clip" completions fish > "$pkgdir/usr/share/fish/vendor_completions.d/niri-clip.fish"
 }
