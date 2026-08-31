@@ -38,6 +38,10 @@ pub struct Config {
     /// LRU 淘汰最旧图片条目（星标与当前项受保护）；0 = 不限制
     #[serde(default = "default_max_image_total_bytes")]
     pub max_image_total_bytes: usize,
+    /// v0.5.2（1.1）：PRIMARY selection 捕获开关。开启后鼠标划选的文本
+    /// 也入库（中键粘贴语义）；与剪贴板同去重空间。默认关——划选噪声大
+    #[serde(default)]
+    pub capture_primary: bool,
     /// ignore_regex 的编译产物：每条入库热路径都要过一遍过滤，不能在
     /// should_ignore 里反复 Regex::new。编译失败为 None（同旧行为：不过滤）。
     /// 注意：直接改字段赋值 ignore_regex 时需同步重编译（代码内无此用法）
@@ -94,6 +98,7 @@ impl Default for Config {
             max_clip_bytes: 1_048_576,
             max_image_bytes: 10_485_760,
             max_image_total_bytes: 209_715_200,
+            capture_primary: false,
             notify_enabled: true,
         }
     }
@@ -181,6 +186,7 @@ mod tests {
         assert_eq!(cfg.max_clip_bytes, 1_048_576);
         assert_eq!(cfg.max_image_bytes, 10_485_760);
         assert!(!cfg.enable_image_preview, "图片捕获默认关");
+        assert!(!cfg.capture_primary, "PRIMARY 捕获默认关");
         assert_eq!(cfg.tui_backend, "auto");
         // 编译产物就位：should_ignore 不必再 Regex::new
         assert!(cfg.ignore_re.is_some(), "默认正则必须可编译");

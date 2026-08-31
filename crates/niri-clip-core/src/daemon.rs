@@ -33,6 +33,31 @@ fn watch_shell_command(exe: &std::path::Path, timeout_secs: u64) -> String {
     format!("exec timeout {timeout_secs}s {} store", exe.display())
 }
 
+/// 一路 wl-paste --watch 的完整参数表。单列出来以便单元测试覆盖
+/// PRIMARY 监视的开关语义（任务 1.1）。
+fn wl_paste_watch_args(exe: &std::path::Path, timeout_secs: u64, primary: bool) -> Vec<String> {
+    let mut args = vec!["--watch".to_string()];
+    if primary {
+        // 主选区：鼠标划选即触发（中键粘贴语义）；与剪贴板 watcher 各自独立
+        args.push("--primary".to_string());
+    }
+    args.push("sh".to_string());
+    args.push("-c".to_string());
+    args.push(watch_shell_command(exe, timeout_secs));
+    args
+}
+
+fn spawn_watch(
+    exe: &std::path::Path,
+    timeout_secs: u64,
+    primary: bool,
+) -> Result<tokio::process::Child> {
+    tokio::process::Command::new("wl-paste")
+        .args(wl_paste_watch_args(exe, timeout_secs, primary))
+        .spawn()
+        .context("spawn wl-paste --watch")
+}
+
 /// 超限提示：stderr 恒写；桌面通知受 notify_enabled 门控（P1-4，无通知服务时静默）
 fn notify_oversize(msg: &str) {
     eprintln!("[niri-clip store] {msg}，已忽略");
@@ -169,8 +194,9 @@ fn capture_image_if_enabled() -> Result<bool> {
     Ok(false)
 }
 
-/// v0.4.1 主模式：事件驱动外部源。
-async fn run_watch(timeout_secs: u64) -> Result<()> {
+/// v0.4.1 主模式：事件驱动外部源。capture_primary 时额外拉起一路
+/// PRIMARY selection 监视（任务 1.1）——划选文本也入库。
+async fn run_watch(timeout_secs: u64, capture_primary: bool) -> Result<()> {
     let exe = std::env::current_exe()?.to_string_lossy().to_string();
     println!(
         "[niri-clip daemon] event-driven source: wl-paste --watch (per-capture timeout {timeout_secs}s)"
@@ -182,20 +208,25 @@ async fn run_watch(timeout_secs: u64) -> Result<()> {
             .show();
     }
 
-    // 注意传给内部 sh 的引号转义：exe 含空格时仍可靠
-    let mut child = tokio::process::Command::new("wl-paste")
-        .arg("--watch")
-        .arg("sh")
-        .arg("-c")
-        .arg(watch_shell_command(
-            std::path::Path::new(&exe),
-            timeout_secs,
-        ))
-        .spawn()
-        .context("spawn wl-paste --watch")?;
+    let exe_path = std::path::Path::new(&exe);
+    let mut clip_watcher = spawn_watch(exe_path, timeout_secs, false)?;
+    let mut primary_watcher = if capture_primary {
+        println!("[niri-clip daemon] also watching PRIMARY selection (capture_primary=true)");
+        Some(spawn_watch(exe_path, timeout_secs, true)?)
+    } else {
+        None
+    };
     println!("[niri-clip daemon] watching clipboard changes ...");
-    let status = child.wait().await?;
-    eprintln!("[niri-clip daemon] wl-paste exited: {:?}", status);
+    match primary_watcher.as_mut() {
+        None => {
+            let status = clip_watcher.wait().await?;
+            eprintln!("[niri-clip daemon] wl-paste exited: {status:?}");
+        }
+        Some(primary) => {
+            let (a, b) = tokio::join!(clip_watcher.wait(), primary.wait());
+            eprintln!("[niri-clip daemon] wl-paste exited: {a:?} / {b:?}");
+        }
+    }
     Ok(())
 }
 
@@ -332,7 +363,7 @@ pub async fn run() -> Result<()> {
     }
 
     if which::which("wl-paste").is_ok() {
-        return run_watch(cfg.capture_timeout_secs).await;
+        return run_watch(cfg.capture_timeout_secs, cfg.capture_primary).await;
     }
 
     eprintln!("[warn] missing wl-paste —— 回退到原生轮询模式");
@@ -382,6 +413,24 @@ mod tests {
         // 这里只锁定格式契约
         let spaced = watch_shell_command(Path::new("/opt/my tools/niri-clip"), 2);
         assert_eq!(spaced, "exec timeout 2s /opt/my tools/niri-clip store");
+    }
+
+    #[test]
+    fn primary_watch_adds_selection_flag() {
+        use std::path::Path;
+        let exe = Path::new("/usr/bin/niri-clip");
+        let plain = wl_paste_watch_args(exe, 5, false);
+        let primary = wl_paste_watch_args(exe, 5, true);
+        assert!(!plain.contains(&"--primary".to_string()));
+        assert!(primary.contains(&"--primary".to_string()));
+        // PRIMARY watcher 的每次捕获同样被 timeout 划界
+        assert!(primary.last().unwrap().contains("timeout 5s"));
+        // 除 --primary 外两路参数完全一致
+        let mut a = plain.clone();
+        let mut b = primary.clone();
+        a.retain(|x| x != "--primary");
+        b.retain(|x| x != "--primary");
+        assert_eq!(a, b);
     }
 
     #[test]

@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- **PRIMARY selection 捕获（1.1）**：新配置 `capture_primary`（默认关，
+  划选噪声大）。开启后 daemon 拉起双 watcher（剪贴板 + `wl-paste --watch
+  --primary`），鼠标划选的文本也入库（中键粘贴语义）；主选区与剪贴板
+  同一去重空间（先划选后复制同内容只留一条），▶ = 最后成功捕获；每次
+  捕获仍被 timeout 划界；watcher 参数单测覆盖 --primary 开关语义
 - **man page 与 shell 补全（1.7）**：新增 `niri-clip completions <shell>`
   （bash/zsh/fish/elvish/powershell）与 `niri-clip man` 子命令（均输出到
   stdout），PKGBUILD 由二进制自生成安装到 man1 与补全路径；生成器内部对

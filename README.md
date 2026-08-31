@@ -94,6 +94,7 @@ tui_backend = "auto"  # auto|native|fzf|fuzzel（native=无终端原生窗口）
 notify_enabled = true # v0.5 桌面通知开关（false 完全静默）
 enable_preview = true
 capture_timeout_secs = 5   # v0.4.1 每次捕获子进程超时
+capture_primary = false    # v0.5.2 PRIMARY 选中即捕获（划选入库，中键粘贴语义）
 max_clip_bytes = 1048576   # v0.5 单条文本上限（字节），超限拒绝入库
 max_image_bytes = 10485760 # v0.5 单张图片上限（字节）
 max_image_total_bytes = 209715200 # v0.5.1 images/ 总量配额（字节），超限 LRU 淘汰，0 不限

@@ -96,7 +96,7 @@
 
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
-| 1.1 | PRIMARY selection 支持 | `ClipboardType::Primary` 捕获与粘贴；区分 mouse-paste 语义 | 选中即捕获，中键粘贴可选历史 |
+| 1.1 | ✅ PRIMARY selection 支持 | `capture_primary` 开关（默认关，划选噪声大）：daemon 双 watcher（`wl-paste --watch --primary`），主选区与剪贴板同去重空间，▶ = 最后成功捕获（中键粘贴语义自洽）；每次捕获仍被 timeout 划界 | 选中即捕获（开关开启时）；watcher 参数单测 |
 | 1.2 | ✅ `max_clip_bytes` 上限 | **P0**：daemon/store 入库前限流，超限拒绝 + 通知提示，防 DB 膨胀与 `read_to_end` 全内存直通；图片同理（store 层守卫 + `Read::take` 有界读） | 单元测试覆盖边界值（已过）；超限载荷不落库不产生数据文件 |
 | 1.9 | ✅ 当前项置顶与 ▶ 标识 | "当前项"（最后一次成功捕获 ≈ Ctrl+V 内容）经 `state/current` 指针跟踪，排序固定第 1 行（星标之上），行首 `▶` 与 `★` 可叠加；copy/Enter/Ctrl-Y 路径刷新指针；被过滤/超限时 header 提示缺席 | CLI 冒烟验证 ▶ 置顶压过 ★、copy 后 `▶★` 合并上顶（已过）；指针行为单测 2 例 |
 | 1.3 | ✅ 图片磁盘配额 GC | `store::gc_images`：`max_image_total_bytes`（默认 200 MiB，0 不限）超限按 ts LRU 整行淘汰（行删文件也删），星标/当前项受保护；daemon 启动随孤儿清扫执行；单测覆盖淘汰顺序与保护语义 | GC 后预览不串图（按 id 关联，v0.4 已保障） |
