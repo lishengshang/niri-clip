@@ -299,7 +299,9 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         binds.push(format!("alt-{n}:pos({n})+accept"));
     }
     binds.push("space:jump".into());
-    binds.push("ctrl-y:execute-silent(niri-clip copy {4})".into());
+    // 与同函数其它 bind 一致用 exe 全路径：niri spawn 环境 PATH 常
+    // 缺 ~/.cargo/bin，裸 niri-clip 会让 Ctrl-Y 静默失效
+    binds.push(format!("ctrl-y:execute-silent({exe} copy {{4}})"));
 
     let mut fzf = Command::new("fzf")
         .arg("--no-sort")
@@ -364,22 +366,11 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     if id == 0 {
         return Ok(());
     }
-    let clip = store::get(id)?;
-    // Enter 复制即成为"当前内容"：刷新指针，下次打开 ▶ 指向它
-    // （正常情况下 watch 捕获也会刷新，这里显式写保证即时一致）
-    store::touch_current(&clip.hash);
-    // wl-copy
-    let mut wl = Command::new("wl-copy")
-        .stdin(Stdio::piped())
-        // 关键：wl-copy 会 fork 守护进程常驻服务剪贴板，默认继承的
-        // 终端 fd 被守护进程一直占着，kitty 等 pty EOF 才关窗，
-        // 导致 TUI 退出后残留黑屏空窗口。重定向到 null 释放 pty。
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("wl-copy")?;
-    wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
-    wl.wait()?;
+    // 统一走 copy_to_clipboard：图片条目按 mime --type 直灌字节。
+    // 旧实现手写 wl-copy 只灌 text，图片条目会把 "[image ...]" 占位
+    // 文本顶进剪贴板并毁掉真实截图（同 store.rs 已修问题，TUI 路径漏改）；
+    // 指针刷新也在其中（Enter 复制即成为当前项）
+    store::copy_to_clipboard(id)?;
     println!("copied {}", id);
     Ok(())
 }
@@ -422,17 +413,8 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
     if id == 0 {
         return Ok(());
     }
-    let clip = store::get(id)?;
-    store::touch_current(&clip.hash);
-    let mut wl = Command::new("wl-copy")
-        .stdin(Stdio::piped())
-        // 与 fzf 路径同款：wl-copy fork 的守护进程不得继承终端 fd，
-        // 否则 fuzzel 退出后残留黑屏空窗口
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    wl.stdin.as_mut().unwrap().write_all(clip.text.as_bytes())?;
-    wl.wait()?;
+    // 同 run_fzf：统一走 copy_to_clipboard（图片按 mime 直灌 + 刷指针）
+    store::copy_to_clipboard(id)?;
     Ok(())
 }
 
@@ -477,13 +459,22 @@ pub fn preview_id(id: i64) -> Result<()> {
         println!("{}", c.text);
         return Ok(());
     }
-    // 文本：输出全量，截断 2000 字符 + 100 行
-    for line in c.text.lines().take(100) {
+    // 文本：逐行输出，行数截 100 / 每行截 300 字符，发生截断时如实提示
+    // （旧提示阈值 2000 字节与实际截断口径不一致，3KB 的 10 行文本会被误标）
+    let mut truncated = false;
+    for (i, line) in c.text.lines().enumerate() {
+        if i >= 100 {
+            truncated = true;
+            break;
+        }
         let l: String = line.chars().take(300).collect();
+        if l.chars().count() < line.chars().count() {
+            truncated = true;
+        }
         println!("{}", l);
     }
-    if c.text.len() > 2000 {
-        println!("… ({} bytes)", c.text.len());
+    if truncated {
+        println!("… (预览已截断，完整内容 {} 字节)", c.text.len());
     }
     Ok(())
 }

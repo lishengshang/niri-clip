@@ -336,10 +336,8 @@ pub async fn run() -> Result<()> {
     }
 
     eprintln!("[warn] missing wl-paste —— 回退到原生轮询模式");
-    for bin in ["wl-copy"] {
-        if which::which(bin).is_err() {
-            eprintln!("[warn] missing {bin}");
-        }
+    if which::which("wl-copy").is_err() {
+        eprintln!("[warn] missing wl-copy");
     }
     let enable = dirs::config_dir().map(|d| d.join("niri/clipboard-history.enabled"));
     if enable.as_deref().map(|p| p.exists()).unwrap_or(false) {
