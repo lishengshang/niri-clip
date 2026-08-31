@@ -26,7 +26,9 @@ use theme::*;
 use iced::widget::{
     column, container, image, mouse_area, operation, row, rule, scrollable, space, text, text_input,
 };
-use iced::{keyboard, Background, Border, Element, Font, Length, Shadow, Subscription, Task};
+use iced::{
+    keyboard, mouse, Background, Border, Element, Font, Length, Shadow, Subscription, Task,
+};
 use niri_clip_core::{config, preview, store};
 
 /// 主字体：JetBrainsMono Nerd Font（真机已装）。
@@ -54,7 +56,11 @@ enum Message {
     Refocus,
     /// 鼠标悬停行：跟随选中（高亮预览）
     Hover(usize),
-    /// 鼠标真实移动：恢复悬停跟随
+    /// 鼠标真实移动（物理事件，仅订阅层派发）：恢复悬停跟随。
+    /// 不能挂 mouse_area.on_move——键盘导航滚动时列表在静止指针下滑过，
+    /// 布局重算会给指针下的行派发 on_move/on_enter（非物理移动），
+    /// mouse_follow 被重新打开后悬停跟随即抢走键盘选中：快速连按方向键
+    /// 时高亮/预览在键盘位置与指针位置间震荡（滚动越远概率越高）
     MouseMove,
     /// 鼠标点击行：定位并复制关闭（对齐 Enter 语义）
     Pick(usize),
@@ -62,6 +68,15 @@ enum Message {
     PickStay(usize),
     /// 滚动反馈：带上真实视口高度，修正滚动跟随的居中估算
     Scrolled(scrollable::Viewport),
+    /// 后台图片解码完成（None = 读取/解码失败，进入 failed 集不再重试）。
+    /// 解码在后台线程完成（image crate → RGBA），渲染器拿到的是现成像素，
+    /// 不再在 UI 线程同步解码造成帧冻结（切换到未缓存截图时闪烁/卡顿根因）
+    ImageReady {
+        id: i64,
+        handle: Option<image::Handle>,
+    },
+    /// 启动后触发一次：让首屏选中的图片也走后台解码路径
+    Tick,
 }
 
 /// 把阻塞任务丢到后台线程执行（iced 默认执行器为 thread-pool，
@@ -129,10 +144,14 @@ struct App {
     /// 当前项指针 TTL 缓存：(读取时刻, 值)。▶ 标记的文件读收敛到
     /// 至多 2 次/秒（TTL 内的滞后对 ▶ 展示无感知影响）
     cur_cache: RefCell<Option<(Instant, Option<String>)>>,
-    /// 图片 Handle LRU 缓存（clip id → Handle）。Handle::from_bytes 每次
-    /// 调用生成新 Id，若在 view 里现建会导致 tiny-skia 每帧重新解码；
+    /// 图片 Handle LRU 缓存（clip id → Handle，已解码 RGBA）。
+    /// Handle 来自后台线程预解码（ImageReady），view 只读缓存不碰 IO/解码；
     /// clip id 内容不可变，按 id 缓存安全。view(&self) 下用 RefCell。
     image_cache: RefCell<Vec<(i64, image::Handle)>>,
+    /// 正在后台解码的图片 id（防重复派发）
+    decoding: std::collections::HashSet<i64>,
+    /// 解码失败（文件缺失/格式坏）：不再重试，预览固定显示缺失提示
+    decode_failed: std::collections::HashSet<i64>,
 }
 
 impl App {
@@ -159,6 +178,8 @@ impl App {
             mouse_follow: false,
             cur_cache: RefCell::new(None),
             image_cache: RefCell::new(Vec::new()),
+            decoding: std::collections::HashSet::new(),
+            decode_failed: std::collections::HashSet::new(),
         }
     }
 
@@ -250,7 +271,30 @@ impl App {
                 self.selected, self.selected_id
             );
         }
+        // 主体消息处理 + 选中图片的后台预解码派发（每条消息后检查一次：
+        // 选中变了/解码完成都可能产生新的待解码目标，命中缓存则零开销）
+        let task = self.handle_message(message);
+        let decode = self.ensure_image_decode();
+        Task::batch([task, decode])
+    }
+
+    fn handle_message(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ImageReady { id, handle } => {
+                self.decoding.remove(&id);
+                match handle {
+                    Some(h) => {
+                        let mut cache = self.image_cache.borrow_mut();
+                        cache.insert(0, (id, h));
+                        cache.truncate(IMAGE_CACHE_CAP);
+                    }
+                    None => {
+                        self.decode_failed.insert(id);
+                    }
+                }
+                return Task::none();
+            }
+            Message::Tick => return Task::none(),
             Message::Query(q) => {
                 // 同值回调必须忽略：搜索框持有焦点时，iced text_input 把
                 // Ctrl+X 当"剪切"处理——空输入无编辑也发 on_input("")，且
@@ -528,6 +572,49 @@ impl App {
         )
     }
 
+    /// 选中项为图片且未解码时，派发后台解码任务。
+    /// 曾在 view 里同步 fs::read + 让 tiny-skia 在 layout 阶段同步解码：
+    /// 一张未缓存截图冻结 UI 线程几十至上百毫秒（期间屏幕停在旧帧，
+    /// 解完后新帧突然出现）——快速导航跨多个图片条目时闪烁/卡顿明显。
+    /// 现改为后台线程解码成 RGBA（Handle::from_rgba），渲染器零解码开销
+    fn ensure_image_decode(&mut self) -> Task<Message> {
+        if !self.enable_preview || !self.image_preview_enabled {
+            return Task::none();
+        }
+        let filtered = self.filtered();
+        let Some(clip) = filtered.get(self.selected) else {
+            return Task::none();
+        };
+        if !clip.mime.starts_with("image/") || clip.image_path.is_none() {
+            return Task::none();
+        }
+        let id = clip.id;
+        if self.decoding.contains(&id) || self.decode_failed.contains(&id) {
+            return Task::none();
+        }
+        if self.image_cache.borrow().iter().any(|(cid, _)| *cid == id) {
+            return Task::none();
+        }
+        let Some(path) = clip.image_path.clone() else {
+            return Task::none();
+        };
+        self.decoding.insert(id);
+        run_bg(
+            move || {
+                let handle = std::fs::read(&path)
+                    .ok()
+                    .and_then(|bytes| ::image::load_from_memory(&bytes).ok())
+                    .map(|img| {
+                        let rgba = img.to_rgba8();
+                        image::Handle::from_rgba(img.width(), img.height(), rgba.into_raw())
+                    });
+                Message::ImageReady { id, handle }
+            },
+            |m| m,
+            Message::ImageReady { id, handle: None },
+        )
+    }
+
     fn view(&self) -> Element<'_, Message> {
         let cur = self.cur_hash();
         let filtered = self.filtered();
@@ -633,8 +720,7 @@ impl App {
                 )
                 .on_press(Message::Pick(idx))
                 .on_right_press(Message::PickStay(idx))
-                .on_enter(Message::Hover(idx))
-                .on_move(|_| Message::MouseMove);
+                .on_enter(Message::Hover(idx));
 
                 Element::from(row)
             });
@@ -700,7 +786,9 @@ impl App {
             );
         }
 
-        // 底部预览窗格：文本多行截断；图片条目直接渲染（iced image widget）
+        // 底部预览窗格：文本多行截断；图片条目直接渲染（iced image widget）。
+        // 三种分支（文本/图片/缺失提示）外层一律定高 PREVIEW_HEIGHT——高度随
+        // 内容变化会让上方 Fill 列表重排，切换条目时整窗闪烁跳动
         let Some(clip) = filtered.get(self.selected) else {
             return container(col)
                 .width(Length::Fill)
@@ -715,16 +803,24 @@ impl App {
             match self.image_handle(clip) {
                 Some(handle) => {
                     col = col.push(
-                        container(image(handle).height(Length::Fixed(260.0)))
+                        container(image(handle).width(Length::Fill).height(Length::Fill))
                             .width(Length::Fill)
+                            .height(Length::Fixed(PREVIEW_HEIGHT))
                             .padding([6, 8])
                             .style(preview_style),
                     );
                 }
                 None => {
+                    // 解码中/失败的占位：面板定高不变，不产生布局跳动
+                    let hint = if self.decoding.contains(&clip.id) {
+                        format!("[image {}] 解码中…", clip.mime)
+                    } else {
+                        format!("[image {}] 数据文件缺失或无法解码", clip.mime)
+                    };
                     col = col.push(
-                        container(text(format!("[image {}] 数据文件缺失", clip.mime)).size(12))
+                        container(text(hint).size(12))
                             .width(Length::Fill)
+                            .height(Length::Fixed(PREVIEW_HEIGHT))
                             .padding([6, 8])
                             .style(preview_style),
                     );
@@ -785,29 +881,18 @@ impl App {
         out.replace('↵', "⏎")
     }
 
-    /// 图片条目的渲染 Handle：从 images/{id}.bin 读字节按内容解码
-    /// （旧实现 Handle::from_path 按扩展名猜格式，`.bin` 猜不出 →
-    /// tiny-skia 渲染线程 panic "Image should be allocated"）。
-    /// 无法识别魔数的文件回落 None，显示缺失提示而非崩溃。
-    /// LRU 上限 IMAGE_CACHE_CAP：上下移动时最近看过的图保持免解码
+    /// 图片条目的渲染 Handle：只查缓存（解码由后台线程完成后经
+    /// ImageReady 入缓存）。未命中返回 None，view 显示占位提示。
+    /// 旧实现 Handle::from_path 按扩展名猜格式（`.bin` 猜不出）→
+    /// tiny-skia 渲染线程 panic "Image should be allocated"；
+    /// 后改 view 内同步读文件+让渲染器同步解码，卡 UI 闪烁（见
+    /// ensure_image_decode 注释），现为纯缓存读
     fn image_handle(&self, clip: &store::Clip) -> Option<image::Handle> {
-        let mut cache = self.image_cache.borrow_mut();
-        if let Some(pos) = cache.iter().position(|(id, _)| *id == clip.id) {
-            // 命中后移到头部——否则是 FIFO 而非 LRU，热点图会被新图挤出
-            let (id, handle) = cache.remove(pos);
-            cache.insert(0, (id, handle.clone()));
-            return Some(handle);
-        }
-        let bytes = clip
-            .image_path
-            .as_deref()
-            .map(std::fs::read)
-            .and_then(|r| r.ok())
-            .filter(|b| is_image_magic(b))?;
-        let handle = image::Handle::from_bytes(bytes);
-        cache.insert(0, (clip.id, handle.clone()));
-        cache.truncate(IMAGE_CACHE_CAP);
-        Some(handle)
+        self.image_cache
+            .borrow()
+            .iter()
+            .find(|(cid, _)| *cid == clip.id)
+            .map(|(_, h)| h.clone())
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -815,22 +900,14 @@ impl App {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 Some(Message::Key(key, modifiers))
             }
+            // 悬停跟随只由物理指针移动恢复（见 Message::MouseMove 注释）
+            iced::Event::Mouse(mouse::Event::CursorMoved { .. }) => Some(Message::MouseMove),
             // 重新聚焦即重拉列表：窗口开着的时候 daemon 照常捕获，
             // 不刷新则列表陈旧（看不到新条目、▶ 指针滞后）
             iced::Event::Window(iced::window::Event::Focused) => Some(Message::Refocus),
             _ => None,
         })
     }
-}
-
-/// 常见位图魔数：PNG / JPEG / GIF / WebP / BMP。
-/// 魔数不对直接拒绝——iced image 解码失败会在渲染线程 panic，不能赌。
-fn is_image_magic(b: &[u8]) -> bool {
-    b.starts_with(&[0x89, b'P', b'N', b'G'])
-        || b.starts_with(&[0xFF, 0xD8, 0xFF])
-        || b.starts_with(b"GIF8")
-        || (b.len() > 12 && b.starts_with(b"RIFF") && b[8..12] == *b"WEBP")
-        || b.starts_with(b"BM")
 }
 
 // 布局常量（视图结构相关，主题配色见 theme.rs）
@@ -844,8 +921,9 @@ const VIEWPORT_HALF: f32 = 240.0;
 /// 渲染行数上限：全库载入后（max_items 可到 750）布局成本兜底；
 /// 过滤命中超过上限时只渲染相关度最高的前 300 行
 const MAX_RENDER_ROWS: usize = 300;
-/// 图片 Handle LRU 上限：最近浏览的图免重复解码
-const IMAGE_CACHE_CAP: usize = 8;
+/// 图片 Handle LRU 上限：缓存的是已解码 RGBA（1080p 截图 ≈8MB/张），
+/// 4 张约 32MB 上限——内存预算与回滚免解码体验的折中
+const IMAGE_CACHE_CAP: usize = 4;
 /// 底部预览窗格定高（内部 scrollable，长文可滚）
 const PREVIEW_HEIGHT: f32 = 220.0;
 
@@ -862,7 +940,10 @@ fn main() -> iced::Result {
             let app = App::new();
             // 搜索框自动聚焦：键入即过滤（winit 焦点可靠）
             let focus = iced::widget::operation::focus(app.search_id.clone());
-            (app, focus)
+            // Tick 触发首屏选中图片的后台解码派发（ensure_image_decode
+            // 挂在 update 尾部，启动后需一条消息引出）
+            let tick = Task::perform(async {}, move |_| Message::Tick);
+            (app, Task::batch([focus, tick]))
         },
         App::update,
         App::view,

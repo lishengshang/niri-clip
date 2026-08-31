@@ -3,6 +3,11 @@
 ## Unreleased
 
 ### Added
+- **man page 与 shell 补全（1.7）**：新增 `niri-clip completions <shell>`
+  （bash/zsh/fish/elvish/powershell）与 `niri-clip man` 子命令（均输出到
+  stdout），PKGBUILD 由二进制自生成安装到 man1 与补全路径；生成器内部对
+  EPIPE 会 panic（clap_complete shells/shell.rs），改先写内存缓冲再忽略
+  错误输出，对齐 outln! 口径；依赖 clap_complete/clap_mangen（闭包 +3 crate）
 - **图片磁盘配额 GC（1.3）**：新配置 `max_image_total_bytes`（默认 200 MiB，
   0 = 不限），daemon 启动时随孤儿清扫一并执行 `store::gc_images`：images/
   总量超配额按时间戳 LRU 整行淘汰最旧图片条目（行删文件也删），星标与
@@ -12,7 +17,22 @@
   `sqlite_select_300_of_10k`（裸查询）两组基准；种子经公开入库 API 写入
   临时 XDG 环境，不触碰真实历史库。实测 ≈0.95ms / ≈0.47ms，远低于
   ROADMAP 预算（11ms / 4ms）；criterion 仅 dev 依赖且裁掉 plotters/rayon
-  特性（依赖闭包 +11 crate，审计结论见 ARCHITECTURE）；CI 阈值门禁待批准
+  特性（依赖闭包 +11 crate，审计结论见 ARCHITECTURE）；CI 第 6 道 bench
+  工序（绝对预算断言）已接入
+
+### Fixed
+- **GUI 切换条目跳动（三轮根因）**：① 底部预览窗格三种分支高度不一
+  （文本 220px/图片 260px/缺失提示随内容），切换时窗格跳变使列表重排——
+  三种分支外层一律定高；② 键盘导航滚动时列表在静止指针下滑过，iced 按
+  布局重算派发 on_move/on_enter，MouseMove 把悬停跟随重新打开后被
+  Hover 抢走选中，高亮/预览在键盘位置与指针位置间震荡（快慢键速触发
+  概率不同）——MouseMove 改由订阅层物理 CursorMoved 派发，不再挂
+  widget 级 on_move；③ 图片预览同步解码卡 UI：tiny-skia 在 layout 阶段
+  同步解码未缓存截图（数十至上百 ms，UI 线程冻结期间停在旧帧，解完
+  突然出现，观感"像加载"）——改为后台线程预解码 RGBA（image crate，
+  iced 已引入同版本零新增依赖），Handle::from_rgba 供渲染器零解码
+  直用，解码前面板显示"解码中…"定高占位；RGBA 缓存 8→4 张（内存
+  预算折中）；is_image_magic 魔数预判随之废弃（解码失败优雅降级）
 
 ## v0.5.1 - 2026-08-31
 
