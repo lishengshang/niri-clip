@@ -79,6 +79,12 @@ enum Message {
     Tick,
 }
 
+/// 列内固定高度垂直间隙（iced 0.14 的 space::vertical() 是 Fill 语义，
+/// 需要定高间隙时用它手动构造）
+fn vspace(h: f32) -> space::Space {
+    space::Space::new().height(Length::Fixed(h))
+}
+
 /// 把阻塞任务丢到后台线程执行（iced 默认执行器为 thread-pool，
 /// Task::perform 的 future 里阻塞仅占一个 worker，UI 线程不受影响）。
 /// worker panic 时回传 `on_panic`——由调用方指定兜底消息，保证语义正确
@@ -112,6 +118,10 @@ struct App {
     search_id: iced::widget::Id,
     /// 行列表 scrollable 的 Id：键盘导航时 scroll_to 跟随选中
     list_id: iced::widget::Id,
+    /// 搜索模式（fzf 语义：/ 或 Ctrl-F 才进入，Esc 退出）。未进入时输入框
+    /// 不持有焦点——光标不闪烁 → 窗口零强制重绘待机（闪烁的最后来源）。
+    /// 退出时轮换 search_id 使旧 widget 状态连同焦点一起丢弃
+    search_mode: bool,
     clips: Vec<store::Clip>,
     /// clips 更替代数：每次整表重载 +1，作为过滤缓存的失效键之一
     /// （pin/delete/copy 后列表都会整表重拉，长度可能不变，不能只比长度）
@@ -162,6 +172,9 @@ impl App {
         Self {
             search_id: iced::widget::Id::unique(),
             list_id: iced::widget::Id::unique(),
+            // 搜索默认关（fzf 语义：/ 才进入）：启动时不聚焦输入框，光标
+            // 不闪烁，窗口零重绘待机
+            search_mode: false,
             clips,
             clips_gen: 0,
             query: String::new(),
@@ -274,6 +287,9 @@ impl App {
         // 主体消息处理 + 选中图片的后台预解码派发（每条消息后检查一次：
         // 选中变了/解码完成都可能产生新的待解码目标，命中缓存则零开销）
         let task = self.handle_message(message);
+        // ▶ 指针刷新只能在消息路径做：view 会被光标闪烁拉动重绘（~2Hz），
+        // 渲染路径上的同步 fs IO 造成与光标同节奏的周期性闪烁（真机实锤）
+        self.refresh_cur();
         let decode = self.ensure_image_decode();
         Task::batch([task, decode])
     }
@@ -430,10 +446,31 @@ impl App {
         match key {
             keyboard::Key::Named(keyboard::key::Named::ArrowUp) => return self.move_selection(-1),
             keyboard::Key::Named(keyboard::key::Named::ArrowDown) => return self.move_selection(1),
+            keyboard::Key::Character(c)
+                if c == "/" && !modifiers.control() && !self.search_mode =>
+            {
+                // fzf 语义：/ 进入搜索（Ctrl-F 同效）。输入框获得焦点后
+                // 光标才开始闪烁；未进入时字符不进入搜索，导航/快选不受影响
+                self.search_mode = true;
+                return iced::widget::operation::focus(self.search_id.clone());
+            }
+            keyboard::Key::Character(c) if modifiers.control() && c == "f" && !self.search_mode => {
+                self.search_mode = true;
+                return iced::widget::operation::focus(self.search_id.clone());
+            }
             keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                // fzf 语义：有输入/确认时先取消，空查询才退出
-                if !self.query.is_empty() || self.confirm_delete {
+                // fzf 语义：有输入/确认时先取消，空查询才退出。
+                // 退出搜索时轮换输入框 Id：旧 widget 状态连同焦点一起丢弃，
+                // 光标熄灭 → 窗口回到零重绘待机（周期性闪烁的最后来源）
+                if self.search_mode || !self.query.is_empty() {
+                    self.search_mode = false;
                     self.query.clear();
+                    self.confirm_delete = false;
+                    self.set_selection(0);
+                    self.search_id = iced::widget::Id::unique();
+                    return self.scroll_to_selected();
+                }
+                if self.confirm_delete {
                     self.confirm_delete = false;
                 } else {
                     std::process::exit(0);
@@ -628,6 +665,7 @@ impl App {
             ("1-9,0", "快选"),
             ("⏎", "复制"),
             ("右键", "连复"),
+            ("/", "搜索"),
             ("Ctrl-P", "固定"),
             ("Ctrl-X", "删除"),
             ("Esc", "清除/退出"),
@@ -734,23 +772,25 @@ impl App {
             list = list.push(row);
         }
 
-        let mut col = column![]
-            .spacing(6)
-            .push(
-                container(
-                    row![
-                        text::Rich::with_spans(hints)
-                            .size(10)
-                            .font(UI_FONT)
-                            .wrapping(text::Wrapping::None),
-                        space::horizontal(),
-                        text(counter).size(10).color(MUTED)
-                    ]
-                    .width(Length::Fill),
-                )
-                .width(Length::Fill)
-                .padding([6, 10]),
+        let mut col = column![].push(
+            container(
+                row![
+                    text::Rich::with_spans(hints)
+                        .size(10)
+                        .font(UI_FONT)
+                        .wrapping(text::Wrapping::None),
+                    space::horizontal(),
+                    text(counter).size(10).color(MUTED)
+                ]
+                .width(Length::Fill),
             )
+            .width(Length::Fill)
+            .padding([6, 10]),
+        );
+        // 列不再用统一 spacing(6)：列表与预览之间零缝隙，预览背景全铺满
+        // 到底边；上方元素间的间距改为显式垂直空隙
+        col = col
+            .push(vspace(6.0))
             .push(
                 // fzf 式提示符行：无输入框边框，前缀 + 透明输入区
                 row![
@@ -767,7 +807,9 @@ impl App {
                 .width(Length::Fill)
                 .padding([0, 10]),
             )
+            .push(vspace(6.0))
             .push(rule::horizontal(1.0).style(rule_style))
+            .push(vspace(6.0))
             .push(
                 scrollable(list)
                     .id(self.list_id.clone())
@@ -778,7 +820,7 @@ impl App {
             );
 
         if self.confirm_delete {
-            col = col.push(
+            col = col.push(vspace(6.0)).push(
                 container(text("◆ 星标条目删除确认：再按 Ctrl-X 执行，Esc 取消").size(12))
                     .width(Length::Fill)
                     .padding([6, 10])
@@ -852,18 +894,31 @@ impl App {
             .into()
     }
 
-    /// 当前项指针（TTL 缓存）：▶ 标记每帧都取，缓存收敛文件 IO
-    fn cur_hash(&self) -> Option<String> {
+    /// ▶ 指针缓存刷新：只在 update（真实消息）路径执行，绝不进 view——
+    /// view 会被搜索框光标闪烁周期性拉动重绘（~2Hz），渲染路径上的同步
+    /// fs IO（state/current 文件读）会造成与光标同节奏的周期性掉帧/背景
+    /// 闪烁。view 只消费缓存（见 cur_hash）
+    fn refresh_cur(&mut self) {
         const TTL: Duration = Duration::from_millis(500);
-        let mut cache = self.cur_cache.borrow_mut();
-        if let Some((at, v)) = cache.as_ref() {
-            if at.elapsed() < TTL {
-                return v.clone();
-            }
+        let expired = self
+            .cur_cache
+            .borrow()
+            .as_ref()
+            .map(|(at, _)| at.elapsed() >= TTL)
+            .unwrap_or(true);
+        if !expired {
+            return;
         }
         let v = store::current_hash();
-        *cache = Some((Instant::now(), v.clone()));
-        v
+        *self.cur_cache.borrow_mut() = Some((Instant::now(), v));
+    }
+
+    /// ▶ 标记取值：只读缓存，绝不做 IO（IO 由 refresh_cur 在消息路径完成）
+    fn cur_hash(&self) -> Option<String> {
+        self.cur_cache
+            .borrow()
+            .as_ref()
+            .and_then(|(_, v)| v.clone())
     }
 
     /// 底部预览：可滚窗格内容（80 行 / 每行 300 字符上限，超出补 …）。
@@ -938,12 +993,11 @@ fn main() -> iced::Result {
     iced::application(
         || {
             let app = App::new();
-            // 搜索框自动聚焦：键入即过滤（winit 焦点可靠）
-            let focus = iced::widget::operation::focus(app.search_id.clone());
-            // Tick 触发首屏选中图片的后台解码派发（ensure_image_decode
-            // 挂在 update 尾部，启动后需一条消息引出）
+            // 搜索默认关（/ 才进入）：启动不聚焦输入框——光标不闪烁，窗口
+            // 零强制重绘待机。Tick 触发首屏选中图片的后台解码派发
+            // （ensure_image_decode 挂在 update 尾部，启动后需一条消息引出）
             let tick = Task::perform(async {}, move |_| Message::Tick);
-            (app, Task::batch([focus, tick]))
+            (app, tick)
         },
         App::update,
         App::view,

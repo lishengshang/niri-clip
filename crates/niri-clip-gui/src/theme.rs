@@ -84,17 +84,6 @@ pub const RADIUS_PANEL: border::Radius = border::Radius {
     bottom_left: 6.0,
 };
 
-/// 面板阴影（立体感）：黑色低透明 + 垂直偏移
-pub const SHADOW_PANEL: Shadow = Shadow {
-    color: Color {
-        a: 0.35,
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-    },
-    offset: Vector { x: 0.0, y: 2.0 },
-    blur_radius: 10.0,
-};
 /// 选中行微阴影
 pub const SHADOW_ROW: Shadow = Shadow {
     color: Color {
@@ -182,17 +171,13 @@ pub fn scroll_style(_theme: &iced::Theme, status: scrollable::Status) -> scrolla
     }
 }
 
+/// 预览窗格：全铺满式底色——无边框/无圆角/无阴影，背景直接覆盖整个
+/// 底部区域到窗口边缘。旧圆角卡片样式（圆角+边框+阴影+列间距）会在
+/// 圆角与缝隙处露出窗口底色，闪烁时视觉上更明显
 pub fn preview_style(_theme: &iced::Theme) -> container::Style {
     container::Style {
         background: Some(Background::Color(PANEL)),
         text_color: Some(MUTED),
-        border: Border {
-            color: BORDER,
-            width: 1.0,
-            radius: RADIUS_PANEL,
-        },
-        // 浮起的面板：立体感
-        shadow: SHADOW_PANEL,
         ..Default::default()
     }
 }
