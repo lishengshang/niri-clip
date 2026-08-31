@@ -174,10 +174,9 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// 与 store.rs 测试同款：XDG 环境变量目录级隔离 + 串行化
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// 与 store/tui 测试共享全局 XDG 锁（见 lib.rs test_util 注释）
+    use crate::test_util::ENV_LOCK;
 
     #[test]
     fn default_config_compiles_ignore_regex() {

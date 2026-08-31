@@ -631,11 +631,11 @@ pub fn migrate_from_cliphist() -> Result<usize> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
 
     /// 目录级隔离 + 串行化：通过 XDG_* 环境变量把所有持久化位置指进临时目录，
-    /// 测试互不影响且不会触碰真实用户目录。
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// 测试互不影响且不会触碰真实用户目录。锁用全局共享的 test_util::ENV_LOCK
+    /// （store/config/tui 三处测试必须互斥，见 lib.rs 注释）
+    use crate::test_util::ENV_LOCK;
     static SEQ: AtomicUsize = AtomicUsize::new(0);
 
     struct EnvGuard {
