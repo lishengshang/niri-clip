@@ -61,7 +61,7 @@ pub(crate) fn tighten_dir_perms(p: &Path) {
 fn tighten_dir_perms(_p: &Path) {}
 
 #[cfg(unix)]
-fn tighten_file_perms(p: &Path) {
+pub(crate) fn tighten_file_perms(p: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
 }
@@ -69,16 +69,15 @@ fn tighten_file_perms(p: &Path) {
 #[cfg(not(unix))]
 fn tighten_file_perms(_p: &Path) {}
 
-/// 文本去重指纹（daemon 轮询短路复用）。注：DefaultHasher 算法不受稳定性保证，
-/// 本轮暂不更换以免存量 hash 失配导致整表翻倍重插；图片走稳定的 fnv64
-/// （见 insert_image），待 v1.0 计划内统一（需伴随一次性 hash 重算）。
+/// 文本去重指纹（daemon 轮询短路复用）。
+///
+/// blake3：算法规范跨编译器/进程/机器版本稳定（DefaultHasher 无此保证，
+/// 存量库已在 v3→v4 迁移中一次性重算，见 migrate.rs 与 ADR-003）；
+/// 256 位密码学强度，作为长期数据指纹无碰撞面担忧，热路径吞吐 GB/s 级
+/// （与 max_clip_bytes 限额下的读取成本同量级，非瓶颈）。
+/// 图片不走此函数：`img:` 前缀的 FNV 指纹本就稳定（见 image_content_key）。
 pub fn hash_text(s: &str) -> String {
-    // 简单 blake3 替代：用 std hash + 长度，避免额外依赖
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    s.hash(&mut h);
-    format!("{:x}-{}", h.finish(), s.len())
+    blake3::hash(s.as_bytes()).to_hex().to_string()
 }
 
 /// FNV-1a 64：跨进程/跨编译器版本稳定的内容指纹，用于图片二进制去重
