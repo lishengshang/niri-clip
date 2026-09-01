@@ -46,9 +46,9 @@
   闭包，Cargo.lock -576 行，GUI 363→300 / workspace 385→322，CLI 主包不变
   （171，不含 gui）；审计基线（cargo tree 全量口径、大头分解、编译时间与
   二进制体积）记入 ARCHITECTURE §9：release 编译实测主包 96s / GUI 增量
-  123s（clean+--locked+LTO），二进制 6.5 / 11.2 MiB；主包编译时间超
-  <60s 预算，预算重估与 notify-rust→zbus（86 crate，CLI 最大单项）裁剪
-  两个决策项均记录待用户决策，未实施
+  123s（clean+--locked+LTO），二进制 6.5 / 11.2 MiB；编译时间预算已重估为
+  <120s（lto 维持全量），notify-rust→zbus（86 crate，CLI 最大单项）裁剪
+  仍待用户决策，未实施
 - **预览窗格全铺满**：去圆角/边框/阴影（SHADOW_PANEL 删除），列表与
   预览间零缝隙，PANEL 底色直达窗口边缘（旧卡片式样在圆角与缝隙处露出
   窗口底色，闪烁时观感更明显）

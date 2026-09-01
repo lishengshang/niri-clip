@@ -166,8 +166,8 @@ lockfile 包出图，Cargo.lock -576 行；非 png/jpeg/webp 格式解码失败�
 优雅降级提示。二进制体积：CLI 6.5 MiB / GUI 11.2 MiB（strip 后）。
 
 **编译时间基线（本机，2026-09-01）：** 主包 96s / GUI 增量 123s /
-全 workspace ≈219s。主包超 ROADMAP `<60s` 预算（该预算定于 Phase 0 早期
-依赖树远小于今日之时，bundled sqlite C 编译 + 全量 LTO 是主要耗时）。
-**决策项（未实施）：** ① 重估预算为 <120s；② `lto = "thin"` 换编译时间
-（二进制体积/性能回退待测）；③ 维持现状。CI bench 门禁不含编译时间，
-无回归报警风险。
+全 workspace ≈219s。原 ROADMAP `<60s` 预算定于 Phase 0 早期依赖树远小
+于今日之时（bundled sqlite C 编译 + 全量 LTO 是主要耗时）。
+**已决策（2026-09-01）：** 预算重估为 `<120s`，当前达标；`lto = "thin"`
+备选搁置（体积/性能回退未测，无实际需求不引入变量）。CI bench 门禁
+不含编译时间，无回归报警风险。
