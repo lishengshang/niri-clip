@@ -583,13 +583,33 @@ impl App {
                 return self.delete_selected();
             }
             keyboard::Key::Character(c)
+                if modifiers.alt()
+                    && c.len() == 1
+                    && (c.as_str() >= "1" && c.as_str() <= "9" || c.as_str() == "0") =>
+            {
+                // Alt+1-9,0 快选：搜索态下裸数字被持焦点输入框接管，
+                // Alt 组合键让快选在搜索态继续可用（0 = 第 10 行）；
+                // 非搜索态同样生效，与裸数字等价冗余
+                let n: usize = if c.as_str() == "0" {
+                    10
+                } else {
+                    c.parse().unwrap_or(0)
+                };
+                if n >= 1 && n <= self.visible_len() {
+                    self.set_selection(n - 1);
+                    return self.update(Message::Copy { exit: true });
+                }
+            }
+            keyboard::Key::Character(c)
                 if self.query.is_empty()
                     && !modifiers.control()
+                    && !modifiers.alt()
                     && c.len() == 1
                     && (c.as_str() >= "1" && c.as_str() <= "9" || c.as_str() == "0") =>
             {
                 // 空查询时 1-9,0 快选（0=第 10 行）：定位到过滤列表第 n 行并
-                // 复制关闭；有输入时数字回落为查询字符（text_input 自行处理）
+                // 复制关闭；有输入时数字回落为查询字符（text_input 自行处理），
+                // 搜索态快选走上方 Alt 组合键
                 let n: usize = if c.as_str() == "0" {
                     10
                 } else {

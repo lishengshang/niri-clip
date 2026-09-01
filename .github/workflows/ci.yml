@@ -99,4 +99,6 @@ jobs:
           cargo bench -p niri-clip-core --bench store -- --output-format bencher | tee bench.txt
           awk '/list_300_of_10k.*bench:/ { gsub(/,/,"",$5); if ($5+0 >= 11000000) { print "list 预算超限:", $5, "ns"; exit 1 } }' bench.txt
           awk '/sqlite_select_300_of_10k.*bench:/ { gsub(/,/,"",$5); if ($5+0 >= 4000000) { print "sqlite 预算超限:", $5, "ns"; exit 1 } }' bench.txt
+          # 任务 2.1（用户已批准纳入）：FTS5 全文搜索 < 50ms（实测 ≈0.16ms）
+          awk '/fts_search_300_of_10k.*bench:/ { gsub(/,/,"",$5); if ($5+0 >= 50000000) { print "fts 搜索预算超限:", $5, "ns"; exit 1 } }' bench.txt
           echo "BENCH OK"
