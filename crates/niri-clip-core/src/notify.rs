@@ -7,17 +7,36 @@
 //!
 //! 后台线程 spawn + wait 收尸：调用方零阻塞（GUI 侧无 UI 冻结面）、
 //! daemon 长驻进程不留僵尸；通知为低频路径（超限/失败反馈等），
-//! 每条一线程成本可忽略。参数走数组不经 shell，无注入面。
+//! 每条一线程成本可忽略。参数走数组不经 shell，无注入面；
+//! 经 coreutils timeout 5s 划界（见 send 文档）。
 
 use std::process::Command;
 
 /// 发送桌面通知，summary 固定为 `niri-clip`。不阻塞、不报错：
 /// 无通知服务 / notify-send 缺失时静默。
+///
+/// 超时边界（ROADMAP 工程原则 1）：notify-send 经 coreutils `timeout 5s`
+/// 划界（与 capture_timeout_secs 默认一致）——D-Bus 会话总线异常时
+/// libnotify 默认超时可达 ~25s，不设界则最坏情况 daemon 内阻塞线程/
+/// 子进程无界堆积。
+///
+/// 后台线程 spawn + wait 收尸：调用方零阻塞（GUI 侧无 UI 冻结面）、
+/// daemon 长驻进程不留僵尸；通知为低频路径（超限/失败反馈等），
+/// 每条一线程成本可忽略。参数走数组不经 shell，无注入面。
+///
+/// notify-send 的 stderr 继承父进程：无通知服务时终端/journal 可见其
+/// 报错（可诊断性优于原 notify-rust 的完全静默），成功路径无输出。
 pub fn send(body: &str) {
     let body = body.to_owned();
     std::thread::spawn(move || {
-        let _ = Command::new("notify-send")
-            .args(["--app-name=niri-clip", "niri-clip", &body])
+        let _ = Command::new("timeout")
+            .args([
+                "5",
+                "notify-send",
+                "--app-name=niri-clip",
+                "niri-clip",
+                &body,
+            ])
             .status();
     });
 }

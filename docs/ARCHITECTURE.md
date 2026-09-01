@@ -150,7 +150,9 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
   D-Bus 栈为 CLI 主包最大单项。核实实际 API 面仅 summary/body（9 处调用），
   已换 `notify-send` 子进程（`core::notify::send`：后台线程 spawn+wait 收尸，
   调用方零阻塞、daemon 长驻无僵尸；notify-send 缺失静默，与原 `let _ =`
-  语义一致；参数数组不经 shell 无注入面）。代价：新增运行时依赖
+  语义一致；参数数组不经 shell 无注入面；经 coreutils timeout 5s 划界，
+  对齐 ROADMAP 工程原则 1——防 D-Bus 异常时 libnotify 默认 ~25s 超时
+  导致线程/子进程无界堆积）。代价：新增运行时依赖
   `libnotify`（PKGBUILD*/.SRCINFO.example depends 已同步）；未来若需通知
   action 回调需换回库方案
 - `wl-clipboard-rs` → 44（内含 wayland-client 22）：功能必需，无裁剪空间，与

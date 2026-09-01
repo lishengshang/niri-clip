@@ -43,7 +43,9 @@
   （86 crate 的 zbus/zvariant D-Bus 栈，CLI 主包最大单项）——核实实际
   API 面仅 summary/body（9 处调用），新增 `core::notify::send`（后台线程
   spawn+wait 收尸：调用方零阻塞、daemon 长驻无僵尸；notify-send 缺失
-  静默与原 `let _ =` 语义一致；参数数组不经 shell 无注入面），
+  静默与原 `let _ =` 语义一致；参数数组不经 shell 无注入面；经
+  coreutils timeout 5s 划界（代码评审修复：防 D-Bus 会话总线异常时
+  libnotify 默认 ~25s 超时导致 daemon 内线程/子进程无界堆积）），
   daemon/tui/CLI/GUI 全量替换；CLI 主包闭包 171→108 / GUI 300→247 /
   workspace 322→269，Cargo.lock 净 -592 行，release 编译实测主包
   96s→77s / GUI 增量 123s→108s，二进制 6.5→5.1 / 11.2→9.8 MiB；
