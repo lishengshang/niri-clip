@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## v0.5.2 - 2026-09-01
+
+> 亮点：Phase 1「TUI 体验闭环」收官（PRIMARY 捕获、图片配额 GC、★ 删除
+> 二段确认、man page 与补全、criterion 基准进 CI）；依赖与构建开销审计
+> 两轮收窄——iced/image feature 收窄 + 桌面通知换 notify-send 子进程，
+> CLI 主包闭包 171→108 crate、release 编译 96s→77s、二进制
+> 6.5→5.1 MiB，编译时间预算重估为 <120s；GUI 背景闪烁根治与切换
+> 条目跳动三轮修复；**运行时依赖新增 libnotify**（AUR depends 已同步）。
+
 ### Added
 - **★ 条目删除 fzf 内嵌二段确认（1.5，去 fuzzel 依赖路径）**：fzf TUI
   删星标条目改为两次 Ctrl-X——首次仅挂起（state/pending_delete 记

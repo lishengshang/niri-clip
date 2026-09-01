@@ -1,6 +1,6 @@
 # Maintainer: lishengshang <3490017805@qq.com>
 pkgname=niri-clip
-pkgver=0.5.1
+pkgver=0.5.2
 pkgrel=1
 pkgdesc="为 niri 打造的全新高性能 Wayland 剪贴板"
 arch=('x86_64' 'aarch64')

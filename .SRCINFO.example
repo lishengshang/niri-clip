@@ -1,7 +1,7 @@
 # makepkg --printsrcinfo > .SRCINFO 后上传 AUR（示例，版本号随发布更新）
 pkgbase = niri-clip
 	pkgdesc = 为 niri 打造的全新高性能 Wayland 剪贴板
-	pkgver = 0.5.1
+	pkgver = 0.5.2
 	pkgrel = 1
 	url = https://github.com/lishengshang/niri-clip
 	arch = x86_64
