@@ -37,10 +37,17 @@ iced = { version = "0.14", default-features = false, features = [
     "tiny-skia",
     "wayland",
     "thread-pool",
-    "image",
+    # 任务 1.8 审计：不用 iced 的 "image" feature——它 = image-without-codecs
+    # + image/default，会把 avif/exr/gif/tiff/hdr 等全套解码器与 rayon 拉进
+    # 闭包；GUI 侧解码全部走下方直接依赖的 image（后台预解码 →
+    # Handle::from_rgba），iced 渲染器零解码，故用 without-codecs 变体
+    "image-without-codecs",
 ] }
-# GUI 图片后台预解码用（iced 的 image feature 已引入同版本，零新增闭包）
-image = "0.25"
+# GUI 图片后台预解码用（iced 已引入同版本，零新增闭包）。任务 1.8：
+# 裁掉 default 的全套格式解码器，只留剪贴板现实场景的 png/jpeg/webp
+#（其余格式解码失败走既有优雅降级提示）；iced 侧 image-without-codecs
+# 不再无人启用 default-formats，rayon/ravif 等随之出闭包
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 wl-clipboard-rs = "0.9"
 # 仅供 core benches（基准门禁，路线图 1.6）。default 的 plotters/rayon 会拉入
 # 大量传递依赖，只留 cargo_bench_support 维持依赖闭包可控
