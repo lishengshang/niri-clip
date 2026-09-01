@@ -29,7 +29,7 @@
 |---|---|---|
 | 常驻内存 | <40MB | ~40MB |
 | 10k 条 list | <11ms | ✅ |
-| 10k 条 FTS 搜索（v0.6 后） | <50ms | ✅ 实测 0.16ms（fts_search_300_of_10k，trigram） |
+| 10k 条 FTS 搜索（v0.6 后） | <50ms | ✅ 实测 0.16ms（fts_search_300_of_10k，trigram；CI 预算断言已纳入） |
 | release 编译时间 | <120s（--locked；2026-09-01 重估，原 <60s 定于依赖树远小的早期） | 主包 77s / GUI 增量 108s ✅（notify-send 交换后二测，原 96s/123s） |
 | 依赖闭包 | wl-clipboard-rs+wayland-client ~40 crate 为已知大头，新增前先 `cargo tree` 审计 | CLI 主包 108 / GUI 247 / workspace 269（1.8 审计 + image 收窄 + notify-send 交换后，自 385 累计 -116） |
 
