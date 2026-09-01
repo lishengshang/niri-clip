@@ -30,8 +30,8 @@
 | 常驻内存 | <40MB | ~40MB |
 | 10k 条 list | <11ms | ✅ |
 | 10k 条 FTS 搜索（v0.6 后） | <50ms | 待建 |
-| release 编译时间 | <60s（--locked） | bundled sqlite ~40s |
-| 依赖闭包 | wl-clipboard-rs+wayland-client ~40 crate 为已知大头，新增前先 `cargo tree` 审计 | ~40 crate |
+| release 编译时间 | <60s（--locked） | 主包 96s / GUI 增量 123s（1.8 实测，clean+LTO；**超预算**，见 ARCHITECTURE §9 决策项） |
+| 依赖闭包 | wl-clipboard-rs+wayland-client ~40 crate 为已知大头，新增前先 `cargo tree` 审计 | CLI 主包 171 / GUI 300 / workspace 322（1.8 审计后，image 收窄 -63） |
 
 **最终交付形态（v1.0 定义）：**
 - `paru -S niri-clip` → `Mod+V` 开箱即用，零手工配置
@@ -58,7 +58,7 @@
 
 ```
 ✅ Phase 0   v0.1–v0.4.1   骨架 → MVP → 优化 → P0 正确性闭环      已交付
-▶ Phase 1   v0.5.x        TUI 体验闭环                          进行中（约 2–3 周）
+▶ Phase 1   v0.5.x        TUI 体验闭环                          任务全清（待 tag 收口，约 2–3 周）
   Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    约 3–4 周
   Phase 3   v0.7          安全与隐私强化                         约 2–3 周
   Phase 4   v1.0          Production 正式发布                    约 3–4 周
@@ -104,7 +104,7 @@
 | 1.5 | ✅ 星标删除二段确认（fzf 内嵌，去 fuzzel 依赖） | 两次 Ctrl-X：首次挂起（state/pending_delete，15s TTL 防分心误删），list-raw reload 打 "◆ 再按Ctrl-X确认删除" 行内标记，同行再按真删；`delete --fzf` 旗标承载，原 fuzzel 路径保留；二段确认全流程单测（GUI 内嵌确认见 5.3.3） | 删除误操作率归零（单测锁定挂起/确认/过期语义） |
 | 1.6 | ✅ criterion 基准进 CI | `crates/niri-clip-core/benches/store.rs`（list_300_of_10k ≈0.95ms / sqlite_select_300_of_10k ≈0.47ms，见 ARCHITECTURE）；CI 第 6 道 bench 工序：bencher 格式输出 + 绝对预算断言（11ms / 4ms），超限即红 | CI 输出耗时，回归 >20% 报警（绝对阈值先行） |
 | 1.7 | ✅ man page + shell 补全 | `niri-clip man` / `niri-clip completions <shell>`（clap_mangen/clap_complete，闭包 +3 crate）；PKGBUILD 由二进制自生成安装到 man1 与 bash/zsh/fish 补全路径 | PKGBUILD 安装路径正确（本地验证输出） |
-| 1.8 | 依赖与构建开销审计 | `cargo tree` 梳理 wl-clipboard-rs/wayland-client 闭包（~40 crate 已知大头），关无用 feature；PKGBUILD 确认 `--locked`；记录 release 编译时间基线（bundled sqlite ~40s） | 审计结论记入 ARCHITECTURE；编译时间进开销预算表 |
+| 1.8 | ✅ 依赖与构建开销审计 | `cargo tree -e normal` 全量口径（ARCHITECTURE §9）：CLI 主包 171 / GUI 300 / workspace 322；大头 notify-rust→zbus 86（CLI 最大单项）、wl-clipboard-rs 44、iced 258（仅 GUI）；iced `image`→`image-without-codecs` + 直接依赖 image 收窄 png/jpeg/webp（28 包出闭包，GUI 363→300）；PKGBUILD 已确认 `--locked`；release 编译实测主包 96s / GUI 增量 123s，**超 <60s 预算**列入决策项 | 审计结论记入 ARCHITECTURE §9；编译时间进开销预算表（已同步） |
 
 **技术要点：** fzf `--expect` 组合键；criterion + CI artifact 对比。
 **时间节点：** 约 2–3 周；里程碑 **M1 = v0.5.0 tag + AUR 更新**。
@@ -246,7 +246,7 @@
 | FTS5 中文搜索效果不佳 | 中 | unicode61 起步；预留 simple/pinyin tokenizer 升级路径（2.1） |
 | wl-clipboard-rs API 变更/停维护 | 中 | 锁定 Cargo.lock；事件驱动主路径已不依赖其轮询 |
 | blake3 全表重算迁移出错致数据翻倍/丢失 | 中 | 迁移事务内合并 + 条目数只减不增断言（2.2）；100k 长稳测试（2.5）；迁移前 VACUUM INTO 快照 |
-| 依赖蔓生拖慢编译、增大二进制 | 中 | 新增依赖过开销审计（1.8）；编译时间/依赖数进开销预算表跟踪 |
+| 依赖蔓生拖慢编译、增大二进制 | 中 | 新增依赖过开销审计（1.8 ✅，基线见 ARCHITECTURE §9）；编译时间/依赖数进开销预算表跟踪；**主包 96s 已超 60s 预算待决策** |
 | 单人 bus factor | 中 | 文档与 CI 即"第二维护者"；关键流程（发版/迁移）全部脚本化 |
 | 加密方案性能不达标 | 低 | PoC 先行（3.4），不达标则 v2.0 降级为可选导出加密 |
 

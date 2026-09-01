@@ -128,3 +128,46 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 - **Rust**：`<40MB` 常驻，`tokio` 异步，无 `fork`，发 `AUR` 最稳
 - **SQLite WAL**：单文件备份，`FTS5` 搜索，`WAL` 读写不锁
 - **fzf**：`--track` 是唯一“删除不跳顶”不闪的实现，`ratatui` 自绘后续可选
+
+## 9. 依赖与构建开销审计（1.8，2026-09-01）
+
+> 口径：`cargo tree -e normal --prefix none | sort -u | wc -l`（去重 crate 数，
+> 不含 dev/bench）；编译时间：`cargo clean` 后全新 `cargo build --release --locked`，
+> profile `[lto=true, codegen-units=1, strip=true]`。
+
+**闭包基线（审计后）：**
+
+| 包 | crate 数 | 说明 |
+|---|---|---|
+| niri-clip（CLI 主包） | 171 | AUR 主包构建口径（`-p niri-clip`） |
+| niri-clip-core | 150 | 主包子集 |
+| niri-clip-gui | 300 | 审计前 363（image 收窄 -63） |
+| workspace 总计 | 322 | 审计前 385 |
+
+**大头分解：**
+
+- `notify-rust` → 86 crate（zbus/zvariant D-Bus 栈），**CLI 主包最大单项**（占闭包
+  近一半）。裁剪唯一路径是改用 `notify-send` 子进程（可减 ~80 crate），
+  取舍：丢失通知 action/图标可控性，且引入对 notify-send 二进制的运行时依赖——
+  **待用户决策，未实施**
+- `wl-clipboard-rs` → 44（内含 wayland-client 22）：功能必需，无裁剪空间，与
+  ROADMAP 预估 ~40 一致
+- `iced` → 258：仅 GUI 包引用，不进主包闭包
+- `image` → 收窄后小闭包（见下）；`chrono` default 的 oldtime/wasmbind 为
+  无操作特性（原生目标零成本），不动
+
+**feature 收窄（本轮唯一落地项）：** iced `image` feature 实为
+`image-without-codecs` + `image/default`，会把 avif/exr/gif/tiff/hdr/qoi/pnm/
+dds/bmp/tga/ico 全套解码器 + rayon 拉进闭包；而 GUI 解码全部走直接依赖
+image 的后台预解码（`load_from_memory` → `Handle::from_rgba`，iced 渲染器
+零解码，机制见 v0.5.1 GUI 三轮修复条目）。改为 iced `image-without-codecs` + 直接依赖
+`image = default-features=false, features=["png","jpeg","webp"]`：28 个
+lockfile 包出图，Cargo.lock -576 行；非 png/jpeg/webp 格式解码失败走既有
+优雅降级提示。二进制体积：CLI 6.5 MiB / GUI 11.2 MiB（strip 后）。
+
+**编译时间基线（本机，2026-09-01）：** 主包 96s / GUI 增量 123s /
+全 workspace ≈219s。主包超 ROADMAP `<60s` 预算（该预算定于 Phase 0 早期
+依赖树远小于今日之时，bundled sqlite C 编译 + 全量 LTO 是主要耗时）。
+**决策项（未实施）：** ① 重估预算为 <120s；② `lto = "thin"` 换编译时间
+（二进制体积/性能回退待测）；③ 维持现状。CI bench 门禁不含编译时间，
+无回归报警风险。
