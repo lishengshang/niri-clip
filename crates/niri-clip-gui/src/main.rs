@@ -381,10 +381,7 @@ impl App {
                 if !ok {
                     // 通知开关：失败反馈（窗口即将退出，stderr 看不见）
                     if self.notify_enabled {
-                        let _ = notify_rust::Notification::new()
-                            .summary("niri-clip")
-                            .body("复制失败")
-                            .show();
+                        niri_clip_core::notify::send("复制失败");
                     } else {
                         eprintln!("[niri-clip gui] copy failed");
                     }
@@ -497,10 +494,7 @@ impl App {
                     move |(ok, clips)| {
                         if !ok {
                             if notify {
-                                let _ = notify_rust::Notification::new()
-                                    .summary("niri-clip")
-                                    .body("固定/取消固定失败")
-                                    .show();
+                                niri_clip_core::notify::send("固定/取消固定失败");
                             } else {
                                 eprintln!("[niri-clip gui] pin failed");
                             }
@@ -595,10 +589,7 @@ impl App {
             move |(ok, clips)| {
                 if !ok {
                     if notify {
-                        let _ = notify_rust::Notification::new()
-                            .summary("niri-clip")
-                            .body("删除失败")
-                            .show();
+                        niri_clip_core::notify::send("删除失败");
                     } else {
                         eprintln!("[niri-clip gui] delete failed");
                     }

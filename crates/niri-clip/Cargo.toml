@@ -19,6 +19,5 @@ anyhow.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 clap_mangen.workspace = true
-notify-rust.workspace = true
 tokio.workspace = true
 which.workspace = true

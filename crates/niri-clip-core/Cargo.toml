@@ -15,7 +15,6 @@ anyhow.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 libc.workspace = true
-notify-rust.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

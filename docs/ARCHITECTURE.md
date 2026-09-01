@@ -135,21 +135,24 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 > 不含 dev/bench）；编译时间：`cargo clean` 后全新 `cargo build --release --locked`，
 > profile `[lto=true, codegen-units=1, strip=true]`。
 
-**闭包基线（审计后）：**
+**闭包基线（审计 + 两轮收窄后）：**
 
 | 包 | crate 数 | 说明 |
 |---|---|---|
-| niri-clip（CLI 主包） | 171 | AUR 主包构建口径（`-p niri-clip`） |
-| niri-clip-core | 150 | 主包子集 |
-| niri-clip-gui | 300 | 审计前 363（image 收窄 -63） |
-| workspace 总计 | 322 | 审计前 385 |
+| niri-clip（CLI 主包） | 108 | 审计基线 171；notify-send 交换（决策项②）后 -63 |
+| niri-clip-core | 88 | 主包子集（基线 150） |
+| niri-clip-gui | 247 | 审计前 363：image 收窄 -63、notify-send -53 |
+| workspace 总计 | 269 | 审计前 385 |
 
 **大头分解：**
 
-- `notify-rust` → 86 crate（zbus/zvariant D-Bus 栈），**CLI 主包最大单项**（占闭包
-  近一半）。裁剪唯一路径是改用 `notify-send` 子进程（可减 ~80 crate），
-  取舍：丢失通知 action/图标可控性，且引入对 notify-send 二进制的运行时依赖——
-  **待用户决策，未实施**
+- `notify-rust`（决策项②，2026-09-01 已落地）：原 86 crate 的 zbus/zvariant
+  D-Bus 栈为 CLI 主包最大单项。核实实际 API 面仅 summary/body（9 处调用），
+  已换 `notify-send` 子进程（`core::notify::send`：后台线程 spawn+wait 收尸，
+  调用方零阻塞、daemon 长驻无僵尸；notify-send 缺失静默，与原 `let _ =`
+  语义一致；参数数组不经 shell 无注入面）。代价：新增运行时依赖
+  `libnotify`（PKGBUILD*/.SRCINFO.example depends 已同步）；未来若需通知
+  action 回调需换回库方案
 - `wl-clipboard-rs` → 44（内含 wayland-client 22）：功能必需，无裁剪空间，与
   ROADMAP 预估 ~40 一致
 - `iced` → 258：仅 GUI 包引用，不进主包闭包
@@ -163,11 +166,13 @@ image 的后台预解码（`load_from_memory` → `Handle::from_rgba`，iced 渲
 零解码，机制见 v0.5.1 GUI 三轮修复条目）。改为 iced `image-without-codecs` + 直接依赖
 `image = default-features=false, features=["png","jpeg","webp"]`：28 个
 lockfile 包出图，Cargo.lock -576 行；非 png/jpeg/webp 格式解码失败走既有
-优雅降级提示。二进制体积：CLI 6.5 MiB / GUI 11.2 MiB（strip 后）。
+优雅降级提示。二进制体积：CLI 6.5 MiB / GUI 11.2 MiB（strip 后；
+notify-send 交换后降至 5.1 / 9.8 MiB）。
 
 **编译时间基线（本机，2026-09-01）：** 主包 96s / GUI 增量 123s /
 全 workspace ≈219s。原 ROADMAP `<60s` 预算定于 Phase 0 早期依赖树远小
 于今日之时（bundled sqlite C 编译 + 全量 LTO 是主要耗时）。
 **已决策（2026-09-01）：** 预算重估为 `<120s`，当前达标；`lto = "thin"`
 备选搁置（体积/性能回退未测，无实际需求不引入变量）。CI bench 门禁
-不含编译时间，无回归报警风险。
+不含编译时间，无回归报警风险。notify-send 交换后二测：主包 77s /
+GUI 增量 108s（原 96s / 123s），预算内余量进一步扩大。

@@ -30,8 +30,8 @@
 | 常驻内存 | <40MB | ~40MB |
 | 10k 条 list | <11ms | ✅ |
 | 10k 条 FTS 搜索（v0.6 后） | <50ms | 待建 |
-| release 编译时间 | <120s（--locked；2026-09-01 重估，原 <60s 定于依赖树远小的早期） | 主包 96s / GUI 增量 123s ✅ |
-| 依赖闭包 | wl-clipboard-rs+wayland-client ~40 crate 为已知大头，新增前先 `cargo tree` 审计 | CLI 主包 171 / GUI 300 / workspace 322（1.8 审计后，image 收窄 -63） |
+| release 编译时间 | <120s（--locked；2026-09-01 重估，原 <60s 定于依赖树远小的早期） | 主包 77s / GUI 增量 108s ✅（notify-send 交换后二测，原 96s/123s） |
+| 依赖闭包 | wl-clipboard-rs+wayland-client ~40 crate 为已知大头，新增前先 `cargo tree` 审计 | CLI 主包 108 / GUI 247 / workspace 269（1.8 审计 + image 收窄 + notify-send 交换后，自 385 累计 -116） |
 
 **最终交付形态（v1.0 定义）：**
 - `paru -S niri-clip` → `Mod+V` 开箱即用，零手工配置

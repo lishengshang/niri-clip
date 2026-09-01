@@ -6,7 +6,7 @@ pkgdesc="为 niri 打造的全新高性能 Wayland 剪贴板"
 arch=('x86_64' 'aarch64')
 url="https://github.com/lishengshang/niri-clip"
 license=('MIT')
-depends=('wl-clipboard' 'fzf>=0.71')
+depends=('wl-clipboard' 'fzf>=0.71' 'libnotify')
 makedepends=('cargo' 'git')
 optdepends=(
   'fuzzel: 后备选择器（无 fzf 环境自动回退）'

@@ -62,10 +62,7 @@ fn spawn_watch(
 fn notify_oversize(msg: &str) {
     eprintln!("[niri-clip store] {msg}，已忽略");
     if Config::load().notify_enabled {
-        let _ = notify_rust::Notification::new()
-            .summary("niri-clip")
-            .body(msg)
-            .show();
+        crate::notify::send(msg);
     }
 }
 
@@ -202,10 +199,7 @@ async fn run_watch(timeout_secs: u64, capture_primary: bool) -> Result<()> {
         "[niri-clip daemon] event-driven source: wl-paste --watch (per-capture timeout {timeout_secs}s)"
     );
     if Config::load().notify_enabled {
-        let _ = notify_rust::Notification::new()
-            .summary("niri-clip")
-            .body("守护进程已启动 (event)")
-            .show();
+        crate::notify::send("守护进程已启动 (event)");
     }
 
     let exe_path = std::path::Path::new(&exe);

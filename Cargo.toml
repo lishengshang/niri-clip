@@ -23,7 +23,6 @@ clap_complete = "4"
 clap_mangen = "0.2"
 dirs = "5"
 libc = "0.2"
-notify-rust = "4"
 regex = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
