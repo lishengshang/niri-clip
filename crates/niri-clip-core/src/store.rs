@@ -88,6 +88,10 @@ fn migrate_legacy_db(new_path: &Path) -> Result<()> {
 /// v0.4：引入 PRAGMA user_version 迁移机制（此前 schema 演进没有版本标记）。
 /// 版本 0：建基表/索引，删除从未参与查询的 FTS 占位表
 /// 版本 1 -> 2：新增 image_path 列（图片条目与数据文件按 clip id 关联）
+/// 版本 2 -> 3（任务 2.1）：clips_fts 全文索引（FTS5 trigram，中英文子串
+/// 均命中，选型见 ADR-002）。外部内容表（content='clips'）不占双倍存储，
+/// 由三触发器与 clips 行同步；存量行迁移时一次性回填。旧库升级无损：
+/// 只增表/触发器，不动 clips 行
 fn migrate_schema(conn: &Connection) -> Result<()> {
     let ver: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if ver < 1 {
@@ -119,6 +123,29 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
             conn.execute_batch("ALTER TABLE clips ADD COLUMN image_path TEXT;")?;
         }
         conn.execute_batch("PRAGMA user_version=2;")?;
+    }
+    if ver < 3 {
+        conn.execute_batch(
+            "
+            CREATE VIRTUAL TABLE IF NOT EXISTS clips_fts USING fts5(
+                text, content='clips', content_rowid='id', tokenize='trigram'
+            );
+            INSERT INTO clips_fts(rowid, text) SELECT id, text FROM clips;
+            CREATE TRIGGER IF NOT EXISTS clips_fts_ai AFTER INSERT ON clips BEGIN
+                INSERT INTO clips_fts(rowid, text) VALUES (new.id, new.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS clips_fts_ad AFTER DELETE ON clips BEGIN
+                INSERT INTO clips_fts(clips_fts, rowid, text)
+                VALUES ('delete', old.id, old.text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS clips_fts_au AFTER UPDATE OF text ON clips BEGIN
+                INSERT INTO clips_fts(clips_fts, rowid, text)
+                VALUES ('delete', old.id, old.text);
+                INSERT INTO clips_fts(rowid, text) VALUES (new.id, new.text);
+            END;
+            ",
+        )?;
+        conn.execute_batch("PRAGMA user_version=3;")?;
     }
     Ok(())
 }
@@ -486,6 +513,63 @@ pub fn list(limit: usize) -> Result<Vec<Clip>> {
     Ok(out)
 }
 
+/// 全库搜索结果集上限：GUI 渲染侧另有 MAX_RENDER_ROWS 兑底，
+/// 这里限制的是 FTS 候选集大小（相关度取前 N）
+pub const SEARCH_LIMIT: usize = 300;
+
+/// FTS5 全文搜索（任务 2.1，trigram tokenizer：中英文子串均命中）。
+///
+/// * query ≥3 字符（chars 计）→ clips_fts MATCH 短语查询，bm25 相关度排序
+///   （trigram 索引要求查询至少 3 字符才能命中）
+/// * 更短查询 → clips.text LIKE 线性扫描（10k 条毫秒级，trigram 索引对
+///   短查询无增益）
+/// * 并列时新者优先；空查询返回空集
+///
+/// 查询内的双引号翻倍转义，防止用户输入破坏 MATCH 短语语法（参数数组
+/// 走 bind，无注入面；这里只是 FTS 查询语法层的问题）
+pub fn search(query: &str, limit: usize) -> Result<Vec<Clip>> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = connect()?;
+    let lim = limit as i64;
+    let mut out = Vec::new();
+    if q.chars().count() >= 3 {
+        let phrase = format!("\"{}\"", q.replace('"', "\"\""));
+        let mut stmt = conn.prepare(
+            // 注：FTS5 的 MATCH 左侧必须是 fts 表名本身，别名会被当列名解析报错
+            "SELECT c.id, c.hash, c.text, c.mime, c.pinned, c.image_path
+             FROM clips_fts JOIN clips c ON c.id = clips_fts.rowid
+             WHERE clips_fts MATCH ?1
+             ORDER BY bm25(clips_fts), c.ts DESC, c.id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![phrase, lim], row_to_clip)?;
+        for r in rows {
+            out.push(r?);
+        }
+    } else {
+        // LIKE 通配符转义：用户输入中的 % _ \ 均按字面匹配
+        let pat = format!(
+            "%{}%",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
+        let sql = format!(
+            "SELECT {CLIP_COLS} FROM clips
+             WHERE text LIKE ?1 ESCAPE '\\'
+             ORDER BY ts DESC, id DESC LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![pat, lim], row_to_clip)?;
+        for r in rows {
+            out.push(r?);
+        }
+    }
+    Ok(out)
+}
+
 pub fn delete(id: i64) -> Result<()> {
     let conn = connect()?;
     let img: Option<String> = conn
@@ -750,7 +834,7 @@ mod tests {
             let uv: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(uv, 2, "schema 应迁移到版本 2");
+            assert_eq!(uv, 3, "schema 应迁移到版本 3（FTS5 全文索引）");
         });
     }
 
@@ -1029,6 +1113,83 @@ mod tests {
             // 0 = 不限制；配额内不动任何条目
             assert_eq!(gc_images(0).unwrap(), 0);
             assert_eq!(gc_images(1024).unwrap(), 0);
+        });
+    }
+
+    #[test]
+    fn fts_migration_backfills_and_upgrade_is_lossless() {
+        with_env(|_| {
+            clear_db();
+            // 手工构造 v2 旧库文件（不经过 connect()，否则直接迁满）
+            {
+                // 裸开不会自建父目录（connect 才会）
+                std::fs::create_dir_all(Config::db_path().parent().unwrap()).unwrap();
+                let conn = Connection::open(Config::db_path()).unwrap();
+                conn.execute_batch(
+                    "CREATE TABLE clips (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT UNIQUE,
+                     text TEXT NOT NULL, mime TEXT DEFAULT 'text/plain', ts INTEGER NOT NULL,
+                     pinned INTEGER DEFAULT 0, size INTEGER, image_path TEXT);
+                     INSERT INTO clips(hash, text, mime, ts) VALUES
+                     ('h1', 'hello legacy world', 'text/plain', 1),
+                     ('h2', '旧库存量中文条目', 'text/plain', 2);
+                     PRAGMA user_version=2;",
+                )
+                .unwrap();
+            }
+            // 下一次 connect() 走 v3 迁移：回填后存量行可搜（中英文）
+            assert_eq!(search("legacy world", 10).unwrap().len(), 1);
+            assert_eq!(search("存量中文", 10).unwrap().len(), 1);
+            let n: i64 = connect()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 2, "旧库升级无损：行数不变");
+        });
+    }
+
+    #[test]
+    fn fts_stays_in_sync_with_insert_and_delete() {
+        with_env(|_| {
+            clear_db();
+            insert("the quick brown fox".into(), None).unwrap();
+            insert("剪贴板历史管理器条目".into(), None).unwrap();
+            assert_eq!(search("quick brown", 10).unwrap().len(), 1);
+            let hit = search("板历史", 10).unwrap().pop().unwrap();
+            // delete 行删 → 触发器同步出 FTS 索引
+            delete(hit.id).unwrap();
+            assert!(search("板历史", 10).unwrap().is_empty());
+            assert_eq!(search("quick brown", 10).unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn search_short_query_falls_back_to_like_and_escapes_wildcards() {
+        with_env(|_| {
+            clear_db();
+            insert("100% pure path example".into(), None).unwrap();
+            insert("ab filler".into(), None).unwrap();
+            // <3 字符走 LIKE；通配符按字面匹配（% _ 不展开）
+            assert_eq!(search("ab", 10).unwrap().len(), 1);
+            assert_eq!(search("%", 10).unwrap().len(), 1, "% 应按字面匹配");
+            assert_eq!(
+                search("_", 10).unwrap().len(),
+                0,
+                "_ 不作通配符且数据无字面 _"
+            );
+            assert!(search("", 10).unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn search_match_phrase_syntax_from_user_input_is_safe() {
+        with_env(|_| {
+            clear_db();
+            insert("quoted \"inner\" text".into(), None).unwrap();
+            // 双引号在 FTS 查询语法里有含义：翻倍转义后按字面命中且不 panic
+            assert_eq!(search("\"inner\"", 10).unwrap().len(), 1);
+            assert_eq!(search("inner", 10).unwrap().len(), 1);
+            // trigram 按字面索引标点：跨引号的 "inner text" 不命中（符合子串语义）
+            assert_eq!(search("inner text", 10).unwrap().len(), 0);
         });
     }
 }

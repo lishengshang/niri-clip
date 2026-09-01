@@ -40,6 +40,13 @@ const UI_FONT: Font = Font::with_name("JetBrainsMono Nerd Font");
 enum Message {
     /// 搜索框内容变化（widget 持焦点自管键入，winit 原生 IME）
     Query(String),
+    /// FTS 全库搜索完成（后台线程产出，任务 2.1）：query/gen 双新鲜度
+    /// 检查，过期结果直接丢弃（新请求已在途，避免闪烁旧候选）
+    SearchDone {
+        query: String,
+        gen: u64,
+        hits: Vec<store::Clip>,
+    },
     /// 全局键盘路由：仅处理导航/动作键，普通字符交给 widget
     Key(keyboard::Key, keyboard::Modifiers),
     /// 复制当前选中条目；Enter 复制后关闭窗口，Ctrl-Y 连续复制不退出
@@ -126,6 +133,11 @@ struct App {
     /// clips 更替代数：每次整表重载 +1，作为过滤缓存的失效键之一
     /// （pin/delete/copy 后列表都会整表重拉，长度可能不变，不能只比长度）
     clips_gen: u64,
+    /// FTS 全库搜索候选（任务 2.1，后台线程产出）+ 新鲜度标记：
+    /// (query, gen) 双匹配才使用，否则回落内存模糊过滤（无闪烁）
+    search_hits: Vec<store::Clip>,
+    search_hits_query: String,
+    search_hits_gen: u64,
     query: String,
     /// 过滤结果缓存：(代数, 查询, 命中的 clips 下标)。悬停/选中/复制等
     /// 高频事件都会调 filtered()，750 条全量评分排序 O(n·m) 不能每事件重算
@@ -177,6 +189,9 @@ impl App {
             search_mode: false,
             clips,
             clips_gen: 0,
+            search_hits: Vec::new(),
+            search_hits_query: String::new(),
+            search_hits_gen: 0,
             query: String::new(),
             filtered_cache: RefCell::new(None),
             selected: 0,
@@ -203,6 +218,36 @@ impl App {
         cfg.max_items
     }
 
+    /// FTS 全库搜索请求（任务 2.1）：查询 ≥3 字符才走 trigram MATCH
+    ///（trigram 索引对短查询无增益，回落内存模糊过滤）。发出即失效
+    /// 旧结果（回落内存过滤，不展示过期候选）；worker panic 静默空集
+    fn request_search(&mut self) -> Task<Message> {
+        if self.query.trim().chars().count() < 3 {
+            self.search_hits_query.clear();
+            return Task::none();
+        }
+        if self.search_hits_query == self.query && self.search_hits_gen == self.clips_gen {
+            return Task::none();
+        }
+        self.search_hits_query.clear();
+        let q_bg = self.query.trim().to_owned();
+        let gen = self.clips_gen;
+        // query/gen 打包进 T 侧返回值：run_bg 的 wrap 是 Fn，不能捕获移动
+        // 外部变量（iced Task::perform 的包装闭包可能被多次调用）
+        run_bg(
+            move || match store::search(&q_bg, store::SEARCH_LIMIT) {
+                Ok(hits) => (q_bg, gen, hits),
+                Err(_) => (q_bg, gen, Vec::new()),
+            },
+            |(query, gen, hits)| Message::SearchDone { query, gen, hits },
+            Message::SearchDone {
+                query: String::new(),
+                gen: 0,
+                hits: Vec::new(),
+            },
+        )
+    }
+
     /// 过滤后的视图：fzf 风格子序列匹配 + 简易评分排序
     /// （连续命中/词首加权，命中越早越好）；空查询保持存储序。
     /// 结果按 (clips 代数, 查询) 缓存——同一输入下悬停/选中/复制等
@@ -218,6 +263,27 @@ impl App {
         }
         let idxs: Vec<usize> = if self.query.is_empty() {
             (0..self.clips.len()).collect()
+        } else if self.search_hits_query == self.query
+            && self.search_hits_gen == self.clips_gen
+            && !self.search_hits.is_empty()
+        {
+            // FTS 全库候选（后台线程产出，任务 2.1）+ fzf 风格评分重排，
+            // 与内存过滤同 UX。候选是子串命中，fuzzy 子序列必命中；
+            // 极端大小写折叠差异导致全部不匹配时回落 FTS 相关度序
+            let q = self.query.to_lowercase();
+            let mut scored: Vec<(i32, usize)> = self
+                .search_hits
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| fuzzy_score(&q, &c.text).map(|s| (s, i)))
+                .collect();
+            if scored.is_empty() {
+                (0..self.search_hits.len()).collect()
+            } else {
+                // 稳定排序：并列保持 FTS bm25 相关度序
+                scored.sort_by_key(|s| Reverse(s.0));
+                scored.into_iter().map(|(_, i)| i).collect()
+            }
         } else {
             let q = self.query.to_lowercase();
             let mut scored: Vec<(i32, usize)> = self
@@ -322,8 +388,8 @@ impl App {
                 self.query = q;
                 self.set_selection(0);
                 self.confirm_delete = false;
-                // 重新过滤后回到顶部
-                return self.scroll_to_selected();
+                // 重新过滤后回到顶部；同时请求全库 FTS 候选（≥3 字符）
+                return Task::batch([self.scroll_to_selected(), self.request_search()]);
             }
             Message::Key(key, modifiers) => return self.on_key(key, modifiers),
             Message::Hover(idx) => {
@@ -409,7 +475,7 @@ impl App {
                 self.clips_gen += 1;
                 // Ctrl-P 等操作会重排行序：按 id 跟随选中，而非保留索引
                 self.relocate_selected();
-                return self.scroll_to_selected();
+                return Task::batch([self.scroll_to_selected(), self.request_search()]);
             }
             Message::DeleteReloaded(Some(clips)) => {
                 self.clips = clips;
@@ -421,9 +487,18 @@ impl App {
                 // 若 delete 失败（列表未变）则按 id 精确回到原选中
                 self.relocate_selected();
                 // 不发 scroll_to：保持滚动位置，选中由行上移自然锚定
+                return self.request_search();
             }
             Message::DeleteReloaded(None) => {}
             Message::ListReloaded(None) => {}
+            Message::SearchDone { query, gen, hits } => {
+                // 新鲜度检查：期间已继续输入或列表重载 → 丢弃过期结果
+                if query == self.query && gen == self.clips_gen {
+                    self.search_hits = hits;
+                    self.search_hits_query = query;
+                    self.search_hits_gen = gen;
+                }
+            }
             Message::Refocus => {
                 // 重新聚焦重拉：daemon 在窗口失焦期间捕获的新内容补进来。
                 // 不滚动、按 id 重定位——打开期间的浏览位置不受影响
