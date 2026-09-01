@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- **FTS5 全库搜索（2.1）**：schema v2→3 建 `clips_fts` 外部内容表 + 三触发器同步 + 存量回填（旧库升级无损，单测锁定）；tokenizer 选型 **trigram**（中英文任意子串均命中，推翻 ROADMAP 原定的 unicode61 起步，被拒备选与代价边界见 ADR-002）。`store::search`：≥3 字符走 MATCH 短语 + bm25 相关度，<3 字符退化为 LIKE 线性扫描（通配符转义、MATCH 查询引号翻倍转义）；GUI 搜索接入全库 MATCH——后台线程取候选（(query, gen) 双新鲜度缓存，过期丢弃不闪烁）+ fzf 风格评分重排保持 UX 一致；CLI 新增 `search <query> [--limit N]` 子命令（输出同 list-raw 5 列格式）；fzf TUI 内嵌过滤保持 fzf 自身模糊匹配。基准 `fts_search_300_of_10k` 实测 ≈0.16ms（预算 <50ms 的 1/300），bench 已入本地基准设施（进 CI 门禁待另行批准）
+
 ## v0.5.2 - 2026-09-01
 
 > 亮点：Phase 1「TUI 体验闭环」收官（PRIMARY 捕获、图片配额 GC、★ 删除

@@ -488,6 +488,37 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// 全库搜索（任务 2.1）：FTS5 trigram 候选 + 与 list-raw 相同的 5 列
+/// tab 格式，供脚本/调试；序号 1..n 即相关度序，无当前项置顶语义。
+/// fzf TUI 内嵌过滤保持 fzf 自身的模糊匹配（对加载的 300 行窗口），
+/// 全库 MATCH 走 native GUI 与本子命令（ADR-002 同步记录）
+pub fn search_raw(query: &str, limit: usize) -> Result<()> {
+    let cfg = Config::load();
+    let clips = store::search(query, limit)?;
+    let cur = store::current_hash();
+    use std::io::{self, Write};
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    for (idx, c) in clips.iter().enumerate() {
+        let (cur_mark, star) = row_marks(cur.as_deref(), c);
+        let preview = crate::preview::preview_text(c, cfg.preview_width);
+        if writeln!(
+            out,
+            "{}\t{}\t{}\t{}\t{}",
+            idx + 1,
+            cur_mark,
+            star,
+            c.id,
+            preview
+        )
+        .is_err()
+        {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// 子命令辅助：list-raw 供 fzf reload 调用（行格式须与 run_fzf 初始输入一致）
 pub fn list_raw() -> Result<()> {
     let cfg = Config::load();

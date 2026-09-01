@@ -23,6 +23,12 @@ enum Commands {
     /// 列出历史 (供 fzf reload 调用)
     #[command(name = "list-raw")]
     ListRaw,
+    /// 全库全文搜索（FTS5 trigram，中英文子串均命中；输出同 list-raw 格式）
+    Search {
+        query: String,
+        #[arg(long, default_value_t = store::SEARCH_LIMIT)]
+        limit: usize,
+    },
     /// 预览指定 id
     Preview { id: i64 },
     /// 复制指定 id 到剪贴板 (供 TUI 快选)
@@ -76,6 +82,7 @@ async fn main() -> Result<()> {
             outln!("查看日志： journalctl --user -u niri-clip -f");
         }
         Some(Commands::ListRaw) => tui::list_raw()?,
+        Some(Commands::Search { query, limit }) => tui::search_raw(&query, limit)?,
         Some(Commands::Preview { id }) => tui::preview_id(id)?,
         Some(Commands::Copy { id }) => {
             store::copy_to_clipboard(id)?;

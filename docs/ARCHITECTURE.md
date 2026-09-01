@@ -74,12 +74,13 @@ CREATE TABLE clips(
 );
 CREATE INDEX idx_hash ON clips(hash);
 CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
--- FTS5 占位表已删除：从未参与查询且需 trigger 才能正确同步；
--- 待 v1.0 应用内搜索功能一并以正确姿势重建
+-- FTS5 全文索引（v3，任务 2.1）：clips_fts 外部内容表（content='clips'，
+-- 不复制正文）+ insert/delete/update 三触发器同步，tokenizer=trigram
+-- （选型见 ADR-002：中英文子串均命中）
 ```
 
 - **schema 迁移**：`PRAGMA user_version` 驱动。0→1 建基表并清理 FTS 占位；
-  1→2 补 `image_path` 列。此后 schema 变更必须新增版本号与迁移步骤
+  1→2 补 `image_path` 列；2→3 建 clips_fts 全文索引并回填存量。此后 schema 变更必须新增版本号与迁移步骤
 - **插入原子性**：SELECT 去重检查 + INSERT 包在 `BEGIN IMMEDIATE` 事务里。
   否则多进程并发（典型：fzf 选中旧条目 → wl-copy 写回 → daemon 同时捕获）
   双双通过检查后一方撞 UNIQUE 报错被静默吞掉
@@ -88,7 +89,13 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 - **菜单直查**：`list(min(max_items, TUI_LIMIT))`，TUI_LIMIT=300。
   进程内缓存层已移除——fzf 每次 reload-sync spawn 全新 `list-raw` 进程，
   OnceLock 缓存在该路径从未生效；实测 list 300 <11ms 无需缓存
-- **基准设施（1.6）**：`crates/niri-clip-core/benches/store.rs`（criterion，
+- **全库搜索（2.1）**：`store::search` ≥3 字符走 `clips_fts MATCH` 短语查询
+  + bm25 相关度（FTS5 的 MATCH 左侧必须是 fts 表名本身，别名会被当列名）；
+  <3 字符退化为 LIKE 线性扫描（trigram 对短查询无增益，通配符已转义）。
+  GUI 搜索经后台线程取候选（(query, gen) 双新鲜度缓存，过期丢弃），再以
+  fzf 风格评分重排保持 UX 一致；CLI 暴露 `search` 子命令；fzf TUI 内嵌
+  过滤保持 fzf 自身模糊匹配。实测 `fts_search_300_of_10k` ≈0.16ms
+  （预算 <50ms）。trigram 按字面索引标点：跨标点短语不命中（子串语义）
   仅 dev 依赖、裁掉 plotters/rayon 特性，闭包 +11 crate）。种子经公开入库
   API 写入临时 XDG 环境（与真实捕获路径同构，schema 演进不破坏基准）。
   实测基线（2026-08-31，本机 10k 条库）：`list_300_of_10k` ≈0.95ms（含

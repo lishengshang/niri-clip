@@ -29,7 +29,7 @@
 |---|---|---|
 | 常驻内存 | <40MB | ~40MB |
 | 10k 条 list | <11ms | ✅ |
-| 10k 条 FTS 搜索（v0.6 后） | <50ms | 待建 |
+| 10k 条 FTS 搜索（v0.6 后） | <50ms | ✅ 实测 0.16ms（fts_search_300_of_10k，trigram） |
 | release 编译时间 | <120s（--locked；2026-09-01 重估，原 <60s 定于依赖树远小的早期） | 主包 77s / GUI 增量 108s ✅（notify-send 交换后二测，原 96s/123s） |
 | 依赖闭包 | wl-clipboard-rs+wayland-client ~40 crate 为已知大头，新增前先 `cargo tree` 审计 | CLI 主包 108 / GUI 247 / workspace 269（1.8 审计 + image 收窄 + notify-send 交换后，自 385 累计 -116） |
 
@@ -119,7 +119,7 @@
 
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
-| 2.1 | FTS5 全文搜索 | `user_version` 迁移新建 `clips_fts` 虚拟表 + 触发器同步；TUI 搜索走 MATCH | 10k 条中文/英文搜索 <50ms；旧库升级无损 |
+| 2.1 | ✅ FTS5 全文搜索 | `user_version` v2→3：clips_fts 外部内容表 + 三触发器同步 + 存量回填；tokenizer 选型 **trigram**（中文子串可用，推翻 unicode61 起步计划，见 ADR-002）；`store::search`（MATCH + bm25，<3 字符 LIKE 回退）；GUI 全库搜索接 MATCH（后台线程 + (query,gen) 新鲜度缓存）、CLI `search` 子命令；fzf TUI 内嵌过滤保持 fzf 自身模糊匹配（300 行窗口） | 10k 条中英文搜索 <50ms（实测 0.16ms）；旧库升级无损（单测锁定） |
 | 2.2 | 文本 hash 统一为 blake3 | DefaultHasher 跨编译器/进程不稳定，**v1.0 硬前置**：`user_version` 迁移中全表重算 blake3，迁移事务内合并重复（否则去重翻倍）后重建 UNIQUE 索引 | 迁移前后条目数只减不增；跨重启/跨机器去重稳定；blake3 新增依赖过开销审计 |
 | 2.3 | 数据统计与维护命令 | `niri-clip stats`（条数/体积/图片占比）、`vacuum`、`prune --before <date>` | 用户可自助管理磁盘占用 |
 | 2.4 | 历史导出/备份 | `export --json` 全量导出，配合 VACUUM INTO 快照 | 备份可回灌（`import`） |

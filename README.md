@@ -108,7 +108,7 @@ max_image_total_bytes = 209715200 # v0.5.1 images/ 总量配额（字节），�
 |---|---|---|
 | 语言 | Rust 1.75+, Tokio | 异步 daemon, 无 GC |
 | Wayland | wl-paste --watch 事件源 + wl-clipboard-rs | 变化即捕获；轮询仅兜底 |
-| 存储 | rusqlite + SQLite WAL | 单文件 `~/.local/state/niri-clip/db.sqlite`，`PRAGMA user_version` 版本化迁移（FTS5 全文搜索列入 v1.0 应用内搜索一并实现） |
+| 存储 | rusqlite + SQLite WAL | 单文件 `~/.local/state/niri-clip/db.sqlite`，`PRAGMA user_version` 版本化迁移；FTS5 全文索引（trigram，中英文子串搜索，见 ADR-002） |
 | 去重 | 文本 DefaultHasher+len / 图片 FNV1a64+mime+len | 图片指纹跨进程稳定；文本 hash 计划随 v1.0 统一到稳定算法 |
 | TUI | fzf 0.71+ / fuzzel | --track --id-nth 不跳顶；低于 0.71 自动回退 fuzzel |
 | 预览 | chafa, kitty icat | 图片终端渲染 |
@@ -125,6 +125,9 @@ niri-clip daemon      # 后台监听
 niri-clip tui         # 打开历史 (Mod+V)
 niri-clip store       # 从 stdin 入库 (供 wl-paste --watch)
 niri-clip list-raw    # 供 fzf reload
+niri-clip search <query> [--limit N]
+                      # 全库全文搜索（FTS5 trigram，中英文子串；≥3 字符
+                      # 走索引，更短退化为 LIKE）
 niri-clip preview <id>
 niri-clip pin <id>    # 切换固定
 niri-clip delete <id> [-f]   # -f 跳过星标确认（脚本/无头环境）

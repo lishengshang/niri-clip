@@ -69,5 +69,16 @@ fn bench_sqlite(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_list, bench_sqlite);
+/// FTS5 全文搜索（任务 2.1）：端到端含 connect，种子文本中英文混合，
+/// 查询为 3 字中文短语（trigram 最短有效查询，最常见形态）。对应预算表
+/// 「10k 条 FTS 搜索」< 50ms
+fn bench_fts_search(c: &mut Criterion) {
+    bench_env();
+    store::search("基准中", 300).expect("warmup");
+    c.bench_function("fts_search_300_of_10k", |b| {
+        b.iter(|| store::search("基准中", 300).unwrap())
+    });
+}
+
+criterion_group!(benches, bench_list, bench_sqlite, bench_fts_search);
 criterion_main!(benches);
