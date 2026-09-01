@@ -2,7 +2,7 @@
 # 原生 GUI 分包（路线图 M5.4）：iced xdg 窗口，受 niri window-rule 约束。
 # CLI 由 niri-clip 主包承载（gui 依赖链需要 libxkbcommon，故独立分包）。
 pkgname=niri-clip-gui
-pkgver=0.5.1
+pkgver=0.5.2
 pkgrel=1
 pkgdesc="niri-clip 原生窗口前端（iced xdg 窗口，无终端秒开，支持中文 IME）"
 arch=('x86_64' 'aarch64')
