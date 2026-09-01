@@ -16,6 +16,9 @@ repository = "https://github.com/lishengshang/niri-clip"
 [workspace.dependencies]
 niri-clip-core = { path = "crates/niri-clip-core" }
 anyhow = "1"
+# 任务 2.2：文本去重指纹（DefaultHasher 跨编译器不稳定，见 ADR-003）。
+# default 仅 std：纯 Rust + 运行时 SIMD 检测，零传递依赖
+blake3 = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive"] }
 # 任务 1.7：completions/man 子命令的生成器（仅 CLI 打包链路使用）

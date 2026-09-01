@@ -9,6 +9,16 @@
 
 ### Added
 - **FTS5 全库搜索（2.1）**：schema v2→3 建 `clips_fts` 外部内容表 + 三触发器同步 + 存量回填（旧库升级无损，单测锁定）；tokenizer 选型 **trigram**（中英文任意子串均命中，推翻 ROADMAP 原定的 unicode61 起步，被拒备选与代价边界见 ADR-002）。`store::search`：≥3 字符走 MATCH 短语 + bm25 相关度，<3 字符退化为 LIKE 线性扫描（通配符转义、MATCH 查询引号翻倍转义）；GUI 搜索接入全库 MATCH——后台线程取候选（(query, gen) 双新鲜度缓存，过期丢弃不闪烁）+ fzf 风格评分重排保持 UX 一致；CLI 新增 `search <query> [--limit N]` 子命令（输出同 list-raw 5 列格式）；fzf TUI 内嵌过滤保持 fzf 自身模糊匹配。基准 `fts_search_300_of_10k` 实测 ≈0.16ms（预算 <50ms 的 1/300），bench 已入本地基准设施（进 CI 门禁待另行批准）
+- **文本 hash 统一为 blake3（2.2）**：schema v3→4 一次性全表重算——
+  DefaultHasher 跨编译器/进程不稳定（rustc 升级即变），存量库已存在
+  "同文本不同 hash"的翻倍形态隐患，v1.0 数据可携（任务 2.4 导出/回灌）
+  的硬前置。迁移事务（BEGIN IMMEDIATE + 事务内重读版本防双进程竞态）
+  内按 blake3(text) 分组合并重复（幸存行 = ts 最大，pinned 取 OR，
+  image_path 继承），DELETE 经 FTS 触发器自动同步；迁移前 `VACUUM INTO`
+  快照 `state/db.sqlite.pre-blake3`（快照失败即放弃迁移），迁移后重映射
+  ▶ 当前项指针；防翻倍断言单测锁定（条目数只减不增 / 文本行全量重算 /
+  图片 FNV 指纹不动 / FTS 同步 / 幂等）。选型与被拒备选见 ADR-003；
+  依赖闭包 +3 crate（零传递依赖的 blake3 栈，ARCHITECTURE §9）
 
 ## v0.5.2 - 2026-09-01
 

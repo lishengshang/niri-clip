@@ -77,10 +77,15 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 -- FTS5 全文索引（v3，任务 2.1）：clips_fts 外部内容表（content='clips'，
 -- 不复制正文）+ insert/delete/update 三触发器同步，tokenizer=trigram
 -- （选型见 ADR-002：中英文子串均命中）
+-- 文本 hash = blake3(text) 64 字符 hex（v4，任务 2.2，ADR-003）：
+-- DefaultHasher 跨编译器不稳定，存量行 v3→4 一次性重算合并；
+-- 图片 hash 仍为 img: 前缀 FNV-64 指纹（image_content_key，本就稳定）
 ```
 
 - **schema 迁移**：`PRAGMA user_version` 驱动。0→1 建基表并清理 FTS 占位；
-  1→2 补 `image_path` 列；2→3 建 clips_fts 全文索引并回填存量。此后 schema 变更必须新增版本号与迁移步骤
+  1→2 补 `image_path` 列；2→3 建 clips_fts 全文索引并回填存量；3→4 文本 hash
+  全表重算为 blake3（事务内合并重复 + 前置 VACUUM INTO 快照 + ▶ 指针重映射，
+  见 ADR-003）。此后 schema 变更必须新增版本号与迁移步骤
 - **插入原子性**：SELECT 去重检查 + INSERT 包在 `BEGIN IMMEDIATE` 事务里。
   否则多进程并发（典型：fzf 选中旧条目 → wl-copy 写回 → daemon 同时捕获）
   双双通过检查后一方撞 UNIQUE 报错被静默吞掉
@@ -146,10 +151,10 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 
 | 包 | crate 数 | 说明 |
 |---|---|---|
-| niri-clip（CLI 主包） | 108 | 审计基线 171；notify-send 交换（决策项②）后 -63 |
-| niri-clip-core | 88 | 主包子集（基线 150） |
-| niri-clip-gui | 247 | 审计前 363：image 收窄 -63、notify-send -53 |
-| workspace 总计 | 269 | 审计前 385 |
+| niri-clip（CLI 主包） | 112 | 审计基线 171；notify-send 交换 -63；blake3（2.2）+3 |
+| niri-clip-core | 92 | 主包子集（基线 150） |
+| niri-clip-gui | 250 | 审计前 363：image 收窄 -63、notify-send -53 |
+| workspace 总计 | 272 | 审计前 385 |
 
 **大头分解：**
 
@@ -164,6 +169,10 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
   action 回调需换回库方案
 - `wl-clipboard-rs` → 44（内含 wayland-client 22）：功能必需，无裁剪空间，与
   ROADMAP 预估 ~40 一致
+- `blake3`（2.2，2026-09-01）：default 仅 std，纯 Rust + 运行时 SIMD 检测，
+  闭包 +3 crate（blake3/constant_time_eq/cpufeatures），零构建链新增；
+  闭包 +3 之外的 +1 为 Cargo.lock 传递版本漂移，与本任务无关。bench 无回归
+  （list_300_of_10k 1.02ms，预算 11ms；hash 在捕获热路径，blake3 吞吐 GB/s 级）
 - `iced` → 258：仅 GUI 包引用，不进主包闭包
 - `image` → 收窄后小闭包（见下）；`chrono` default 的 oldtime/wasmbind 为
   无操作特性（原生目标零成本），不动

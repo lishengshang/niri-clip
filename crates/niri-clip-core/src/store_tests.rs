@@ -118,7 +118,7 @@ fn busy_timeout_is_set_on_connection() {
         let uv: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(uv, 3, "schema 应迁移到版本 3（FTS5 全文索引）");
+        assert_eq!(uv, 4, "schema 应迁移到版本 4（FTS5 + blake3 统一）");
     });
 }
 
@@ -474,5 +474,130 @@ fn search_match_phrase_syntax_from_user_input_is_safe() {
         assert_eq!(search("inner", 10).unwrap().len(), 1);
         // trigram 按字面索引标点：跨引号的 "inner text" 不命中（符合子串语义）
         assert_eq!(search("inner text", 10).unwrap().len(), 0);
+    });
+}
+
+/// 任务 2.2（v3→v4）：防翻倍断言。手工构造含"同文本不同 legacy hash"
+/// 的 v3 旧库（DefaultHasher 跨编译器不稳定的真实翻倍形态），锁定：
+/// 条目数只减不增、文本行全量重算、图片指纹不动、FTS 同步、指针重映射、
+/// 幂等、快照落盘（ROADMAP 风险表：迁移出错致数据翻倍/丢失）
+#[test]
+fn blake3_migration_merges_duplicates_and_never_doubles() {
+    with_env(|_| {
+        clear_db();
+        // 裸开手工建 v3 schema（不经 connect()，否则直接迁满）
+        std::fs::create_dir_all(Config::db_path().parent().unwrap()).unwrap();
+        let conn = Connection::open(Config::db_path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE clips (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT UNIQUE,
+             text TEXT NOT NULL, mime TEXT DEFAULT 'text/plain', ts INTEGER NOT NULL,
+             pinned INTEGER DEFAULT 0, size INTEGER, image_path TEXT);
+             CREATE VIRTUAL TABLE clips_fts USING fts5(
+                 text, content='clips', content_rowid='id', tokenize='trigram');
+             CREATE TRIGGER clips_fts_ai AFTER INSERT ON clips BEGIN
+                 INSERT INTO clips_fts(rowid, text) VALUES (new.id, new.text); END;
+             CREATE TRIGGER clips_fts_ad AFTER DELETE ON clips BEGIN
+                 INSERT INTO clips_fts(clips_fts, rowid, text)
+                 VALUES ('delete', old.id, old.text); END;
+             CREATE TRIGGER clips_fts_au AFTER UPDATE OF text ON clips BEGIN
+                 INSERT INTO clips_fts(clips_fts, rowid, text)
+                 VALUES ('delete', old.id, old.text);
+                 INSERT INTO clips_fts(rowid, text) VALUES (new.id, new.text); END;
+             INSERT INTO clips(hash, text, mime, ts, pinned) VALUES
+                 ('legacy-a', 'duplicated text', 'text/plain', 100, 1),
+                 ('legacy-b', 'duplicated text', 'text/plain', 200, 0),
+                 ('legacy-c', 'unique text', 'text/plain', 300, 0),
+                 ('legacy-d', '中文存量条目', 'text/plain', 400, 0);
+             INSERT INTO clips(hash, text, mime, ts, size) VALUES
+                 ('img:image/png:abc-10', '[image image/png 10 bytes]', 'image/png', 500, 10);
+             PRAGMA user_version=3;",
+        )
+        .unwrap();
+        // ▶ 指针指向将被合并掉的 legacy-a：迁移后必须重映射到幸存行
+        std::fs::create_dir_all(Config::state_dir()).unwrap();
+        std::fs::write(Config::state_dir().join("current"), "legacy-a").unwrap();
+        drop(conn);
+
+        let conn = connect().unwrap();
+        let ver: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 4, "迁移必须推进到 v4");
+
+        // 防翻倍断言：5 行（4 文本 + 1 图片）合并 1 条重复 → 4 行，只减不增
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 4, "合并重复后条目数只减不增");
+
+        // 幸存行 = ts 最大那份（legacy-b），hash 重算为 blake3 且星标取 OR
+        let (hash, pinned): (String, i64) = conn
+            .query_row(
+                "SELECT hash, pinned FROM clips WHERE text='duplicated text'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            hash,
+            hash_text("duplicated text"),
+            "文本 hash 必须重算为 blake3"
+        );
+        assert_eq!(pinned, 1, "任一重复行被星标则合并后保留星标");
+
+        // 全部文本行 hash 与 blake3(text) 一致；图片指纹原样不动
+        let mut stmt = conn
+            .prepare("SELECT hash, text FROM clips WHERE mime='text/plain'")
+            .unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        while let Some(r) = rows.next().unwrap() {
+            let h: String = r.get(0).unwrap();
+            let t: String = r.get(1).unwrap();
+            assert_eq!(h, hash_text(&t), "所有文本行均须重算");
+        }
+        drop(rows);
+        drop(stmt);
+        let img: String = conn
+            .query_row("SELECT hash FROM clips WHERE mime='image/png'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(img, "img:image/png:abc-10", "图片 FNV 指纹不走 blake3");
+
+        // FTS 由触发器自动同步：被并行出索引，幸存行中英文均可搜
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clips_fts WHERE clips_fts MATCH 'duplicated'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "被并行已从 FTS 删除，幸存行可搜");
+        let hits: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM clips_fts WHERE clips_fts MATCH '中文存量'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hits, 1, "中文行迁移后仍可搜");
+
+        // ▶ 指针重映射到幸存行新 hash
+        let cur = std::fs::read_to_string(Config::state_dir().join("current")).unwrap();
+        assert_eq!(cur.trim(), hash, "指针必须重映射，否则 ▶ 静默失效");
+
+        // 快照必须落盘（事后回滚保险）
+        assert!(
+            Config::state_dir().join("db.sqlite.pre-blake3").exists(),
+            "迁移前 VACUUM INTO 快照必须存在"
+        );
+
+        // 幂等：二次 connect 不重复迁移、不再翻倍
+        drop(conn);
+        let conn = connect().unwrap();
+        let n2: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n2, 4, "二次 connect 幂等");
     });
 }
