@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod daemon;
+pub(crate) mod migrate;
 pub mod notify;
 pub mod preview;
 pub mod store;
