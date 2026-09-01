@@ -11,6 +11,7 @@ pkgbase = niri-clip
 	makedepends = git
 	depends = wl-clipboard
 	depends = fzf>=0.71
+	depends = libnotify
 	optdepends = fuzzel: 后备选择器（无 fzf 环境自动回退）
 	optdepends = kitty: kitty icat 图片预览
 	optdepends = chafa: 图形终端图片预览

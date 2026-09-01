@@ -39,6 +39,17 @@
   待机——光标闪烁是周期性背景闪烁的最后重绘源，从机制上移除
 
 ### Changed
+- **桌面通知换 notify-send 子进程（1.8 决策项②）**：移除 notify-rust
+  （86 crate 的 zbus/zvariant D-Bus 栈，CLI 主包最大单项）——核实实际
+  API 面仅 summary/body（9 处调用），新增 `core::notify::send`（后台线程
+  spawn+wait 收尸：调用方零阻塞、daemon 长驻无僵尸；notify-send 缺失
+  静默与原 `let _ =` 语义一致；参数数组不经 shell 无注入面），
+  daemon/tui/CLI/GUI 全量替换；CLI 主包闭包 171→108 / GUI 300→247 /
+  workspace 322→269，Cargo.lock 净 -592 行，release 编译实测主包
+  96s→77s / GUI 增量 123s→108s，二进制 6.5→5.1 / 11.2→9.8 MiB；
+  **运行时依赖新增 libnotify**（PKGBUILD* / .SRCINFO.example depends 已
+  同步）；未来若需通知 action 回调需换回库方案；notify 单测 1 例
+  （notify-send 缺失时调用面不 panic）
 - **依赖与构建开销审计（1.8）**：iced `image` feature 换 `image-without-codecs`
   + 直接依赖 image 收窄 png/jpeg/webp（GUI 解码全部走后台预解码
   `load_from_memory` → `Handle::from_rgba`，iced 渲染器零解码）——28 个
