@@ -43,10 +43,12 @@ impl App {
                     " "
                 };
                 let star = if clip.pinned { "◆" } else { " " };
-                let quick = if self.query.is_empty() && idx < 9 {
-                    format!("{}", idx + 1)
-                } else {
-                    " ".to_string()
+                // 快选序号任意状态都显示：搜索态裸数字被输入框接管，
+                // 序号对应 Alt+1-9,0（见 update.rs 快选分支，0 = 第 10 行）
+                let quick = match idx {
+                    0..=8 => format!("{}", idx + 1),
+                    9 => "0".to_string(),
+                    _ => " ".to_string(),
                 };
                 let prefix = format!("{cursor} {quick} {cur_mark}{star} ");
                 // ↵（U+21B5）字形覆盖差（tofu），GUI 侧换成 ⏎
