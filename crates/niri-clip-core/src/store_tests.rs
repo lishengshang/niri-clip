@@ -601,3 +601,174 @@ fn blake3_migration_merges_duplicates_and_never_doubles() {
         assert_eq!(n2, 4, "二次 connect 幂等");
     });
 }
+
+// =====================================================================
+// 任务 2.3：stats / vacuum / prune
+// =====================================================================
+
+#[test]
+fn stats_counts_and_sizes_match_disk() {
+    with_env(|_| {
+        clear_db();
+        insert("hello world".to_string(), None).unwrap();
+        insert("second entry".to_string(), None).unwrap();
+        let img = insert_image("image/png", &[7u8; 100]).unwrap().unwrap();
+        let conn = connect().unwrap();
+        conn.execute(
+            "UPDATE clips SET pinned=1 WHERE hash=?1",
+            params![hash_text("hello world")],
+        )
+        .unwrap();
+        drop(conn);
+
+        let s = stats().unwrap();
+        assert_eq!(s.total, 3);
+        assert_eq!(s.pinned, 1);
+        assert_eq!(s.image_entries, 1);
+        assert_eq!(
+            s.text_bytes,
+            ("hello world".len() + "second entry".len()) as i64
+        );
+        assert!(s.db_bytes > 0, "库体积应为磁盘实测值");
+        assert_eq!(
+            s.images_disk_bytes,
+            std::fs::metadata(&img.path).unwrap().len(),
+            "images 目录体积应为实测值"
+        );
+        assert!(s.oldest_ts.is_some() && s.newest_ts.is_some());
+    });
+}
+
+#[test]
+fn vacuum_runs_and_keeps_db_queryable() {
+    with_env(|_| {
+        clear_db();
+        for i in 0..50 {
+            insert(format!("entry {i} payload"), None).unwrap();
+        }
+        let conn = connect().unwrap();
+        conn.execute("DELETE FROM clips WHERE id % 2 = 0", [])
+            .unwrap();
+        drop(conn);
+
+        let (before, after) = vacuum().unwrap();
+        assert!(after <= before, "VACUUM 后库不得变大: {before} -> {after}");
+        // 压缩后数据完好、可正常查询
+        assert_eq!(list(100).unwrap().len(), 25);
+    });
+}
+
+#[test]
+fn prune_deletes_old_only_and_protects_pinned_and_current() {
+    with_env(|_| {
+        clear_db();
+        let old: i64 = 1_000; // 1970 年，早于任何现实 cutoff
+        let img = insert_image("image/png", &[9u8; 10]).unwrap().unwrap();
+        for t in ["old plain", "old pinned", "old current", "fresh plain"] {
+            insert(t.to_string(), None).unwrap();
+        }
+        let conn = connect().unwrap();
+        for h in ["old plain", "old pinned", "old current"] {
+            conn.execute(
+                "UPDATE clips SET ts=?1 WHERE hash=?2",
+                params![old, hash_text(h)],
+            )
+            .unwrap();
+        }
+        conn.execute("UPDATE clips SET ts=?1 WHERE id=?2", params![old, img.id])
+            .unwrap();
+        conn.execute(
+            "UPDATE clips SET pinned=1 WHERE hash=?1",
+            params![hash_text("old pinned")],
+        )
+        .unwrap();
+        drop(conn);
+        // 入库路径已把指针刷到 "fresh plain"（最后一条），显式指回受保护的旧条目
+        touch_current(&hash_text("old current"));
+
+        let cutoff = parse_local_date_ms("2026-08-01").unwrap();
+        let out = prune_before(cutoff, false).unwrap();
+        // 应删：old plain + 旧图片；受保护：old pinned（星标）/ old current（▶）
+        assert_eq!(out.deleted, 2);
+        assert_eq!(out.images_deleted, 1);
+        assert_eq!(out.freed_bytes, ("old plain".len() + 10) as i64);
+        assert!(!img.path.exists(), "被 prune 条目的数据文件应随行删除");
+
+        let conn = connect().unwrap();
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 3, "幸存行应为 pinned/current/fresh 三条");
+        drop(conn);
+
+        // FTS 触发器同步：被删文本不再可搜，幸存者仍可搜
+        assert!(search("old plain", 10).unwrap().is_empty());
+        assert_eq!(search("old pinned", 10).unwrap().len(), 1);
+        assert_eq!(search("old current", 10).unwrap().len(), 1);
+        assert_eq!(search("fresh plain", 10).unwrap().len(), 1);
+
+        // 指针不得被 prune 波及
+        assert_eq!(current_hash().unwrap(), hash_text("old current"));
+    });
+}
+
+#[test]
+fn prune_dry_run_reports_without_deleting() {
+    with_env(|_| {
+        clear_db();
+        let old: i64 = 1_000;
+        let img = insert_image("image/png", &[9u8; 10]).unwrap().unwrap();
+        insert("old plain".to_string(), None).unwrap();
+        insert("fresh plain".to_string(), None).unwrap();
+        let conn = connect().unwrap();
+        conn.execute(
+            "UPDATE clips SET ts=?1 WHERE hash=?2",
+            params![old, hash_text("old plain")],
+        )
+        .unwrap();
+        conn.execute("UPDATE clips SET ts=?1 WHERE id=?2", params![old, img.id])
+            .unwrap();
+        drop(conn);
+
+        let cutoff = parse_local_date_ms("2026-08-01").unwrap();
+        let out = prune_before(cutoff, true).unwrap();
+        assert_eq!(out.deleted, 2);
+        assert_eq!(out.images_deleted, 1);
+        assert_eq!(out.freed_bytes, ("old plain".len() + 10) as i64);
+
+        // 数据原封不动
+        let conn = connect().unwrap();
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(cnt, 3, "dry-run 不得删行");
+        drop(conn);
+        assert!(img.path.exists(), "dry-run 不得删数据文件");
+
+        // 预览数字与真删一致
+        let out2 = prune_before(cutoff, false).unwrap();
+        assert_eq!(out2.deleted, out.deleted);
+        assert_eq!(out2.images_deleted, out.images_deleted);
+        assert_eq!(out2.freed_bytes, out.freed_bytes);
+        assert!(!img.path.exists());
+    });
+}
+
+#[test]
+fn parse_local_date_ms_uses_local_midnight_and_rejects_garbage() {
+    use chrono::TimeZone;
+    let want = chrono::Local
+        .with_ymd_and_hms(2026, 8, 1, 0, 0, 0)
+        .single()
+        .unwrap()
+        .timestamp_millis();
+    assert_eq!(parse_local_date_ms("2026-08-01").unwrap(), want);
+    assert_eq!(
+        parse_local_date_ms(" 2026-08-01 ").unwrap(),
+        want,
+        "容忍首尾空白"
+    );
+    assert!(parse_local_date_ms("not-a-date").is_err());
+    assert!(parse_local_date_ms("2026-13-01").is_err(), "非法月份应报错");
+    assert!(parse_local_date_ms("").is_err());
+}

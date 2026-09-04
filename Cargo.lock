@@ -1720,6 +1720,7 @@ name = "niri-clip"
 version = "0.5.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "clap_complete",
  "clap_mangen",

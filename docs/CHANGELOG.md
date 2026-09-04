@@ -19,6 +19,17 @@
   ▶ 当前项指针；防翻倍断言单测锁定（条目数只减不增 / 文本行全量重算 /
   图片 FNV 指纹不动 / FTS 同步 / 幂等）。选型与被拒备选见 ADR-003；
   依赖闭包 +3 crate（零传递依赖的 blake3 栈，ARCHITECTURE §9）
+- **数据统计与维护命令（2.3）**：`stats`（条数/星标/图片条目计数，库体积 =
+  db.sqlite + -wal（-shm 为瞬态共享内存不计），图片体积 = images/ 目录磁盘
+  实测，图片占比与最旧/最新条目日期）；`vacuum`（VACUUM 重建库文件 +
+  `wal_checkpoint(TRUNCATE)`，断开连接后测"后"体积，返回前后对比——daemon
+  常驻连接下并发写在途时按 busy_timeout 等待，不中断服务）；`prune --before
+  <YYYY-MM-DD>`（按本地时区日历日零点切分，非 UTC——否则边界条目多删/少删
+  8 小时；星标与当前项 ▶ 受保护，与图片 GC（1.3）保护语义一致；`--dry-run`
+  仅预览不动数据；行删经 FTS 触发器同步索引，图片数据文件随行删除，残留由
+  孤儿清扫兜底；SUM 统计与 DELETE 同处 BEGIN IMMEDIATE 事务防并发失真）。
+  5 个新单测锁定保护语义/dry-run/FTS 同步/日期解析/体积口径；CLI 新增 chrono
+  直接依赖（原为 core 传递引用，闭包零增量，ARCHITECTURE §9）
 
 ## v0.5.2 - 2026-09-01
 

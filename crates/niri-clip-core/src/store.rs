@@ -379,6 +379,178 @@ pub fn gc_images(max_bytes: u64) -> Result<usize> {
     Ok(n)
 }
 
+// =====================================================================
+// v0.6（任务 2.3）：数据统计与维护（stats / vacuum / prune）
+//
+// 验收标准是"用户可自助管理磁盘占用"。两个磁盘口径：
+// - 库体积 = db.sqlite + -wal。WAL 是未检查点的数据载荷，要计；
+//   -shm 是固定 32 KiB 的瞬态共享内存映射，不是数据，不计
+// - 图片体积 = images/ 目录磁盘实测。DB 内 size 列是入库时刻的字节数，
+//   与磁盘真值之间隔着孤儿文件与失败的行删清理，统计以实测为准
+// =====================================================================
+
+fn db_disk_bytes() -> u64 {
+    let p = Config::db_path();
+    // 只计主文件与 WAL；-shm 是固定 32 KiB 的瞬态共享内存映射，非数据载荷
+    // ——vacuum 若在连接存活时测量，shm 会把"后"体积顶大 32 KiB 造成假增长
+    [p.clone(), p.with_extension("sqlite-wal")]
+        .iter()
+        .filter_map(|f| std::fs::metadata(f).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| e.metadata().ok())
+                .filter(|m| m.is_file())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+#[derive(Debug)]
+pub struct StoreStats {
+    pub total: i64,
+    pub pinned: i64,
+    pub image_entries: i64,
+    /// 文本条目载荷字节（size 列）
+    pub text_bytes: i64,
+    pub db_bytes: u64,
+    pub images_disk_bytes: u64,
+    pub oldest_ts: Option<i64>,
+    pub newest_ts: Option<i64>,
+}
+
+pub fn stats() -> Result<StoreStats> {
+    let conn = connect()?;
+    let one = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get(0))?) };
+    let total = one("SELECT COUNT(*) FROM clips")?;
+    let pinned = one("SELECT COUNT(*) FROM clips WHERE pinned=1")?;
+    let image_entries = one("SELECT COUNT(*) FROM clips WHERE image_path IS NOT NULL")?;
+    let text_bytes = one("SELECT COALESCE(SUM(size),0) FROM clips WHERE image_path IS NULL")?;
+    let (oldest_ts, newest_ts) = conn.query_row("SELECT MIN(ts), MAX(ts) FROM clips", [], |r| {
+        Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, Option<i64>>(1)?))
+    })?;
+    Ok(StoreStats {
+        total,
+        pinned,
+        image_entries,
+        text_bytes,
+        db_bytes: db_disk_bytes(),
+        images_disk_bytes: dir_size(&Config::images_dir()),
+        oldest_ts,
+        newest_ts,
+    })
+}
+
+/// VACUUM 重建库文件并截断 WAL，返回 (前, 后) 磁盘字节。
+/// daemon 常驻连接下若有并发写事务在途，VACUUM 会在 busy_timeout（5s）
+/// 内等待而非令 daemon 中断；超时报错即可重试。
+pub fn vacuum() -> Result<(u64, u64)> {
+    let before = db_disk_bytes();
+    let after = {
+        let conn = connect()?;
+        conn.execute_batch("VACUUM")?;
+        // VACUUM 本身会写新页进 WAL，不截断的话"后"口径虚高；
+        // 连接须先关闭再测量（关闭时残余 WAL 自动检查点清除）
+        let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+        drop(conn);
+        db_disk_bytes()
+    };
+    Ok((before, after))
+}
+
+#[derive(Debug)]
+pub struct PruneOutcome {
+    pub deleted: usize,
+    pub images_deleted: usize,
+    /// 回收载荷字节（文本 = 文本字节；图片 = 数据文件字节，即 size 列）。
+    /// 库文件体积的回落要等 VACUUM，这里只是载荷口径
+    pub freed_bytes: i64,
+}
+
+/// prune（任务 2.3）：删除 ts < cutoff_ms 的旧条目。保护语义与图片 GC
+/// （1.3）一致：星标不删；当前项（state/current 指针 ≈ Ctrl+V 会粘出的
+/// 内容）不删——删了用户粘贴会落空。dry_run 只统计，不动任何数据。
+/// 行删经 FTS 触发器同步索引；图片数据文件随行删除，清理失败不阻断
+/// （残留由 prune_orphan_images 兜底，同 delete/enforce_max_items 口径）。
+pub fn prune_before(cutoff_ms: i64, dry_run: bool) -> Result<PruneOutcome> {
+    let mut conn = connect()?;
+    let cur_hash = current_hash().unwrap_or_default();
+    let guard = "ts < ?1 AND pinned=0 AND hash != ?2";
+    if dry_run {
+        let (n, img, bytes) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*), COUNT(image_path), COALESCE(SUM(size),0)
+                 FROM clips WHERE {guard}"
+            ),
+            params![cutoff_ms, cur_hash],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
+        )?;
+        return Ok(PruneOutcome {
+            deleted: n as usize,
+            images_deleted: img as usize,
+            freed_bytes: bytes,
+        });
+    }
+    // BEGIN IMMEDIATE：SUM 与 DELETE 之间 daemon 可能并发写入，
+    // 不加事务的话 freed_bytes 与实际删除行数会互相失真
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let freed: i64 = tx.query_row(
+        &format!("SELECT COALESCE(SUM(size),0) FROM clips WHERE {guard}"),
+        params![cutoff_ms, cur_hash],
+        |r| r.get(0),
+    )?;
+    let mut stmt = tx.prepare(&format!(
+        "DELETE FROM clips WHERE id IN (SELECT id FROM clips WHERE {guard})
+         RETURNING image_path"
+    ))?;
+    let rows = stmt.query_map(params![cutoff_ms, cur_hash], |r| {
+        r.get::<_, Option<String>>(0)
+    })?;
+    let mut deleted = 0usize;
+    let mut images_deleted = 0usize;
+    for p in rows {
+        let p = p?;
+        deleted += 1;
+        if let Some(p) = p {
+            images_deleted += 1;
+            let _ = std::fs::remove_file(p);
+        }
+    }
+    drop(stmt);
+    tx.commit()?;
+    Ok(PruneOutcome {
+        deleted,
+        images_deleted,
+        freed_bytes: freed,
+    })
+}
+
+/// `YYYY-MM-DD` → 本地时区当日零点的毫秒时间戳（prune --before 的参数口径）。
+/// 按"某天之前"的用户语义应以本地日历日切分，而非 UTC——北京时间 8 月 1 日
+/// 零点 = UTC 前一日 16:00，按 UTC 会多删少删 8 小时内的条目。
+pub fn parse_local_date_ms(s: &str) -> Result<i64> {
+    use chrono::TimeZone;
+    let d = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+        .with_context(|| format!("日期格式应为 YYYY-MM-DD：{s}"))?;
+    let dt = d.and_hms_opt(0, 0, 0).expect("零点恒为合法时刻");
+    match chrono::Local.from_local_datetime(&dt).single() {
+        Some(t) => Ok(t.timestamp_millis()),
+        None => anyhow::bail!("本地时区在该日期零点存在歧义（DST 切换）：{s}"),
+    }
+}
+
 const CLIP_COLS: &str = "id, hash, text, mime, pinned, image_path";
 
 fn row_to_clip(r: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
