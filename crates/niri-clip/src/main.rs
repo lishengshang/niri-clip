@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use niri_clip_core::{config, daemon, preview, store, tui};
+use niri_clip_core::{backup, config, daemon, preview, store, tui};
 
 #[derive(Parser)]
 #[command(name = "niri-clip", version, about = "高性能 niri 剪贴板历史")]
@@ -55,6 +55,23 @@ enum Commands {
         #[arg(long)]
         before: String,
         /// 只统计将删除的内容，不实际删除
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// 全量导出历史为 NDJSON（首行元数据 + 每行一个条目，图片内嵌 base64；
+    /// hash 幂等合并键，格式见 ADR-004）
+    Export {
+        /// 输出文件路径；`-` 写 stdout（可管道 `| gzip`）
+        path: String,
+        /// 额外用 VACUUM INTO 产出完整 db.sqlite 物理快照（已存在则报错）
+        #[arg(long)]
+        sqlite: Option<std::path::PathBuf>,
+    },
+    /// 从 NDJSON 备份回灌合并（hash 幂等：已存在跳过不刷时序；损坏条目跳过并警告）
+    Import {
+        /// 备份文件路径（niri-clip export 产物）
+        path: String,
+        /// 只校验并统计，不写入
         #[arg(long)]
         dry_run: bool,
     },
@@ -238,6 +255,43 @@ async fn main() -> Result<()> {
                     r.deleted,
                     r.images_deleted,
                     fmt_bytes(r.freed_bytes.max(0) as u64)
+                );
+            }
+        }
+        Some(Commands::Export { path, sqlite }) => {
+            let dest = if path == "-" {
+                None
+            } else {
+                Some(std::path::PathBuf::from(&path))
+            };
+            let r = backup::export_json_file(dest.as_deref())?;
+            if let Some(snap) = &sqlite {
+                backup::export_sqlite(snap)?;
+                outln!("快照: {}", snap.display());
+            }
+            outln!(
+                "已导出 {} 条（图片 {}，图片载荷 {}）→ {}",
+                r.count,
+                r.images,
+                fmt_bytes(r.image_bytes),
+                if path == "-" { "stdout" } else { &path }
+            );
+        }
+        Some(Commands::Import { path, dry_run }) => {
+            let r = backup::import_file(std::path::Path::new(&path), dry_run)?;
+            if dry_run {
+                outln!(
+                    "dry-run: 将导入 {} 条（已存在 {}，无效 {}）；实际执行请去掉 --dry-run",
+                    r.imported,
+                    r.exists,
+                    r.invalid
+                );
+            } else {
+                outln!(
+                    "已导入 {} 条（已存在 {}，无效 {}）",
+                    r.imported,
+                    r.exists,
+                    r.invalid
                 );
             }
         }

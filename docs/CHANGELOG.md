@@ -8,6 +8,20 @@
   含搜索态；0 = 第 10 行），空查询裸数字路径排除 Alt 修饰避免双触发
 
 ### Added
+- **历史导出/回灌（2.4）**：`export <file|->` 全量导出 NDJSON——首行 header
+  （format/version/user_version/exported_at/count）+ 每行一条目，图片载荷内嵌
+  base64 自包含单文件（image_path 本机绝对路径不导出），按 ts ASC 稳定排序
+  （同库两次导出可 diff），不受 max_items/TUI_LIMIT 限制，文件权限 0600；
+  `--sqlite <路径>` 额外用 `VACUUM INTO` 产出完整 db.sqlite 物理快照（已存在
+  拒绝覆盖）。`import [--dry-run]` 回灌合并：hash 幂等（已存在跳过且不刷新
+  ts——import 不是捕获，不打扰 ▶ 时序），每条重算 hash 完整性校验（文本
+  blake3 / 图片 FNV key），损坏条目跳过并警告、好条目照常入库；单 BEGIN
+  IMMEDIATE 事务原子提交，图片文件 tmp+rename 与行插入同窗口；保留原 ts 与
+  pinned、不触碰 ▶ 指针，结束按当前配置执行一次 enforce_max_items。格式为
+  Phase 5「历史内容动作插件化」扩展点，选型与被拒备选见 ADR-004；7 个新
+  单测锁定往返/幂等/ts 保留/损坏拦截/max_items 裁剪/格式 schema/物理快照；
+  依赖闭包：serde_json（GUI 原有直接依赖，CLI 经 core 引入 +4）+ base64
+  （零传递依赖 +1），ARCHITECTURE §9 已同步
 - **FTS5 全库搜索（2.1）**：schema v2→3 建 `clips_fts` 外部内容表 + 三触发器同步 + 存量回填（旧库升级无损，单测锁定）；tokenizer 选型 **trigram**（中英文任意子串均命中，推翻 ROADMAP 原定的 unicode61 起步，被拒备选与代价边界见 ADR-002）。`store::search`：≥3 字符走 MATCH 短语 + bm25 相关度，<3 字符退化为 LIKE 线性扫描（通配符转义、MATCH 查询引号翻倍转义）；GUI 搜索接入全库 MATCH——后台线程取候选（(query, gen) 双新鲜度缓存，过期丢弃不闪烁）+ fzf 风格评分重排保持 UX 一致；CLI 新增 `search <query> [--limit N]` 子命令（输出同 list-raw 5 列格式）；fzf TUI 内嵌过滤保持 fzf 自身模糊匹配。基准 `fts_search_300_of_10k` 实测 ≈0.16ms（预算 <50ms 的 1/300），bench 已入本地基准设施（进 CI 门禁待另行批准）
 - **文本 hash 统一为 blake3（2.2）**：schema v3→4 一次性全表重算——
   DefaultHasher 跨编译器/进程不稳定（rustc 升级即变），存量库已存在
