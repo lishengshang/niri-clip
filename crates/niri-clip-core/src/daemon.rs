@@ -285,29 +285,17 @@ async fn run_native_polling() -> Result<()> {
     }
 }
 
-/// 单实例锁。flock 进程崩溃即自动释放，双开立即报错退出。
-fn acquire_single_instance() -> Result<std::fs::File> {
-    let dir = Config::state_dir();
-    std::fs::create_dir_all(&dir)?;
-    let path = dir.join("daemon.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("open lock {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        // SAFETY: 对自身打开的 fd 执行 flock；语义由内核保证
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(anyhow!(
-                "另一个 niri-clip daemon 正在运行（锁 {}）",
-                path.display()
-            ));
-        }
+/// 单实例锁（机制在 `core::single_instance`，任务 2.6 收敛为全项目唯一实现）。
+/// daemon 被占用时报错退出——"已有实例"对 daemon 是异常，对 GUI 则是常态
+/// （连按 Mod+V 应聚焦已开窗口），故占用处理留在调用方。
+fn acquire_single_instance() -> Result<crate::single_instance::InstanceGuard> {
+    match crate::single_instance::InstanceGuard::try_acquire("daemon")? {
+        Some(guard) => Ok(guard),
+        None => Err(anyhow!(
+            "另一个 niri-clip daemon 正在运行（锁 {}）",
+            Config::state_dir().join("daemon.lock").display()
+        )),
     }
-    Ok(file)
 }
 
 /// 单次探测即可判定原生通道可用性。

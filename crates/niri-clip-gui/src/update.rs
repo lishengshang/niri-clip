@@ -17,6 +17,8 @@ impl App {
         // ▶ 指针刷新只能在消息路径做：view 会被光标闪烁拉动重绘（~2Hz），
         // 渲染路径上的同步 fs IO 造成与光标同节奏的周期性闪烁（真机实锤）
         self.refresh_cur();
+        // 删除确认横幅的本地镜像同样只在消息路径刷新（见 refresh_confirm）
+        self.refresh_confirm();
         let decode = self.ensure_image_decode();
         Task::batch([task, decode])
     }
@@ -48,7 +50,7 @@ impl App {
                 }
                 self.query = q;
                 self.set_selection(0);
-                self.confirm_delete = false;
+                self.cancel_confirm();
                 // 重新过滤后回到顶部；同时请求全库 FTS 候选（≥3 字符）
                 return Task::batch([self.scroll_to_selected(), self.request_search()]);
             }
@@ -58,7 +60,7 @@ impl App {
                 if self.mouse_follow && idx < self.visible_len() {
                     self.set_selection(idx);
                     // 选中已离开星标行：挂起的二段确认随之作废
-                    self.confirm_delete = false;
+                    self.cancel_confirm();
                 }
             }
             Message::MouseMove => {
@@ -114,8 +116,10 @@ impl App {
                     }
                 }
                 if exit {
-                    // 后台复制已完成，wl-copy 守护进程持有数据，退出安全
-                    std::process::exit(0);
+                    // 后台复制已完成，wl-copy 守护进程持有数据，退出安全。
+                    // 用 iced::exit() 而非 process::exit()：走正常析构，
+                    // 释放 sqlite 连接 / 图片 Handle / iced 运行时（任务 2.6 / D3）
+                    return iced::exit();
                 }
                 // Ctrl-Y 连续复制：重拉列表，▶ 已随 copy 刷新到刚复制的条目。
                 // selected_id 先记到旧列表第 1 行（复制目标），重载后由
@@ -143,9 +147,9 @@ impl App {
                 self.clips_gen += 1;
                 // 行上移会让静止指针下换行，抑制悬停跟随直到真实移动
                 self.mouse_follow = false;
-                self.confirm_delete = false;
-                // 被删条目的 id 已不在 → 保留索引由下一行顶上，末行回退；
-                // 若 delete 失败（列表未变）则按 id 精确回到原选中
+                self.confirm_delete = false; // core 侧挂起已在判定时消费
+                                             // 被删条目的 id 已不在 → 保留索引由下一行顶上，末行回退；
+                                             // 若 delete 失败（列表未变）则按 id 精确回到原选中
                 self.relocate_selected();
                 // 不发 scroll_to：保持滚动位置，选中由行上移自然锚定
                 return self.request_search();
@@ -202,15 +206,16 @@ impl App {
                 if self.search_mode || !self.query.is_empty() {
                     self.search_mode = false;
                     self.query.clear();
-                    self.confirm_delete = false;
+                    self.cancel_confirm();
                     self.set_selection(0);
                     self.search_id = iced::widget::Id::unique();
                     return self.scroll_to_selected();
                 }
                 if self.confirm_delete {
-                    self.confirm_delete = false;
+                    self.cancel_confirm();
                 } else {
-                    std::process::exit(0);
+                    // 同 CopyFinished：走正常析构（任务 2.6 / D3）
+                    return iced::exit();
                 }
             }
             keyboard::Key::Named(keyboard::key::Named::Enter) => {
@@ -300,7 +305,7 @@ impl App {
             let next = next.clamp(0, n as i64 - 1) as usize;
             if next != self.selected {
                 // 选中已离开星标行：挂起的二段确认随之作废
-                self.confirm_delete = false;
+                self.cancel_confirm();
                 self.set_selection(next);
             }
             // 键盘导航滚动跟随：把选中行滚进可视区（视口半高估算）
@@ -329,12 +334,27 @@ impl App {
                 self.selected, self.selected_id, clip.id, clip.pinned
             );
         }
-        // 星标条目二段确认：第一次 Ctrl-X 仅挂起确认，再按才执行
-        if clip.pinned && !self.confirm_delete {
-            self.confirm_delete = true;
-            return Task::none();
-        }
         let id = clip.id;
+        // 二段确认的**判定权在 core**（任务 2.6 / ADR-005）：15s TTL 落盘，
+        // 与 fzf TUI / CLI 同一语义。此处只做 fs 小文件读写（`decide`），
+        // 绝不在此开 sqlite——UI 线程同步等写锁最长 5s（busy_timeout），
+        // 删除本身仍丢给后台线程执行
+        match confirm::decide(id, clip.pinned) {
+            Ok(confirm::Decision::Deleted) => {}
+            Ok(confirm::Decision::Pending) => {
+                // 挂起：本地镜像驱动横幅；真正的 TTL 判定在 core，
+                // 故横幅即使滞后也不会导致误删（到期后再按只会重新挂起）
+                self.confirm_delete = true;
+                return Task::none();
+            }
+            Err(e) => {
+                eprintln!("[niri-clip gui] delete confirm failed: {e:#}");
+                if self.notify_enabled {
+                    niri_clip_core::notify::send("删除确认失败");
+                }
+                return Task::none();
+            }
+        }
         // 后台删除 + 重拉列表，UI 线程零阻塞（sqlite 写锁最长 busy_timeout 5s）
         self.confirm_delete = false;
         // 保留查询与选中索引（fzf --track 删除跟随语义）：ListReloaded 后
@@ -358,6 +378,31 @@ impl App {
             },
             Message::DeleteReloaded(None),
         )
+    }
+
+    /// 收起横幅并作废 core 侧挂起。仅当本次会话确实处于确认态时才动 core——
+    /// 避免把另一个进程（如 CLI）刚挂起的确认一并清掉（跨进程共享同一状态文件）
+    pub(super) fn cancel_confirm(&mut self) {
+        if !self.confirm_delete {
+            return;
+        }
+        self.confirm_delete = false;
+        confirm::clear();
+    }
+
+    /// 删除确认横幅的本地镜像刷新：判定权在 core，镜像只用于渲染。
+    /// 挂起已失效（TTL 到期 / 目标已变 / 已被消费）即收起横幅——
+    /// 让"15s 后横幅自动消失"在消息到达时生效（ADR-005 代价节的口径）
+    pub(super) fn refresh_confirm(&mut self) {
+        if !self.confirm_delete {
+            return;
+        }
+        let still_armed = self
+            .selected_id
+            .is_some_and(|id| confirm::pending_id() == Some(id));
+        if !still_armed {
+            self.confirm_delete = false;
+        }
     }
     /// ▶ 指针缓存刷新：只在 update（真实消息）路径执行，绝不进 view——
     /// view 会被搜索框光标闪烁周期性拉动重绘（~2Hz），渲染路径上的同步

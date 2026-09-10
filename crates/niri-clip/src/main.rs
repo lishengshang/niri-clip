@@ -1,7 +1,12 @@
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use niri_clip_core::{backup, config, daemon, preview, store, tui};
+use niri_clip_core::{backup, config, confirm, daemon, preview, store};
+
+// TUI 后端（fzf/fuzzel 编排、终端探测、fzf 版本门控）属 CLI 职责，故住在 CLI
+// crate 而非 core——core 保持"纯逻辑库、不含 UI 后端选择"的分层
+// （见 docs/ARCHITECTURE.md §1 分层边界 / §10；任务 2.6 D1 落地）
+mod tui;
 
 #[derive(Parser)]
 #[command(name = "niri-clip", version, about = "高性能 niri 剪贴板历史")]
@@ -35,7 +40,9 @@ enum Commands {
     Copy { id: i64 },
     /// 切换固定
     Pin { id: i64 },
-    /// 删除指定条目（--force/-f 跳过星标确认；--fzf 走 fzf 内嵌二段确认）
+    /// 删除指定条目。星标条目需二次确认：15 秒内重复执行同一命令即删除
+    /// （状态由 core 统一管理，语义见 ADR-005）；--force/-f 跳过确认直删；
+    /// --fzf 由 fzf 绑定调用（挂起时静默，挂起态经 list-raw 行尾标记呈现）
     Delete {
         id: i64,
         #[arg(short, long)]
@@ -158,51 +165,27 @@ async fn main() -> Result<()> {
             outln!("{} {}", msg, id);
         }
         Some(Commands::Delete { id, force, fzf }) => {
-            if fzf {
-                // fzf 内嵌二段确认（任务 1.5）：★ 行第一次按仅挂起
-                // （list-raw reload 后该行打 "再按Ctrl-X确认删除" 标记），
-                // 同行再按才真删；无 fuzzel 依赖。挂起时静默（execute-silent）
-                match tui::delete_with_fzf_confirm(id)? {
-                    tui::DeleteConfirm::Deleted => outln!("deleted {}", id),
-                    tui::DeleteConfirm::Pending => {}
-                }
+            // 星标条目的二段确认统一走 core 状态机（任务 2.6 / ADR-005）：
+            // 15s TTL 落盘，fzf TUI / 原生 UI / CLI 共用同一语义，前端只负责呈现。
+            // --force 供脚本与无头环境显式绕过（不再依赖 fuzzel 弹窗——ADR-005）
+            if force {
+                store::delete(id)?;
+                outln!("deleted {}", id);
                 return Ok(());
             }
-            // 星标条目默认要求 GUI 确认；--force 供脚本/CI 等无头场景。
-            // 无头环境的 CI 已由 smoke job 用 -f 覆盖（issue #2 评审项）
-            if !force && store::is_pinned(id).unwrap_or(false) {
-                let has_fuzzel = which::which("fuzzel").is_ok();
-                if !has_fuzzel {
-                    eprintln!(
-                        "[niri-clip] 星标条目需要确认但 fuzzel 不可用，已取消；无头环境请使用 delete --force"
-                    );
-                    println!("cancelled");
-                    return Ok(());
-                }
-                let choice = std::process::Command::new("fuzzel")
-                    .args(["--dmenu", "--lines=2", "--width=18", "--prompt=删除星标? "])
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .spawn()
-                    .ok()
-                    .and_then(|mut c| {
-                        use std::io::Write;
-                        let _ = c
-                            .stdin
-                            .as_mut()
-                            .unwrap()
-                            .write_all("取消\n确认\n".as_bytes());
-                        c.wait_with_output().ok()
-                    })
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_default();
-                if choice != "确认" {
-                    outln!("cancelled");
-                    return Ok(());
+            match confirm::request(id)? {
+                confirm::Decision::Deleted => outln!("deleted {}", id),
+                confirm::Decision::Pending => {
+                    // fzf 内嵌路径由 list-raw 的行尾标记呈现挂起态，无需文案；
+                    // 其它调用方（脚本/手工）必须被告知"这只是第一段"，否则会
+                    // 误以为删除失败
+                    if !fzf {
+                        outln!(
+                            "pending: ★ 条目需二次确认，15 秒内再次执行同一命令即删除（或加 --force）"
+                        );
+                    }
                 }
             }
-            store::delete(id)?;
-            outln!("deleted {}", id);
         }
         Some(Commands::Wipe) => {
             store::wipe()?;
@@ -312,11 +295,28 @@ async fn main() -> Result<()> {
         Some(Commands::Status) => {
             let cfg = config::Config::load();
             outln!(
-                "niri-clip v{} - {:?}",
+                "niri-clip v{} - {}",
                 env!("CARGO_PKG_VERSION"),
-                config::Config::db_path()
+                config::Config::db_path().display()
             );
-            outln!("config: {:?}", cfg);
+            // 只列用户真正关心的项。此前打印整个 Config 的 Debug 表示
+            // （含 `ignore_re: Some(Regex(...))` 的内部结构），既难读也无用
+            // （任务 2.6 / D9）
+            outln!("config: {}", config::Config::path().display());
+            outln!("  条目上限 max_items={}", cfg.max_items);
+            outln!("  后端 tui_backend={}", cfg.tui_backend);
+            outln!(
+                "  预览 enable_preview={} · 图片捕获 enable_image_preview={}",
+                cfg.enable_preview,
+                cfg.enable_image_preview
+            );
+            outln!("  通知 notify_enabled={}", cfg.notify_enabled);
+            outln!(
+                "  体积上限 max_clip_bytes={} max_image_bytes={} max_image_total_bytes={}",
+                cfg.max_clip_bytes,
+                cfg.max_image_bytes,
+                cfg.max_image_total_bytes
+            );
             let clips = store::list(5)?;
             outln!("recent {} clips:", clips.len());
             for c in clips {

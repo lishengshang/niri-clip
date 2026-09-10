@@ -3,6 +3,35 @@
 ## Unreleased
 
 ### Fixed
+- **AUR 安装后 systemd 单元不可用（打包契约，任务 2.6 A1）**：单元随二进制内置
+  （`assets/niri-clip.service`）供 `cargo install` 用户走 `niri-clip install-service`，
+  ExecStart 写的是 `%h/.cargo/bin/niri-clip`；而 `PKGBUILD` 原样装到
+  `/usr/lib/systemd/user/`，AUR 二进制实际在 `/usr/bin`。systemd **不使用 `$PATH`**
+  （非绝对路径只按编译期固定目录 `/usr/local/bin`、`/usr/bin` 解析），故 AUR 用户
+  `systemctl --user enable --now niri-clip` 必然 `status=203/EXEC`——直接击穿
+  「paru -S 后 Mod+V 开箱即用」这条唯一的最终用户路径。修复：`PKGBUILD`（及 `.git` 包）
+  在 `package()` 内改写单元路径；源文件与单测保持 cargo 语义不变
+- **`cargo publish` 依赖声明修复（打包契约，任务 2.6 A2）**：workspace 依赖
+  `niri-clip-core` 补 `version`。此前只声明 `path`，cargo 打包时直接拒绝
+  （"all dependencies must have a version requirement specified when publishing"），
+  使 README 的 Cargo 安装与 ROADMAP 4.3 不可达。已用 `cargo package` 正反验证
+- **fzf TUI 搜索全失（P0，任务 2.6）**：`--nth=5..` 的字段下标按 `--with-nth`
+  **变换后**的行计算（man fzf："calculated against the transformed lines ...
+  because fzf doesn't allow searching against the hidden fields"），而
+  `--with-nth=1,2,3,5..` 隐藏 id 后只剩 **4** 列 → `--nth=5..` 没有任何字段参与
+  匹配，**输入任意查询列表即被清空**（实测 fzf 0.74 `--filter` 零命中）。
+  改为 `--nth=4..`；抽出 `FZF_NTH`/`FZF_WITH_NTH`/`FZF_ID_NTH` 常量并补行格式
+  不变式（`debug_assert` 校验输入列数 = 原始列数）；两条回归测试锁定：
+  口径一致性断言（隐藏列数 → `--nth` 下标）＋ 本机真实 fzf 端到端匹配。
+  注：`{4}` 占位符与 `--id-nth` 走**原始**行下标，原本就是对的，未改
+- **GUI 搜索结果错位、且 `max_items` 设小会越界 panic（P0，任务 2.6）**：
+  `App::filtered()` 的搜索候选链分支产出的是 `search_hits` 的下标，却被拿去
+  索引 `clips`——两者是**顺序与内容都不同**的两个 `Vec<Clip>`。后果：查询
+  ≥3 字符时显示变成"列表前 N 条"而非真正命中，Enter/Ctrl-Y 会复制到非命中项；
+  且 `max_items < SEARCH_LIMIT`（例如用户设 100）时 `clips[i]` 越界 panic。
+  修复：过滤逻辑抽为纯函数 `compute_filtered`，返回值携带"下标所属来源"，
+  `FilteredCache` 把来源与下标一起缓存，取条目改用 `get()` 兜底。
+  4 条单测锁定（下标空间 / 候选超窗口不 panic / 过期候选回落 / 空查询原序）
 - **GUI 搜索态无快选序号**：行首快选序号仅空查询时渲染（`query.is_empty()`
   门控），搜索态整列消失但 Alt+1-9,0 快选实际可用——序号改为任意状态显示，
   并补上第 10 行从未渲染过的 `0`（与 update.rs 快选分支语义对齐）
@@ -10,7 +39,65 @@
   持焦点输入框接管、快选彻底不可用——新增 Alt+1-9,0 快选（任意时刻可用，
   含搜索态；0 = 第 10 行），空查询裸数字路径排除 Alt 修饰避免双触发
 
+### Changed
+- **`tui` 模块从 core 迁至 CLI crate（任务 2.6 D1）**：恢复 ARCHITECTURE 自定的分层
+  ——core 是纯逻辑库、不含 UI 后端选择，fzf/fuzzel 编排与终端探测属 CLI 职责；
+  原生 UI 不再为 fzf 编排代码买单。CLI 因此新增 `dirs` 直接依赖（Cargo.lock +1 行）
+- **入库与收尸逻辑去重（任务 2.6 C6/C7）**：文本/图片两条入库路径共用 `upsert_clip`
+  骨架（BEGIN IMMEDIATE → 查重 → 刷 ts 或插入 → 提交 → 刷当前项指针），差异收敛到
+  `on_new_row` 回调；`enforce_max_items` 与 `prune_before` 共用
+  `delete_rows_image_paths` 收集待删数据文件
+- **`niri-clip delete` 对 ★ 条目不再弹 fuzzel 弹窗（任务 2.6 C1 / ADR-005）**：
+  改为统一状态机的"挂起 + 提示 15 秒内再次执行"。无 fuzzel 环境下 ★ 条目此前
+  "删不掉"（只能 `--force` 绕过，确认机制形同虚设），现在正常可用。
+  **行为变化**：非 `--fzf` 路径首次调用会打印 `pending: ...` 且条目保留
+- **CI lint 工序补 `--locked`（任务 2.6 A4）**：与 test/build/bench 三道工序口径一致。
+  此前缺它则 lint 可在依赖漂移的树上通过，而 release 工序失败
+- **CI bench 门禁收敛为循环 + 补"bench 必须出现"断言（任务 2.6 D12）**：三段近乎
+  相同的 `awk` 合并；并新增断言——某 bench 名未出现在输出中即报错，否则改名一个
+  bench 会让门禁**静默失效**
+- **`niri-clip status` 输出可读化（任务 2.6 D9）**：不再打印整个 `Config` 的 Debug
+  表示（含 `ignore_re: Some(Regex(...))` 内部结构），改为逐项列出条目上限 / 后端 /
+  预览与图片开关 / 通知 / 体积上限
+- **配置默认值单一来源（任务 2.6 D5）**：`Default::default()` 与 serde 的各
+  `default_*()` 此前各自硬编码同一批字面量（改一处忘另一处即漂移）；现统一取新增的
+  `defaults` 模块常量，并加单测断言"空 TOML 的反序列化结果 == `Default`"
+- **`store` 测试改为目录布局（任务 2.6 D11）**：`src/store/{mod.rs,tests.rs}`，
+  去掉 `#[path = "store_tests.rs"]` 的非惯用写法
+- **MSRV 显式声明（任务 2.6 D7）**：`[workspace.package] rust-version = "1.75"`
+  （与 README 承诺一致），让 cargo 给出明确报错而非编译期乱码
+- **`migrate` 去掉一层 shell（任务 2.6 D8）**：`cliphist decode` 的 id 改走 stdin
+  管道，不再用 `sh -c "echo {id} | cliphist decode"` 做字符串拼接
+- **`chafa` 渲染尺寸提为常量（任务 2.6 D10）**：与 `preview_width` 语义不同
+  （终端字符网格 vs 列表行宽），独立常量并注释区分
+- **`PKGBUILD.git` 补齐 man 与 shell 补全（任务 2.6 B13）**：与主包对齐
+- **列表窗口统一为 300（任务 2.6）**：fzf TUI 与原生 UI 此前取不同窗口
+  （300 vs 全量 `max_items`＝默认 750），同一份历史两个后端看到的条目数不一致。
+  现统一由 `store::MENU_LIMIT` 定义（原 `TUI_LIMIT` 更名，并与语义独立的
+  `SEARCH_LIMIT` 并列注释）；GUI 删除自有常量 `MAX_RENDER_ROWS`。
+  为不损失搜索面，GUI 的搜索门槛从 ≥3 字符降到 **≥1**：<3 字符由
+  `store::search` 既有的 LIKE 全库回退承担（覆盖面不降反升）
+- **`StoreStats` 移除 `text_bytes` 字段（任务 2.6）**：全仓库无消费方
+  （仅一处测试断言），顺带少一次全表 SUM 查询
+
 ### Added
+- **删除确认状态机（任务 2.6 C1 / ADR-005）**：新增 `niri-clip-core/src/confirm.rs`，
+  ★ 条目二次确认的**唯一实现**（15s TTL，状态落盘 `state/pending_delete`）；CLI 与
+  原生 UI 只负责呈现挂起态。判定分两层——`decide()` 纯 fs 判定（供长驻 UI 在消息
+  路径安全调用，不碰 sqlite），`request()` = decide + 立即删除（供一次性 CLI 进程）。
+  6 条单测覆盖：非星标直删 / 星标两段 / 过期重新挂起 / 挂起目标转移 / 损坏状态文件 /
+  `decide` 不自行删数据。收敛前该语义有**三套分叉实现**（fzf 15s TTL、GUI 内存 bool
+  无 TTL、CLI fuzzel 弹窗）
+- **单实例互斥（任务 2.6 C4）**：新增 `niri-clip-core/src/single_instance.rs`，
+  `InstanceGuard::try_acquire(name)` 统一 flock 机制；GUI 侧原有的 PID 文件 +
+  `/proc/{pid}/cmdline` 复核机制删除（flock 由内核在崩溃时释放，无陈锁、无 PID 回收
+  造成的假阳性）
+- **菜单行渲染唯一出口（任务 2.6 C2）**：`render_row()` 统一 fzf 初始输入 /
+  `list-raw` / `search` 三处的 5 列格式。此前该格式在 4 处各拼一遍——列格式变更要改
+  4 处、挂起标记只在其中 2 处生效
+- **多行预览下沉 core（任务 2.6 C5）**：`preview::preview_multiline()` 成为 CLI
+  `preview` 与原生 UI 底部窗格的唯一实现（此前两处各自实现，且 GUI 用字节长度比较
+  判断截断，与"逐行按字符截断"口径不匹配，会漏判）
 - **历史导出/回灌（2.4）**：`export <file|->` 全量导出 NDJSON——首行 header
   （format/version/user_version/exported_at/count）+ 每行一条目，图片载荷内嵌
   base64 自包含单文件（image_path 本机绝对路径不导出），按 ts ASC 稳定排序
@@ -47,6 +134,11 @@
   孤儿清扫兜底；SUM 统计与 DELETE 同处 BEGIN IMMEDIATE 事务防并发失真）。
   5 个新单测锁定保护语义/dry-run/FTS 同步/日期解析/体积口径；CLI 新增 chrono
   直接依赖（原为 core 传递引用，闭包零增量，ARCHITECTURE §9）
+
+### Removed
+- CLI `delete` 的 fuzzel 弹窗确认路径（约 30 行，见 Changed）
+- GUI 的 PID 文件实例锁与 `/proc` 复核（见 Added）
+- `StoreStats.text_bytes` 字段（全仓库无消费方，顺带少一次全表 SUM）
 
 ## v0.5.2 - 2026-09-01
 
