@@ -352,13 +352,15 @@ pub fn import_file(path: &Path, dry_run: bool) -> Result<ImportOutcome> {
     let mut out = ImportOutcome::default();
     let cfg = Config::load();
     let warn = |msg: String| {
-        out_done();
         eprintln!("[niri-clip import] 跳过无效条目：{msg}");
     };
 
     if dry_run {
         let conn = crate::store::connect()?;
         let mut stmt = conn.prepare("SELECT 1 FROM clips WHERE hash=?1")?;
+        // 同文件重复 hash 与实际执行同口径：实际路径第二条因已入本事务计
+        // exists，dry-run 侧用 seen 集合收敛，保证预览统计可对照
+        let mut seen = std::collections::HashSet::new();
         for line in lines {
             let line = line?;
             if line.trim().is_empty() {
@@ -366,15 +368,18 @@ pub fn import_file(path: &Path, dry_run: bool) -> Result<ImportOutcome> {
             }
             match parse_validate(&line) {
                 Ok(e) => {
-                    let hit: Option<i64> =
-                        stmt.query_row(params![entry_hash(&e)], |r| r.get(0)).ok();
-                    if hit.is_some() {
+                    let h = entry_hash(&e).to_string();
+                    let hit: Option<i64> = stmt.query_row(params![h.as_str()], |r| r.get(0)).ok();
+                    if hit.is_some() || !seen.insert(h) {
                         out.exists += 1;
                     } else {
                         out.imported += 1;
                     }
                 }
-                Err(msg) => warn(msg),
+                Err(msg) => {
+                    out.invalid += 1;
+                    warn(msg);
+                }
             }
         }
         return Ok(out);
@@ -422,9 +427,6 @@ fn entry_hash(e: &ValidEntry) -> &str {
         ValidEntry::Text { hash, .. } | ValidEntry::Image { hash, .. } => hash,
     }
 }
-
-/// 防止未使用导入的占位（tighten 系列经由本模块重导出使用）
-fn out_done() {}
 
 fn trunc_str(s: &str, max: usize) -> String {
     if s.chars().count() <= max {

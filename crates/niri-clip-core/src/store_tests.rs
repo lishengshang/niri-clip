@@ -922,6 +922,47 @@ fn import_skips_corrupt_but_keeps_good() {
 }
 
 #[test]
+fn import_dry_run_stats_match_real_run() {
+    with_env(|g| {
+        clear_db();
+        insert("good-1".into(), None).unwrap();
+        insert("good-2".into(), None).unwrap();
+        let exp = g.root.join("stats.ndjson");
+        backup::export_json_file(Some(&exp)).unwrap();
+        let lines = read_lines(&exp);
+        assert_eq!(lines.len(), 3);
+
+        // header + good-1 ×2（同文件重复 hash）+ 篡改行（good-2 改文本）
+        let mut tampered: serde_json::Value = serde_json::from_str(&lines[2]).unwrap();
+        tampered["text"] = serde_json::Value::String("tampered!".into());
+        let mixed = vec![
+            lines[0].clone(),
+            lines[1].clone(),
+            lines[1].clone(),
+            serde_json::to_string(&tampered).unwrap(),
+        ];
+        let f = g.root.join("mixed.ndjson");
+        write_lines(&f, &mixed);
+        wipe().unwrap();
+
+        // dry-run 统计须与实际执行同口径：重复行收敛为 exists、invalid 计数
+        let dry = backup::import_file(&f, true).unwrap();
+        assert_eq!(
+            (dry.imported, dry.exists, dry.invalid),
+            (1, 1, 1),
+            "dry-run：同文件重复计 exists，篡改行计 invalid"
+        );
+        let real = backup::import_file(&f, false).unwrap();
+        assert_eq!(
+            (real.imported, real.exists, real.invalid),
+            (1, 1, 1),
+            "实际执行与 dry-run 同口径"
+        );
+        assert_eq!(list(100).unwrap().len(), 1);
+    });
+}
+
+#[test]
 fn import_enforces_max_items_and_protects_pinned() {
     with_env(|g| {
         clear_db();

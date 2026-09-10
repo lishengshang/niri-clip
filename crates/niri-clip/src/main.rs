@@ -264,18 +264,28 @@ async fn main() -> Result<()> {
             } else {
                 Some(std::path::PathBuf::from(&path))
             };
+            let to_stdout = dest.is_none();
             let r = backup::export_json_file(dest.as_deref())?;
+            // `-` 时数据流占用 stdout，汇总改走 stderr，保证 `export - | ...`
+            // 管道产物是纯 NDJSON（jq/wc/import 才能直接消费）
+            let report = |line: String| {
+                if to_stdout {
+                    eprintln!("{line}");
+                } else {
+                    outln!("{line}");
+                }
+            };
             if let Some(snap) = &sqlite {
                 backup::export_sqlite(snap)?;
-                outln!("快照: {}", snap.display());
+                report(format!("快照: {}", snap.display()));
             }
-            outln!(
+            report(format!(
                 "已导出 {} 条（图片 {}，图片载荷 {}）→ {}",
                 r.count,
                 r.images,
                 fmt_bytes(r.image_bytes),
-                if path == "-" { "stdout" } else { &path }
-            );
+                if to_stdout { "stdout" } else { &path }
+            ));
         }
         Some(Commands::Import { path, dry_run }) => {
             let r = backup::import_file(std::path::Path::new(&path), dry_run)?;
