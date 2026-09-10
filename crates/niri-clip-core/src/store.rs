@@ -520,16 +520,23 @@ pub fn prune_before(cutoff_ms: i64, dry_run: bool) -> Result<PruneOutcome> {
     })?;
     let mut deleted = 0usize;
     let mut images_deleted = 0usize;
+    let mut image_files = Vec::new();
     for p in rows {
         let p = p?;
         deleted += 1;
         if let Some(p) = p {
             images_deleted += 1;
-            let _ = std::fs::remove_file(p);
+            image_files.push(p);
         }
     }
     drop(stmt);
     tx.commit()?;
+    // 文件删除放在 commit 之后：commit 失败回滚时行还在，文件不能先没
+    // （prune_orphan_images 只兜底"有文件无行"，反向残缺无清扫）。commit 后
+    // 删除失败的残留与既有口径一致，同样由孤儿清扫兜底
+    for p in image_files {
+        let _ = std::fs::remove_file(p);
+    }
     Ok(PruneOutcome {
         deleted,
         images_deleted,
