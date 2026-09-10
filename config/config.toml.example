@@ -1,6 +1,7 @@
-# niri-clip v0.4 配置
+# niri-clip v0.5.2 配置（全部字段可选，缺省即用内置默认值）
 # 复制到 ~/.config/niri-clip/config.toml 后生效
 # 数据库位于 ~/.local/state/niri-clip/db.sqlite（v0.4 起自动从旧 cache 位置搬迁）
+# 本文件与 crates/niri-clip-core/src/config.rs 的默认值必须保持一致
 
 max_items = 750
 preview_width = 100

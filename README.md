@@ -3,7 +3,7 @@
 > 为 `niri` 合成器打造的 **全新、高性能、开箱即用** Wayland 剪贴板历史管理器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.0-blue)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.5.2-blue)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/Wayland-niri-4a90e2)](https://github.com/YaLTeR/niri)
 [![AUR](https://img.shields.io/badge/AUR-审核中-blue)](https://aur.archlinux.org/packages/niri-clip)
@@ -27,36 +27,43 @@
 
 ### 📦 安装
 
-#### AUR（即将上架，审核中）
+> **分发状态（v0.5.2）**：AUR 与 crates.io **均未上架**，当前请走源码 / makepkg。
+> 三渠道分发（AUR release/git/bin + crates.io + GitHub Releases）是 **v1.0 任务 4.2/4.3**。
 
-#### Cargo
-
-```bash
-cargo install niri-clip
-# 原生 GUI（可选，需单独安装）
-cargo install niri-clip-gui
-```
-
-#### 源码 / makepkg
+#### 源码 / makepkg（当前可用）
 
 ```bash
 git clone https://github.com/lishengshang/niri-clip
 cd niri-clip
-makepkg -si          # Arch 打包（含 systemd 单元/配置示例）
-# 或
+makepkg -si          # Arch 打包（含 systemd 单元/man/补全/配置示例）
+# 或手动安装 CLI
 cargo build --release -p niri-clip && sudo install -Dm755 target/release/niri-clip /usr/bin/niri-clip
+# 原生 GUI（可选，需 libxkbcommon）
+cargo build --release -p niri-clip-gui && sudo install -Dm755 target/release/niri-clip-gui /usr/bin/niri-clip-gui
 ```
+
+#### 从 git 分支直接 cargo install（暂未上架期间可用）
+
+```bash
+cargo install --git https://github.com/lishengshang/niri-clip niri-clip
+# 原生 GUI（可选）
+cargo install --git https://github.com/lishengshang/niri-clip niri-clip-gui
+```
+
+> `cargo install niri-clip`（不带 `--git`）依赖 crates.io 发布，属 v1.0 任务 4.3。
 
 ---
 
 ### 🚀 快速开始
 
 ```bash
-# 1. 配置（可选）
-cat ~/.config/niri-clip/config.toml
-# max_items=750 preview_width=100 tui_backend=auto enable_image_preview=true
+# 1. 配置（可选，不存在则全部走内置默认值）
+mkdir -p ~/.config/niri-clip
+cp /usr/share/doc/niri-clip/config.toml.example ~/.config/niri-clip/config.toml
+# 关键默认值：max_items=750 preview_width=100 tui_backend=auto
+#             enable_image_preview=false（图片捕获默认关，见下）
 
-# 2. 启动守护进程（niri 已自动 spawn-at-startup，无需手动）
+# 2. 启动守护进程（已配置 niri spawn-at-startup 或 systemd 则无需手动）
 niri-clip daemon &
 
 # 3. 状态
@@ -87,7 +94,7 @@ binds {
 max_items = 750
 preview_width = 100
 min_store_length = 1
-enable_image_preview = true   # chafa
+enable_image_preview = false   # 图片捕获 + chafa 终端预览（默认关：开启后轮询兜底路径会尝试图片 MIME）
 ignore_regex = "(?i)password|secret|token|otp|auth"
 pinned_on_top = true
 tui_backend = "auto"  # auto|native|fzf|fuzzel（native=无终端原生窗口）
@@ -99,6 +106,9 @@ max_clip_bytes = 1048576   # v0.5 单条文本上限（字节），超限拒绝�
 max_image_bytes = 10485760 # v0.5 单张图片上限（字节）
 max_image_total_bytes = 209715200 # v0.5.1 images/ 总量配额（字节），超限 LRU 淘汰，0 不限
 ```
+
+完整注释版见 `config/config.toml.example`（makepkg 装到
+`/usr/share/doc/niri-clip/`）。
 
 ---
 
@@ -184,10 +194,15 @@ journalctl --user -u niri-clip -f      # 日志
 ### 🧪 测试
 
 ```bash
-./tests/manual.sh              # 20 条 pos 跟随 + 压测
-cargo test                     # 单元测试（XDG 隔离环境）
-cargo clippy --all-targets     # lint 门禁（零警告基线）
+cargo test --locked                                  # 单元测试（XDG 隔离环境）
+cargo clippy --all-targets --locked -- -D warnings    # lint 门禁（零警告基线）
+./tests/manual.sh                                    # CLI 端到端冒烟（隔离 XDG）：
+                                                     # CRUD / 置顶 / 删除后 pos 跟随 / 性能计时
+cargo bench -p niri-clip-core                        # 性能基准（criterion）
 ```
+
+> `manual.sh` 只做 CLI 冒烟与粗粒度计时，**不做 10k 压测**——大库长稳归 ROADMAP
+> 任务 2.5，性能预算由 CI 的 bench 工序用绝对阈值断言。
 
 ---
 
@@ -195,8 +210,8 @@ cargo clippy --all-targets     # lint 门禁（零警告基线）
 
 - **v0.3 ✅** 原生 daemon + 300 缓存 + chafa
 - **v0.4.x ✅** P0 修复（并发/图片/panic/state 迁移）+ 事件驱动捕获 + systemd 托管 + CI
-- **v0.5 ▶** TUI 体验闭环（PRIMARY selection / 配额 GC / 基准进 CI / man）
-- **v0.6** FTS5 全文搜索 + 数据治理（稳定 hash / GC / 导出）
+- **v0.5.x ✅** TUI 体验闭环（PRIMARY selection / 图片配额 GC / 星标删除二段确认 / 基准进 CI / man 与补全）+ 原生 UI（iced xdg 窗口，`tui_backend=native|auto`）
+- **v0.6 ▶ 进行中** 搜索与数据治理：FTS5 全文搜索 ✅ / blake3 统一指纹 ✅ / stats·vacuum·prune ✅ / NDJSON 导出回灌 ✅ / 大库长稳测试 / 工程收敛
 - **v0.7** 安全与隐私强化（过滤规则 / systemd 沙箱 / 加密 PoC）
 - **v1.0** Production GA：AUR 三包、crates.io、waybar、CI 深化
 

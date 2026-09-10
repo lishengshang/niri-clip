@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# niri-clip manual smoke test - 验证 pin 置顶 + 删除后 pos 跟随 + 性能
-# 全程在临时 XDG 环境隔离运行，绝不触碰真实剪贴板历史库
+# niri-clip manual smoke test - 验证 pin 置顶 + 删除后 pos 跟随 + 粗粒度计时
+# 全程在临时 XDG 环境隔离运行：只读写 $TMP_ROOT 下的 state/config/cache，
+# 不触碰真实 state 目录，也不触碰 cliphist 的库（~/.cache/cliphist/db）
 set -euo pipefail
 BIN="${1:-$HOME/.cargo/bin/niri-clip}"
 if [[ ! -x "$BIN" ]]; then BIN="./target/debug/niri-clip"; fi
@@ -21,8 +22,10 @@ echo "isolated state: $XDG_STATE_HOME"
 # 1. wipe
 echo -e "\n[1] wipe"
 $BIN wipe >/dev/null
-cliphist wipe >/dev/null 2>&1 || true
-echo "wiped, count niri-clip=$($BIN list-raw | wc -l) cliphist=$(cliphist list 2>/dev/null | wc -l)"
+# 注意：此处**不得**调用 `cliphist wipe` —— cliphist 的库在 ~/.cache/cliphist/db，
+# 不受下方 XDG_STATE_HOME 隔离影响，会清空用户真实的 cliphist 历史。
+# 本脚本只操作隔离环境内的 niri-clip 库（这正是"绝不触碰真实历史"的含义）。
+echo "wiped, count niri-clip=$($BIN list-raw | wc -l)"
 
 # 2. 造 20 条
 echo -e "\n[2] insert 20 entries"
@@ -80,29 +83,25 @@ if [[ "$new_last" != "$prev_id" ]]; then
 fi
 echo "last delete OK"
 
-# 5. 压测 10k
-echo -e "\n[5] bench 10k"
-# 先批量插入到接近 10k
-echo "current count: $($BIN list-raw | wc -l), inserting 200 more for bench..."
+# 5. 性能计时（粗粒度，非压力测试）
+echo -e "\n[5] perf timing (coarse, NOT a stress test)"
+# 说明：本脚本不做大库压测——大库长稳（100k 条写入/查询/迁移）归 ROADMAP 任务 2.5，
+# 性能预算由 CI 的 bench 工序（criterion + 绝对阈值断言）承担。此处只做冒烟计时。
+echo "current count: $($BIN list-raw | wc -l), inserting 200 more for timing..."
 for i in $(seq 1 200); do
   echo "bench-$i-$(date +%s%N)-$RANDOM" | $BIN store >/dev/null
 done
-echo "bench via store::bench_10k (list 10k):"
-time $BIN status >/dev/null
-# 直接测 list 10000 耗时
 start=$(date +%s%N)
 $BIN list-raw >/dev/null 2>&1 || true
 end=$(date +%s%N)
 elapsed_ms=$(( (end-start)/1000000 ))
 echo "list-raw (300 limit) took ${elapsed_ms}ms"
-# 全量列表测试（隔离环境内）
 DB_PATH="$XDG_STATE_HOME/niri-clip/db.sqlite"
-echo "full list via sqlite ($DB_PATH):"
+echo "db row count via sqlite ($DB_PATH):"
 sqlite3 "$DB_PATH" "SELECT count(*) FROM clips;" 2>&1 | head
-time sqlite3 "$DB_PATH" "SELECT id, text FROM clips ORDER BY pinned DESC, ts DESC LIMIT 10000;" >/dev/null 2>&1 || echo "sqlite bench done"
 
 if [[ "$elapsed_ms" -gt 50 ]]; then
-  echo "WARN: list-raw >50ms ($elapsed_ms), consider cache"
+  echo "WARN: list-raw >50ms ($elapsed_ms)"
 else
   echo "PASS: list-raw <50ms"
 fi
@@ -123,6 +122,6 @@ $BIN wipe >/dev/null
 echo "final count: $($BIN list-raw | wc -l)"
 
 echo -e "\n=== ALL TESTS PASSED ==="
-echo "Mod+V 删除后 pos 跟随: OK"
-echo "懒加载 300 + 缓存: OK"
+echo "删除后 pos 跟随: OK"
+echo "300 条菜单直查（无缓存层）: OK"
 echo "图片预览开关: checked"
