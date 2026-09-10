@@ -45,6 +45,19 @@ enum Commands {
     },
     /// 清空历史
     Wipe,
+    /// 数据统计（条数/体积/图片占比，库与图片均为磁盘实测口径）
+    Stats,
+    /// VACUUM 压缩库文件（回收删除/淘汰留下的空洞，返回前后体积）
+    Vacuum,
+    /// 删除早于指定日期的旧条目（星标与当前项受保护，同图片 GC 语义）
+    Prune {
+        /// YYYY-MM-DD，本地时区当日零点之前
+        #[arg(long)]
+        before: String,
+        /// 只统计将删除的内容，不实际删除
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// 从 cliphist 迁移
     Migrate,
     /// 查看状态
@@ -63,6 +76,33 @@ macro_rules! outln {
         use std::io::Write as _;
         let _ = writeln!(std::io::stdout(), $($arg)*);
     }};
+}
+
+/// 人类可读字节口径（stats/vacuum/prune 输出用），1024 进制与文档 MiB 口径一致
+fn fmt_bytes(b: u64) -> String {
+    const K: f64 = 1024.0;
+    let b = b as f64;
+    if b >= K * K * K {
+        format!("{:.1} GiB", b / (K * K * K))
+    } else if b >= K * K {
+        format!("{:.1} MiB", b / (K * K))
+    } else if b >= K {
+        format!("{:.1} KiB", b / K)
+    } else {
+        format!("{} B", b as u64)
+    }
+}
+
+/// 毫秒时间戳 -> 本地时区 YYYY-MM-DD（stats 最旧/最新条目展示用）；
+/// 非法值（理论上不存在）退回原始数字，不因展示挂掉命令
+fn fmt_date(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_else(|| ms.to_string())
 }
 
 #[tokio::main]
@@ -150,6 +190,56 @@ async fn main() -> Result<()> {
         Some(Commands::Wipe) => {
             store::wipe()?;
             outln!("wiped");
+        }
+        Some(Commands::Stats) => {
+            let s = store::stats()?;
+            outln!(
+                "条目 {}（星标 {}，图片 {}）",
+                s.total,
+                s.pinned,
+                s.image_entries
+            );
+            let total = s.db_bytes + s.images_disk_bytes;
+            let pct = (s.images_disk_bytes * 100).checked_div(total).unwrap_or(0);
+            outln!(
+                "库 {} + 图片 {} = {}（图片占 {}%）",
+                fmt_bytes(s.db_bytes),
+                fmt_bytes(s.images_disk_bytes),
+                fmt_bytes(total),
+                pct
+            );
+            match (s.oldest_ts, s.newest_ts) {
+                (Some(o), Some(n)) => outln!("最旧 {} · 最新 {}", fmt_date(o), fmt_date(n)),
+                _ => outln!("库为空"),
+            }
+        }
+        Some(Commands::Vacuum) => {
+            let (before, after) = store::vacuum()?;
+            outln!(
+                "vacuum: {} -> {}（回收 {}）",
+                fmt_bytes(before),
+                fmt_bytes(after),
+                fmt_bytes(before.saturating_sub(after))
+            );
+        }
+        Some(Commands::Prune { before, dry_run }) => {
+            let cutoff = store::parse_local_date_ms(&before)?;
+            let r = store::prune_before(cutoff, dry_run)?;
+            if dry_run {
+                outln!(
+                    "dry-run: 将删除 {} 条（图片 {}，载荷约 {}）；实际执行请去掉 --dry-run",
+                    r.deleted,
+                    r.images_deleted,
+                    fmt_bytes(r.freed_bytes.max(0) as u64)
+                );
+            } else {
+                outln!(
+                    "已删除 {} 条（图片 {}，回收载荷 {}）；库文件体积回落请再执行 niri-clip vacuum",
+                    r.deleted,
+                    r.images_deleted,
+                    fmt_bytes(r.freed_bytes.max(0) as u64)
+                );
+            }
         }
         Some(Commands::Migrate) => {
             let n = store::migrate_from_cliphist()?;

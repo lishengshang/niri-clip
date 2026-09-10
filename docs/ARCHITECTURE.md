@@ -156,6 +156,11 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 | niri-clip-gui | 250 | 审计前 363：image 收窄 -63、notify-send -53 |
 | workspace 总计 | 272 | 审计前 385 |
 
+> 注（2.3，2026-09-05）：CLI `chrono` 由 core 传递依赖升为直接依赖
+> （CLI 侧日期解析/展示），真实闭包零增量；但 naive 口径计数会 +1——
+> chrono 在树中出现两次（core 下无标记 + CLI 直依赖下 `(*)` 标记），
+> `sort -u` 把 `(*)` 行当独立条目，属统计伪影非新增 crate。
+
 **大头分解：**
 
 - `notify-rust`（决策项②，2026-09-01 已落地）：原 86 crate 的 zbus/zvariant

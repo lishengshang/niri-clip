@@ -109,7 +109,7 @@ max_image_total_bytes = 209715200 # v0.5.1 images/ 总量配额（字节），�
 | 语言 | Rust 1.75+, Tokio | 异步 daemon, 无 GC |
 | Wayland | wl-paste --watch 事件源 + wl-clipboard-rs | 变化即捕获；轮询仅兜底 |
 | 存储 | rusqlite + SQLite WAL | 单文件 `~/.local/state/niri-clip/db.sqlite`，`PRAGMA user_version` 版本化迁移；FTS5 全文索引（trigram，中英文子串搜索，见 ADR-002） |
-| 去重 | 文本 DefaultHasher+len / 图片 FNV1a64+mime+len | 图片指纹跨进程稳定；文本 hash 计划随 v1.0 统一到稳定算法 |
+| 去重 | 文本 blake3 / 图片 FNV1a64+mime+len | 指纹跨编译器/进程/机器稳定（v0.6 存量库已全表重算迁移，见 ADR-003） |
 | TUI | fzf 0.71+ / fuzzel | --track --id-nth 不跳顶；低于 0.71 自动回退 fuzzel |
 | 预览 | chafa, kitty icat | 图片终端渲染 |
 | 打包 | PKGBUILD, systemd user | AUR |
@@ -132,6 +132,11 @@ niri-clip preview <id>
 niri-clip pin <id>    # 切换固定
 niri-clip delete <id> [-f]   # -f 跳过星标确认（脚本/无头环境）
 niri-clip wipe
+niri-clip stats        # 条数/体积/图片占比（库 = db+wal，图片 = 目录实测）
+niri-clip vacuum       # VACUUM 压缩库文件（返回前后体积）
+niri-clip prune --before 2026-08-01 [--dry-run]
+                       # 删除该日期（本地时区零点）前的旧条目；
+                       # 星标与当前项 ▶ 受保护，--dry-run 仅预览
 niri-clip migrate     # 从 cliphist 导入
 niri-clip install-service
                       # 一键安装 systemd user 单元

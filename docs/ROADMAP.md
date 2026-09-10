@@ -121,7 +121,7 @@
 |---|---|---|---|
 | 2.1 | ✅ FTS5 全文搜索 | `user_version` v2→3：clips_fts 外部内容表 + 三触发器同步 + 存量回填；tokenizer 选型 **trigram**（中文子串可用，推翻 unicode61 起步计划，见 ADR-002）；`store::search`（MATCH + bm25，<3 字符 LIKE 回退）；GUI 全库搜索接 MATCH（后台线程 + (query,gen) 新鲜度缓存）、CLI `search` 子命令；fzf TUI 内嵌过滤保持 fzf 自身模糊匹配（300 行窗口） | 10k 条中英文搜索 <50ms（实测 0.16ms）；旧库升级无损（单测锁定） |
 | 2.2 | ✅ 文本 hash 统一为 blake3 | DefaultHasher 跨编译器/进程不稳定，**v1.0 硬前置**（ADR-003）：`user_version` v3→4 全表重算 blake3，迁移事务（BEGIN IMMEDIATE + 事务内重读版本防双进程竞态）内合并重复（幸存行 = ts 最大，pinned 取 OR，image_path 继承）；迁移前 `VACUUM INTO` 快照（`state/db.sqlite.pre-blake3`，快照失败即放弃迁移），迁移后重映射 ▶ 指针；图片 `img:` FNV 指纹不动 | 迁移前后条目数只减不增（单测锁定，含幂等/FTS 同步/指针重映射）；跨重启/跨机器去重稳定；blake3 闭包 +3 crate 过开销审计（ARCHITECTURE §9） |
-| 2.3 | 数据统计与维护命令 | `niri-clip stats`（条数/体积/图片占比）、`vacuum`、`prune --before <date>` | 用户可自助管理磁盘占用 |
+| 2.3 | ✅ 数据统计与维护命令 | `niri-clip stats`（条数/体积/图片占比；库 = db+wal、图片 = images/ 磁盘实测双口径，-shm 瞬态内存不计）、`vacuum`（VACUUM + WAL 截断，返回前后体积）、`prune --before <YYYY-MM-DD>`（本地日历日零点切分；星标/当前项受保护同 1.3；--dry-run 预览；BEGIN IMMEDIATE 防并发失真） | 用户可自助管理磁盘占用（5 个单测 + 真机冒烟） |
 | 2.4 | 历史导出/备份 | `export --json` 全量导出，配合 VACUUM INTO 快照 | 备份可回灌（`import`） |
 | 2.5 | 大库长稳测试 | 100k 条写入/查询/迁移自动化测试 | 无锁死、无数据丢失、内存平稳 |
 
