@@ -37,6 +37,13 @@ package() {
   install -Dm644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 "assets/niri-clip.kdl" "$pkgdir/usr/share/doc/$pkgname/niri-clip.kdl.example"
   install -Dm644 "assets/niri-clip.service" "$pkgdir/usr/lib/systemd/user/niri-clip.service"
+  # 服务单元按包安装路径改写（任务 2.6 A1）：源单元随二进制内置、供
+  # `cargo install` 用户走 `niri-clip install-service`，写的是 %h/.cargo/bin；
+  # 而 AUR 装到 /usr/bin。systemd **不使用 $PATH**（非绝对路径只按编译期
+  # 固定目录 /usr/local/bin、/usr/bin 解析），故 %h/.cargo/bin 在 AUR 场景
+  # 必然 status=203/EXEC —— 不改这一行，"paru -S 后 enable --now 即用"不成立
+  sed -i 's|%h/\.cargo/bin/niri-clip|/usr/bin/niri-clip|' \
+    "$pkgdir/usr/lib/systemd/user/niri-clip.service"
   install -Dm644 "README.md" "$pkgdir/usr/share/doc/$pkgname/README.md"
   # 任务 1.7：man page 与 shell 补全（由二进制自生成，无需仓库内存文件）
   for d in usr/share/man/man1 \

@@ -22,7 +22,9 @@ jobs:
       # 原生 UI 依赖链（smithay-client-toolkit/winit）需要系统 xkbcommon
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev
       - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      # --locked 与 test/build/bench 三道工序口径一致（任务 2.6 A4）：
+      # 缺它则 lint 可在依赖漂移的树上通过，而 release 工序失败
+      - run: cargo clippy --all-targets --locked -- -D warnings
 
   test:
     name: unit tests
@@ -90,15 +92,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev
-      # 预算阈值断言（ROADMAP 开销预算表，任务 1.6）：10k 条 list < 11ms、
-      # 裸 sqlite 查询 < 4ms；超限即红（实测基线 ≈0.95ms/0.47ms，余量 10 倍+，
-      # CI runner 偏慢也足够）。bencher 格式：test <name> ... bench: <ns> ns/iter
+      # 预算阈值断言（ROADMAP 开销预算表，任务 1.6；实测数值唯一真相源见
+      # ARCHITECTURE §9）：10k 条 list < 11ms、裸 sqlite 查询 < 4ms、
+      # FTS 全库搜索 < 50ms；超限即红（实测 ≈0.95ms/0.47ms/0.16ms，余量 10 倍+，
+      # CI runner 偏慢也足够）。bencher 格式：test <name> ... bench: <ns> ns/iter，
+      # 数值是第 5 个字段（可能带千位逗号，先剥掉）。
+      # 任务 2.6 D12：三个近乎相同的 awk 块收敛为一次循环；并补"该 bench 必须
+      # 出现在输出里"的断言——否则改名一个 bench 会让门禁静默失效
       - name: cargo bench with budget assertions
         run: |
           set -euo pipefail
           cargo bench -p niri-clip-core --bench store -- --output-format bencher | tee bench.txt
-          awk '/list_300_of_10k.*bench:/ { gsub(/,/,"",$5); if ($5+0 >= 11000000) { print "list 预算超限:", $5, "ns"; exit 1 } }' bench.txt
-          awk '/sqlite_select_300_of_10k.*bench:/ { gsub(/,/,"",$5); if ($5+0 >= 4000000) { print "sqlite 预算超限:", $5, "ns"; exit 1 } }' bench.txt
-          # 任务 2.1（用户已批准纳入）：FTS5 全文搜索 < 50ms（实测 ≈0.16ms）
-          awk '/fts_search_300_of_10k.*bench:/ { gsub(/,/,"",$5); if ($5+0 >= 50000000) { print "fts 搜索预算超限:", $5, "ns"; exit 1 } }' bench.txt
+          check_budget() {
+            awk -v n="$1" -v lim="$2" '
+              $0 ~ n && /bench:/ {
+                found = 1
+                gsub(/,/, "", $5)
+                if ($5 + 0 >= lim) { printf "%s 预算超限: %s ns (阈值 %s)\n", n, $5, lim; bad = 1 }
+              }
+              END {
+                if (!found) { printf "%s 未出现在 bench 输出中——门禁失效，请检查 bench 名或 criterion 配置\n", n; exit 2 }
+                if (bad) exit 1
+              }
+            ' bench.txt
+          }
+          check_budget list_300_of_10k          11000000
+          check_budget sqlite_select_300_of_10k  4000000
+          check_budget fts_search_300_of_10k    50000000
           echo "BENCH OK"
