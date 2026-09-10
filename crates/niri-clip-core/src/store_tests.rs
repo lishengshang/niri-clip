@@ -772,3 +772,293 @@ fn parse_local_date_ms_uses_local_midnight_and_rejects_garbage() {
     assert!(parse_local_date_ms("2026-13-01").is_err(), "非法月份应报错");
     assert!(parse_local_date_ms("").is_err());
 }
+
+// =====================================================================
+// 任务 2.4：导出/回灌（backup.rs，NDJSON v1，格式选型见 ADR-004）
+// =====================================================================
+
+use crate::backup::{self, EXPORT_FORMAT, EXPORT_VERSION};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine as _;
+
+fn read_lines(p: &Path) -> Vec<String> {
+    std::fs::read_to_string(p)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn write_lines(p: &Path, lines: &[String]) {
+    std::fs::write(p, lines.join("\n") + "\n").unwrap();
+}
+
+#[test]
+fn export_import_round_trip() {
+    with_env(|g| {
+        clear_db();
+        insert("rt-alpha".into(), None).unwrap();
+        insert("rt-beta\n".into(), None).unwrap();
+        let img_bytes = b"\x89PNG\r\n\x1a\n-fake-payload".to_vec();
+        insert_image("image/png", &img_bytes).unwrap().unwrap();
+        let alpha_id = list(100)
+            .unwrap()
+            .iter()
+            .find(|c| c.text == "rt-alpha")
+            .unwrap()
+            .id;
+        toggle_pin(alpha_id).unwrap();
+
+        let exp = g.root.join("exp.ndjson");
+        let out = backup::export_json_file(Some(&exp)).unwrap();
+        assert_eq!(out.count, 3);
+        assert_eq!(out.images, 1);
+        assert_eq!(out.image_bytes, img_bytes.len() as u64);
+
+        let pointer_before = current_hash();
+        assert!(pointer_before.is_some(), "捕获路径已刷新 ▶ 指针");
+        wipe().unwrap();
+        assert!(list(100).unwrap().is_empty());
+
+        let r = backup::import_file(&exp, false).unwrap();
+        assert_eq!(
+            (r.imported, r.exists, r.invalid),
+            (3, 0, 0),
+            "全量回灌到空库"
+        );
+        let all = list(100).unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(
+            all.iter().any(|c| c.text == "rt-alpha" && c.pinned),
+            "星标须保留"
+        );
+        assert!(all.iter().any(|c| c.text == "rt-beta"));
+        let restored = all
+            .iter()
+            .find(|c| c.mime == "image/png")
+            .expect("图片条目须回灌");
+        let restored_path = restored.image_path.as_deref().expect("image_path 须重建");
+        assert_eq!(
+            std::fs::read(restored_path).unwrap(),
+            img_bytes,
+            "图片字节须逐字节一致"
+        );
+        // ▶ 指针不被 import 触碰（import 不是捕获，不打扰时序）
+        assert_eq!(current_hash(), pointer_before);
+    });
+}
+
+#[test]
+fn import_idempotent_no_dupes() {
+    with_env(|g| {
+        clear_db();
+        insert("idem-1".into(), None).unwrap();
+        insert("idem-2".into(), None).unwrap();
+        let exp = g.root.join("idem.ndjson");
+        backup::export_json_file(Some(&exp)).unwrap();
+        wipe().unwrap();
+
+        let r1 = backup::import_file(&exp, false).unwrap();
+        assert_eq!((r1.imported, r1.exists), (2, 0));
+        let r2 = backup::import_file(&exp, false).unwrap();
+        assert_eq!((r2.imported, r2.exists), (0, 2), "二次回灌必须全部幂等跳过");
+        assert_eq!(list(100).unwrap().len(), 2);
+    });
+}
+
+#[test]
+fn import_preserves_original_ts() {
+    with_env(|g| {
+        clear_db();
+        insert("ts-keep".into(), None).unwrap();
+        let conn = connect().unwrap();
+        let ts_before: i64 = conn
+            .query_row("SELECT ts FROM clips WHERE text='ts-keep'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        drop(conn);
+        let exp = g.root.join("ts.ndjson");
+        backup::export_json_file(Some(&exp)).unwrap();
+        wipe().unwrap();
+        // 若回灌把 ts 重置为 now，20ms 足以让两者可辨
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        backup::import_file(&exp, false).unwrap();
+        let conn = connect().unwrap();
+        let ts_after: i64 = conn
+            .query_row("SELECT ts FROM clips WHERE text='ts-keep'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(ts_after, ts_before, "回灌不得重置时间戳");
+    });
+}
+
+#[test]
+fn import_skips_corrupt_but_keeps_good() {
+    with_env(|g| {
+        clear_db();
+        insert("good-entry".into(), None).unwrap();
+        let exp = g.root.join("good.ndjson");
+        backup::export_json_file(Some(&exp)).unwrap();
+        let lines = read_lines(&exp);
+        assert_eq!(lines.len(), 2);
+
+        // 篡改 text：blake3 重算不再等于 hash，完整性校验须拦截
+        let mut tampered: serde_json::Value = serde_json::from_str(&lines[1]).unwrap();
+        tampered["text"] = serde_json::Value::String("tampered!".into());
+        let bad = serde_json::to_string(&tampered).unwrap();
+        let exp2 = g.root.join("mixed.ndjson");
+        write_lines(&exp2, &[lines[0].clone(), lines[1].clone(), bad]);
+        wipe().unwrap();
+
+        let r = backup::import_file(&exp2, false).unwrap();
+        assert_eq!(r.imported, 1, "好条目照常入库");
+        assert_eq!(r.invalid, 1, "被篡改条目须被拦截");
+        let all = list(100).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].text, "good-entry");
+    });
+}
+
+#[test]
+fn import_dry_run_stats_match_real_run() {
+    with_env(|g| {
+        clear_db();
+        insert("good-1".into(), None).unwrap();
+        insert("good-2".into(), None).unwrap();
+        let exp = g.root.join("stats.ndjson");
+        backup::export_json_file(Some(&exp)).unwrap();
+        let lines = read_lines(&exp);
+        assert_eq!(lines.len(), 3);
+
+        // header + good-1 ×2（同文件重复 hash）+ 篡改行（good-2 改文本）
+        let mut tampered: serde_json::Value = serde_json::from_str(&lines[2]).unwrap();
+        tampered["text"] = serde_json::Value::String("tampered!".into());
+        let mixed = vec![
+            lines[0].clone(),
+            lines[1].clone(),
+            lines[1].clone(),
+            serde_json::to_string(&tampered).unwrap(),
+        ];
+        let f = g.root.join("mixed.ndjson");
+        write_lines(&f, &mixed);
+        wipe().unwrap();
+
+        // dry-run 统计须与实际执行同口径：重复行收敛为 exists、invalid 计数
+        let dry = backup::import_file(&f, true).unwrap();
+        assert_eq!(
+            (dry.imported, dry.exists, dry.invalid),
+            (1, 1, 1),
+            "dry-run：同文件重复计 exists，篡改行计 invalid"
+        );
+        let real = backup::import_file(&f, false).unwrap();
+        assert_eq!(
+            (real.imported, real.exists, real.invalid),
+            (1, 1, 1),
+            "实际执行与 dry-run 同口径"
+        );
+        assert_eq!(list(100).unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn import_enforces_max_items_and_protects_pinned() {
+    with_env(|g| {
+        clear_db();
+        // 小上限配置：import_file 内部 Config::load 经 XDG_CONFIG_HOME 读取
+        let cfg_dir = g.root.join("config/niri-clip");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(cfg_dir.join("config.toml"), "max_items = 2\n").unwrap();
+
+        // 手工构造 4 条合法条目（1 条星标）：绕开 insert 路径的入库即裁剪，
+        // 才能让回灌数据量超过 max_items
+        let mut lines = vec![format!(
+            "{{\"format\":\"{EXPORT_FORMAT}\",\"version\":{EXPORT_VERSION},\"user_version\":4,\"exported_at\":0,\"count\":4}}"
+        )];
+        for i in 1..=4 {
+            let text = format!("imp-{i}");
+            lines.push(format!(
+                "{{\"hash\":\"{}\",\"text\":\"{text}\",\"mime\":\"text/plain\",\"ts\":{},\"pinned\":{},\"size\":{}}}",
+                hash_text(&text),
+                i * 1000,
+                i == 1,
+                text.len()
+            ));
+        }
+        let exp = g.root.join("many.ndjson");
+        write_lines(&exp, &lines);
+
+        let r = backup::import_file(&exp, false).unwrap();
+        assert_eq!(r.imported, 4);
+        let all = list(100).unwrap();
+        assert_eq!(all.len(), 2, "import 结束须按 max_items 裁剪");
+        // 幸存者 = 星标 + 最新；最旧的非星标被淘汰（与捕获路径同一语义）
+        assert!(all.iter().any(|c| c.text == "imp-1" && c.pinned));
+        assert!(all.iter().any(|c| c.text == "imp-4"));
+        assert!(!all.iter().any(|c| c.text == "imp-2" || c.text == "imp-3"));
+    });
+}
+
+#[test]
+fn export_header_and_image_entry_schema() {
+    with_env(|g| {
+        clear_db();
+        insert("schema-text".into(), None).unwrap();
+        let payload = b"\xff\xd8\xff-schema-jpeg".to_vec();
+        insert_image("image/jpeg", &payload).unwrap().unwrap();
+
+        let exp = g.root.join("schema.ndjson");
+        backup::export_json_file(Some(&exp)).unwrap();
+        let lines = read_lines(&exp);
+
+        let header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(header["format"], EXPORT_FORMAT);
+        assert_eq!(header["version"], EXPORT_VERSION);
+        assert_eq!(header["user_version"], 4, "与 migrate.rs 当前 schema 对齐");
+        assert_eq!(header["count"], 2);
+
+        let img_line = lines
+            .iter()
+            .find(|l| l.contains("image_base64"))
+            .expect("图片行须内嵌载荷");
+        let entry: serde_json::Value = serde_json::from_str(img_line).unwrap();
+        assert!(entry["image_path"].is_null(), "本机绝对路径不得导出");
+        let decoded = BASE64
+            .decode(entry["image_base64"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, payload, "载荷字节须无损");
+        assert_eq!(
+            image_content_key("image/jpeg", &decoded),
+            entry["hash"].as_str().unwrap(),
+            "hash 须与字节重算一致（回灌幂等键）"
+        );
+        // 文本行不携带 image_base64 键（skip_serializing_if）
+        let text_line = lines.iter().find(|l| l.contains("schema-text")).unwrap();
+        assert!(!text_line.contains("image_base64"));
+    });
+}
+
+#[test]
+fn export_sqlite_snapshot_roundtrip_and_no_overwrite() {
+    with_env(|g| {
+        clear_db();
+        insert("snap-1".into(), None).unwrap();
+        insert("snap-2".into(), None).unwrap();
+        let snap = g.root.join("snap/db.snapshot.sqlite");
+        backup::export_sqlite(&snap).unwrap();
+
+        // 物理快照是标准 sqlite 库：直接打开应可见全部行
+        let conn = rusqlite::Connection::open(&snap).unwrap();
+        let cnt: i64 = conn
+            .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+            .unwrap();
+        drop(conn);
+        assert_eq!(cnt, 2, "物理快照须包含全部行");
+
+        assert!(
+            backup::export_sqlite(&snap).is_err(),
+            "已存在目标必须拒绝覆盖（备份命令绝不静默覆盖）"
+        );
+    });
+}

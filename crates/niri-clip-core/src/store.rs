@@ -31,7 +31,8 @@ pub struct InsertedImage {
     pub path: PathBuf,
 }
 
-fn connect() -> Result<Connection> {
+/// 连接（含旧库搬迁 + schema 迁移）。backup.rs（导出/回灌）同用此唯一入口
+pub(crate) fn connect() -> Result<Connection> {
     let path = Config::db_path();
     crate::migrate::migrate_legacy_db(&path)?;
     if let Some(p) = path.parent() {
@@ -274,7 +275,9 @@ pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Optio
     Ok(Some(InsertedImage { id, path }))
 }
 
-fn enforce_max_items(conn: &Connection, max_items: usize) -> Result<()> {
+/// 上限裁剪（文本/图片共用）。pub(crate)：import（backup.rs）结束后按当前
+/// 配置执行一次，与捕获路径同一上限语义
+pub(crate) fn enforce_max_items(conn: &Connection, max_items: usize) -> Result<()> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
     if count > max_items as i64 {
         let to_del = count - max_items as i64;

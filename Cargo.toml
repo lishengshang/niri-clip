@@ -16,6 +16,8 @@ repository = "https://github.com/lishengshang/niri-clip"
 [workspace.dependencies]
 niri-clip-core = { path = "crates/niri-clip-core" }
 anyhow = "1"
+# 任务 2.4：NDJSON 导出/回灌的 base64 编解码（零传递依赖）
+base64 = "0.22"
 # 任务 2.2：文本去重指纹（DefaultHasher 跨编译器不稳定，见 ADR-003）。
 # default 仅 std：纯 Rust + 运行时 SIMD 检测，零传递依赖
 blake3 = "1"

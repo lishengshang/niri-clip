@@ -137,6 +137,13 @@ niri-clip vacuum       # VACUUM 压缩库文件（返回前后体积）
 niri-clip prune --before 2026-08-01 [--dry-run]
                        # 删除该日期（本地时区零点）前的旧条目；
                        # 星标与当前项 ▶ 受保护，--dry-run 仅预览
+niri-clip export <file|-> [--sqlite <db>]
+                       # 全量导出 NDJSON（首行元数据+每行一条目，图片内嵌
+                       # base64，hash 为回灌幂等键）；`-` 写 stdout；
+                       # --sqlite 额外产出 db.sqlite 物理快照（已存在则报错）
+niri-clip import <file> [--dry-run]
+                       # 从备份回灌合并：hash 幂等（已存在跳过不刷时序），
+                       # 损坏条目跳过并警告，--dry-run 只校验统计
 niri-clip migrate     # 从 cliphist 导入
 niri-clip install-service
                       # 一键安装 systemd user 单元

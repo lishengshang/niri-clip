@@ -107,6 +107,13 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
   Config::load + connect 全口径）、`sqlite_select_300_of_10k` ≈0.47ms，
   均远低于 ROADMAP 预算（11ms / 4ms）。运行：`cargo bench -p niri-clip-core`
 
+- **导出/回灌（2.4，backup.rs）**：NDJSON 流式格式（首行 header + 每行一条目，
+  图片内嵌 base64，选型与被拒备选见 ADR-004）。导出读事务（deferred 快照）
+  保证 COUNT 与全表扫描一致，文件 0600；回灌 hash 幂等（blake3 / `img:` FNV
+  重算比对拦截损坏条目）+ 单 BEGIN IMMEDIATE 事务原子提交，保留原 ts/pinned
+  不触碰 ▶ 指针，结束 enforce_max_items；`--sqlite` 走 `VACUUM INTO` 物理快照
+  （复用 migrate_legacy_db 模式，目标已存在拒绝覆盖）
+
 ## 4. TUI - 不跳顶
 
 - **后端选择**：`tui_backend=auto` 时**只检测 fzf 是否存在即启用 fzf**
@@ -190,7 +197,8 @@ image 的后台预解码（`load_from_memory` → `Handle::from_rgba`，iced 渲
 `image = default-features=false, features=["png","jpeg","webp"]`：28 个
 lockfile 包出图，Cargo.lock -576 行；非 png/jpeg/webp 格式解码失败走既有
 优雅降级提示。二进制体积：CLI 6.5 MiB / GUI 11.2 MiB（strip 后；
-notify-send 交换后降至 5.1 / 9.8 MiB）。
+notify-send 交换后降至 5.1 / 9.8 MiB；2.4 引入 serde_json 序列化面后
+CLI 5.5 MiB，增量 0.4 MiB 为 serde_json+base64 代码与元数据）。
 
 **编译时间基线（本机，2026-09-01）：** 主包 96s / GUI 增量 123s /
 全 workspace ≈219s。原 ROADMAP `<60s` 预算定于 Phase 0 早期依赖树远小
