@@ -22,11 +22,55 @@ pub fn preview_text(clip: &Clip, width: usize) -> String {
     marked
 }
 
+/// 多行预览结果
+pub struct MultilinePreview {
+    pub text: String,
+    /// 是否发生截断（行数超限或某行被截断）——调用方据此决定提示文案
+    pub truncated: bool,
+}
+
+/// CLI `preview <id>` 的规格：最多 100 行 × 每行 300 字符
+pub const MULTILINE_CLI: (usize, usize) = (100, 300);
+/// 原生 UI 底部预览窗格的规格：窗格定高 220px，80 行足够且省一次全量遍历
+pub const MULTILINE_GUI: (usize, usize) = (80, 300);
+
+/// 多行预览（逐行截断）——CLI `preview` 子命令与原生 UI 底部窗格共用的**唯一实现**。
+///
+/// 任务 2.6 / C5：此前两处各自实现，且 GUI 侧用 `text.len() > out.len()`（字节比较）
+/// 判断是否截断，与"逐行按**字符**截断"的口径不匹配，存在漏判。现统一在 core。
+///
+/// 返回的 `text` 每行以 `\n` 结尾；`truncated` 覆盖两种情况：行数超限、某行被截断。
+pub fn preview_multiline(clip: &Clip, max_lines: usize, line_width: usize) -> MultilinePreview {
+    let mut out = String::new();
+    let mut truncated = false;
+    for (i, line) in clip.text.lines().enumerate() {
+        if i >= max_lines {
+            truncated = true;
+            break;
+        }
+        let l: String = line.chars().take(line_width).collect();
+        if l.chars().count() < line.chars().count() {
+            truncated = true;
+        }
+        out.push_str(&l);
+        out.push('\n');
+    }
+    MultilinePreview {
+        text: out,
+        truncated,
+    }
+}
+
 /// 实际渲染：供 `tui preview <id>` 输出到 stdout。
 ///
 /// v0.4 正确性修复：数据文件按 clip id 关联（images/{id}.bin，
 /// 路径存于 clips.image_path）。旧实现"取 images 目录里 mtime 最新的一张"
 /// 必然把最近一次复制的图渲染到所有图片条目上。
+/// chafa 渲染尺寸（符号格式，`宽x高` 字符数）。与 `preview_width`（列表单行
+/// 截断宽度）是不同概念：后者是 UI 行宽的字符数，这里是终端图形的字符网格，
+/// 故独立常量并显式说明（任务 2.6 / D10）
+const CHAFA_SIZE: &str = "60x20";
+
 pub fn render_preview(clip: &Clip) -> String {
     if !clip.mime.starts_with("image/") {
         return String::new();
@@ -44,7 +88,7 @@ pub fn render_preview(clip: &Clip) -> String {
                 "--format",
                 "symbols",
                 "--size",
-                "60x20",
+                CHAFA_SIZE,
                 &path.to_string_lossy(),
             ])
             .output()

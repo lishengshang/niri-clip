@@ -1,60 +1,30 @@
 //! 单实例保护与已开窗口聚焦。
+//!
+//! 实例互斥机制已收敛到 `niri_clip_core::single_instance`（任务 2.6 / C4）：
+//! flock 由内核在进程退出或崩溃时自动释放，不再需要 PID 文件与 `/proc/{pid}`
+//! 复核，也没有 PID 回收造成的假阳性。本模块只保留"已有实例时做什么"。
 
-use std::io::Write;
+use niri_clip_core::single_instance::InstanceGuard;
 
-use niri_clip_core::config;
-
-/// 单实例保护：Mod+V 连按会并发拉起多个 GUI。state/gui.lock 存 PID——
-/// 活实例存在 → 聚焦其窗口后本进程退出；残留死锁（崩溃/强杀）→ 覆写接管
-pub fn ensure_single_instance() {
-    let dir = config::Config::state_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("gui.lock");
-    let pid = std::process::id();
-
-    match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut f) => {
-            let _ = write!(f, "{pid}");
+/// 取得 GUI 单实例锁。返回的守卫**必须存活到进程退出**（drop 即释放锁）。
+///
+/// 若已有实例在跑：经 niri IPC 聚焦它的窗口后本进程退出（不返回）——
+/// Mod+V 连按应"拉回已开窗口"而非开新的。
+pub fn ensure_single_instance() -> Option<InstanceGuard> {
+    match InstanceGuard::try_acquire("gui") {
+        Ok(Some(guard)) => Some(guard),
+        Ok(None) => {
+            let _ = focus_existing_window();
+            // 此处尚未创建 iced 运行时与 sqlite 连接，没有可析构的资源，
+            // 故用 process::exit 直接退出；app 启动后的退出点（update.rs）
+            // 已改为 iced::exit() 以走正常析构（任务 2.6 / D3）
+            std::process::exit(0);
         }
-        Err(_) => {
-            let existing = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| s.trim().parse::<u32>().ok())
-                .filter(|p| *p != pid && pid_alive(*p));
-            if existing.is_some() {
-                let _ = focus_existing_window();
-                std::process::exit(0);
-            }
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&path)
-            {
-                let _ = write!(f, "{pid}");
-            }
+        Err(e) => {
+            eprintln!("[niri-clip gui] single instance lock failed: {e:#}");
+            None
         }
     }
-}
-
-/// PID 活性复核：argv[0] 的文件名必须精确等于 niri-clip-gui（防 PID 回收）。
-/// 不用 contains——`cargo build -p niri-clip-gui` 等命令行里含该子串的进程
-/// 会造成假阳性拒启
-fn pid_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-        .ok()
-        .and_then(|s| s.split('\0').next().map(str::to_string))
-        .filter(|argv0| !argv0.is_empty())
-        .and_then(|argv0| {
-            std::path::Path::new(&argv0)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(str::to_owned)
-        })
-        .is_some_and(|name| name == "niri-clip-gui")
 }
 
 /// 已开窗口聚焦到前台（niri IPC）：Mod+V 二连按 = 把它拉回来而非开新的。

@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
 use std::io::Write;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::config::Config;
-use crate::store;
+use niri_clip_core::config::Config;
+use niri_clip_core::store;
 
 fn has_bin(name: &str) -> bool {
     which::which(name).is_ok()
@@ -95,85 +93,15 @@ fn backend(cfg: &Config) -> &'static str {
     }
 }
 
-/// v0.4：菜单取数统一入口——直查 min(max_items, TUI_LIMIT) 条，
+/// v0.4：菜单取数统一入口——直查 min(max_items, MENU_LIMIT) 条，
 /// 不再区分缓存/非缓存分支（缓存层已移除）
 fn menu_clips(cfg: &Config) -> Result<Vec<store::Clip>> {
-    store::list(cfg.max_items.min(store::TUI_LIMIT))
+    store::list(cfg.max_items.min(store::MENU_LIMIT))
 }
 
-// =====================================================================
-// 任务 1.5：★ 条目删除的 fzf 内嵌二段确认（去 fuzzel 依赖路径）。
-//
-// AUR 主包只装 CLI 不装 GUI——fzf TUI 就是主界面，而旧实现删 ★ 必须
-// 有 fuzzel 弹窗确认，无 fuzzel 环境直接删不掉。
-//
-// 语义：第一次 Ctrl-X 只挂起（state/pending_delete 记 id+时间戳，15s
-// TTL），list-raw reload 后该行预览尾追 "◆ 再按Ctrl-X确认删除" 标记；
-// 同一行再按一次才真删；按在别的 ★ 行则挂起转移；非 ★ 行单击直删。
-// =====================================================================
-
-/// 挂起删除的有效期：超时自动作哑——防止用户分心后回来误触真删
-const PENDING_TTL_MS: u128 = 15_000;
-
-fn pending_delete_path() -> PathBuf {
-    Config::state_dir().join("pending_delete")
-}
-
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
-fn write_pending_delete(id: i64) {
-    let _ = std::fs::write(pending_delete_path(), format!("{id} {}", now_ms()));
-}
-
-/// 读取挂起中的删除目标；过期/损坏一律视作无挂起并清文件
-fn read_pending_delete() -> Option<i64> {
-    let raw = std::fs::read_to_string(pending_delete_path()).ok()?;
-    let mut it = raw.split_whitespace();
-    let id: i64 = it.next()?.parse().ok()?;
-    let ts: u128 = it.next()?.parse().ok()?;
-    if now_ms().saturating_sub(ts) > PENDING_TTL_MS {
-        let _ = std::fs::remove_file(pending_delete_path());
-        return None;
-    }
-    Some(id)
-}
-
-fn clear_pending_delete() {
-    let _ = std::fs::remove_file(pending_delete_path());
-}
-
-/// fzf 二段确认删除：返回是否已真删（Pending = 仅挂起，等待同行再按）
-pub enum DeleteConfirm {
-    Deleted,
-    Pending,
-}
-
-pub fn delete_with_fzf_confirm(id: i64) -> Result<DeleteConfirm> {
-    let pinned = store::is_pinned(id).unwrap_or(false);
-    if !pinned {
-        // 非 ★ 行维持单击直删；顺带清掉可能残留的挂起状态
-        clear_pending_delete();
-        store::delete(id)?;
-        return Ok(DeleteConfirm::Deleted);
-    }
-    if read_pending_delete() == Some(id) {
-        clear_pending_delete();
-        store::delete(id)?;
-        return Ok(DeleteConfirm::Deleted);
-    }
-    write_pending_delete(id);
-    Ok(DeleteConfirm::Pending)
-}
-
-/// list-raw 标记：挂起中的行在预览尾追提示（列布局不变，安全追加）
-pub fn pending_delete_marker() -> Option<i64> {
-    read_pending_delete()
-}
+// ★ 条目删除确认的**状态机**已收敛到 `crate::confirm`（任务 2.6 / ADR-005）：
+// 本模块只负责"如何呈现挂起态"——`list-raw` 在挂起行的预览列尾部追加提示标记。
+// 语义（15s TTL / 挂起转移 / 过期重新挂起）与判定全部在 confirm.rs，前端不得自行实现。
 
 /// fzf 的全屏 UI 依赖控制终端（/dev/tty）。niri `spawn` 拉起的进程
 /// 没有控制终端，fzf 会直接报 "inappropriate ioctl for device" 退出。
@@ -250,7 +178,9 @@ pub fn run() -> Result<()> {
             return run_fuzzel(&cfg);
         }
         if cfg.notify_enabled {
-            crate::notify::send("fzf 需要 TTY：请安装 foot/ghostty/kitty 等终端，或安装 fuzzel");
+            niri_clip_core::notify::send(
+                "fzf 需要 TTY：请安装 foot/ghostty/kitty 等终端，或安装 fuzzel",
+            );
         }
         anyhow::bail!("no controlling tty and no terminal emulator / fuzzel available");
     }
@@ -262,7 +192,7 @@ pub fn run() -> Result<()> {
             be = "fuzzel";
         } else {
             if cfg.notify_enabled {
-                crate::notify::send("niri-clip 需要 fzf >= 0.71（或安装 fuzzel）");
+                niri_clip_core::notify::send("niri-clip 需要 fzf >= 0.71（或安装 fuzzel）");
             }
             anyhow::bail!("fzf missing or too old (<0.71) and fuzzel unavailable");
         }
@@ -293,9 +223,30 @@ fn run_fallback(be: &'static str, cfg: &Config) -> Result<()> {
     }
 }
 
-/// fzf/fuzzel 共用的行渲染：序号 + 当前项标记(▶) + 星标(★) + id + 预览。
-/// fzf 输入列布局（tab 分隔）：1=num 2=cur 3=star 4=id 5=preview。
-/// ▶ 语义 = 最后一次复制的内容 ≈ Ctrl+V 会粘出的东西（store::current_hash）。
+/// 菜单行渲染的**唯一出口**（fzf 初始输入 / `list-raw` / `search` 三处共用）。
+///
+/// tab 分隔 5 列：`num \t ▶ \t ★ \t id \t preview`。**列序是 fzf 参数的下标依据**
+/// （`FZF_NTH` / `FZF_WITH_NTH` / `FZF_ID_NTH` 与 `{4}` 占位符），改动列数或列序
+/// 必须同步这些常量；`run_fzf` 内的 `debug_assert` 会校验输入列数。
+///
+/// `marker` 追加在预览列尾部（挂起删除的"再按 Ctrl-X 确认"提示），不破坏列布局。
+/// 收敛前该格式在 4 处各拼一遍，列格式变更要改 4 处、挂起标记只在其中 2 处生效
+/// （任务 2.6 / C2）。
+fn render_row(
+    num: usize,
+    cur: Option<&str>,
+    c: &store::Clip,
+    cfg: &Config,
+    marker: &str,
+) -> String {
+    let (cur_mark, star) = row_marks(cur, c);
+    let mut preview = niri_clip_core::preview::preview_text(c, cfg.preview_width);
+    preview.push_str(marker);
+    format!("{num}\t{cur_mark}\t{star}\t{}\t{preview}", c.id)
+}
+
+/// 行标记：当前项(▶) + 星标(★)。▶ 语义 = 最后一次复制的内容 ≈ Ctrl+V 会粘出
+/// 的东西（`store::current_hash`）
 fn row_marks(cur: Option<&str>, c: &store::Clip) -> (String, String) {
     let cur_mark = if cur == Some(c.hash.as_str()) {
         "▶"
@@ -306,13 +257,30 @@ fn row_marks(cur: Option<&str>, c: &store::Clip) -> (String, String) {
     (cur_mark.to_string(), star.to_string())
 }
 
+/// fzf 行字段布局（tab 分隔的**原始**行）：
+/// 1=序号 2=当前项(▶) 3=星标(★) 4=id 5=预览
+const FZF_ORIGINAL_COLS: usize = 5;
+/// `--with-nth` 要展示的列（隐藏 id 列——它不参与搜索，否则查询 "1" 会命中
+/// 所有序号/id 含 1 的行，数字搜索被污染）
+const FZF_WITH_NTH: &str = "1,2,3,5..";
+/// `--nth` 限定搜索作用列。**下标按 `--with-nth` 变换后的行计算**（man fzf：
+/// "the field index expressions are calculated against the transformed lines
+/// ... because fzf doesn't allow searching against the hidden fields"）。
+/// 原始 5 列隐藏 id 后剩 4 列，故 preview 是变换后的第 4 列。
+/// 此处若写 5.. 则没有任何字段参与匹配 → 输入任意查询列表即被清空（真实缺陷，
+/// 实测 fzf 0.74 零命中；已由 `fzf_nth_targets_the_preview_column` 锁定）。
+/// 对照：`--preview` 与 `{n}` 占位符、`--id-nth` 走**原始**行下标，故 `{4}`=id 正确。
+const FZF_NTH: &str = "4..";
+/// `--track` 的条目身份字段（原始行下标 = id 列）
+const FZF_ID_NTH: &str = "4";
+
 fn run_fzf(cfg: &Config) -> Result<()> {
     // 清理上次会话可能残留的挂起删除（进程退出不会自动清）
-    clear_pending_delete();
+    niri_clip_core::confirm::clear();
     let clips = menu_clips(cfg)?;
     if clips.is_empty() {
         if cfg.notify_enabled {
-            crate::notify::send("剪贴板历史为空");
+            niri_clip_core::notify::send("剪贴板历史为空");
         }
         return Ok(());
     }
@@ -321,14 +289,20 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // 生成 fzf 输入：序号\t▶\t★\t{id}\t{preview}  (序号用于 1-9 快选定位)
     let mut input = String::new();
     for (idx, c) in clips.iter().enumerate() {
-        let num = idx + 1;
-        let (cur_mark, star) = row_marks(cur.as_deref(), c);
-        let preview = crate::preview::preview_text(c, cfg.preview_width);
-        input.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\n",
-            num, cur_mark, star, c.id, preview
-        ));
+        input.push_str(&render_row(idx + 1, cur.as_deref(), c, cfg, ""));
+        input.push('\n');
     }
+
+    // 行格式不变式：输入列数必须与 FZF_* 常量（以及下方 fzf 的 --nth/--with-nth
+    // 参数）一致，否则搜索作用列与占位符会错位——历史缺陷见 FZF_NTH 注释
+    debug_assert_eq!(
+        input
+            .lines()
+            .next()
+            .map_or(FZF_ORIGINAL_COLS, |l| l.split('\t').count()),
+        FZF_ORIGINAL_COLS,
+        "fzf 输入行必须是 {FZF_ORIGINAL_COLS} 个 tab 分隔列"
+    );
 
     // header 缺席提示：指针存在但列表第 1 行不匹配 → 当前内容被过滤/超限，
     // 不在历史中（在库中则必因置顶排序出现在第 1 行）
@@ -376,10 +350,9 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     let mut fzf = Command::new("fzf")
         .arg("--no-sort")
         .arg("--delimiter=\t")
-        // 匹配只作用于 preview 列：隐藏的序号/标记/id 列不参与搜索，
-        // 否则查询 "1" 会命中所有序号/id 含 1 的行，数字搜索被污染
-        .arg("--nth=5..")
-        .arg("--with-nth=1,2,3,5..")
+        // 匹配只作用于 preview 列（见 FZF_NTH 注释：按变换后口径计下标）
+        .arg(format!("--nth={FZF_NTH}"))
+        .arg(format!("--with-nth={FZF_WITH_NTH}"))
         // 快选/跳转/不退出复制：binds 必须显式挂载，
         // 否则 Alt+1..9 等于没有绑定，快选静默失效
         .arg(format!("--bind={}", binds.join(",")))
@@ -391,7 +364,7 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         .arg("--prompt=剪贴板> ")
         .arg(format!("--header={header}"))
         .arg("--track")
-        .arg("--id-nth=4")
+        .arg(format!("--id-nth={FZF_ID_NTH}"))
         .arg("--no-input")
         .arg(format!("--preview={}", preview_cmd))
         .arg("--preview-window=down:5:wrap:border-rounded")
@@ -456,7 +429,7 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
         let num = idx + 1;
         let (cur_mark, star) = row_marks(cur.as_deref(), c);
         let marks = format!("{cur_mark}{star}").trim().to_string();
-        let preview = crate::preview::preview_text(c, cfg.preview_width);
+        let preview = niri_clip_core::preview::preview_text(c, cfg.preview_width);
         input.push_str(&format!("{}. {} {} {}\n", num, marks, c.id, preview));
     }
     // fuzzel dmenu 简单实现：选中后粘贴，不支持原地 reload，按 Enter 后退出
@@ -500,19 +473,7 @@ pub fn search_raw(query: &str, limit: usize) -> Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     for (idx, c) in clips.iter().enumerate() {
-        let (cur_mark, star) = row_marks(cur.as_deref(), c);
-        let preview = crate::preview::preview_text(c, cfg.preview_width);
-        if writeln!(
-            out,
-            "{}\t{}\t{}\t{}\t{}",
-            idx + 1,
-            cur_mark,
-            star,
-            c.id,
-            preview
-        )
-        .is_err()
-        {
+        if writeln!(out, "{}", render_row(idx + 1, cur.as_deref(), c, &cfg, "")).is_err() {
             break;
         }
     }
@@ -524,22 +485,21 @@ pub fn list_raw() -> Result<()> {
     let cfg = Config::load();
     let clips = menu_clips(&cfg)?;
     let cur = store::current_hash();
-    let pending = pending_delete_marker();
+    let pending = niri_clip_core::confirm::pending_id();
     use std::io::{self, Write};
     let stdout = io::stdout();
     let mut out = stdout.lock();
     for (idx, c) in clips.iter().enumerate() {
-        let num = idx + 1;
-        let (cur_mark, star) = row_marks(cur.as_deref(), c);
-        let mut preview = crate::preview::preview_text(c, cfg.preview_width);
-        if pending == Some(c.id) {
-            // 二段确认标记：追加在第 5 列尾部，不破坏 tab 列布局
-            preview.push_str("  ◆ 再按Ctrl-X确认删除");
-        }
+        // 二段确认标记：追加在第 5 列尾部，不破坏 tab 列布局
+        let marker = if pending == Some(c.id) {
+            "  ◆ 再按Ctrl-X确认删除"
+        } else {
+            ""
+        };
         if writeln!(
             out,
-            "{}\t{}\t{}\t{}\t{}",
-            num, cur_mark, star, c.id, preview
+            "{}",
+            render_row(idx + 1, cur.as_deref(), c, &cfg, marker)
         )
         .is_err()
         {
@@ -555,7 +515,7 @@ pub fn preview_id(id: i64) -> Result<()> {
     if c.mime.starts_with("image/") {
         let cfg = Config::load();
         if cfg.enable_image_preview {
-            let rendered = crate::preview::render_preview(&c);
+            let rendered = niri_clip_core::preview::render_preview(&c);
             if !rendered.is_empty() {
                 println!("{}", rendered);
                 return Ok(());
@@ -565,21 +525,14 @@ pub fn preview_id(id: i64) -> Result<()> {
         println!("{}", c.text);
         return Ok(());
     }
-    // 文本：逐行输出，行数截 100 / 每行截 300 字符，发生截断时如实提示
-    // （旧提示阈值 2000 字节与实际截断口径不一致，3KB 的 10 行文本会被误标）
-    let mut truncated = false;
-    for (i, line) in c.text.lines().enumerate() {
-        if i >= 100 {
-            truncated = true;
-            break;
-        }
-        let l: String = line.chars().take(300).collect();
-        if l.chars().count() < line.chars().count() {
-            truncated = true;
-        }
-        println!("{}", l);
-    }
-    if truncated {
+    // 文本：多行预览的唯一实现下沉在 core（任务 2.6 / C5），此处只做输出与提示
+    let p = niri_clip_core::preview::preview_multiline(
+        &c,
+        niri_clip_core::preview::MULTILINE_CLI.0,
+        niri_clip_core::preview::MULTILINE_CLI.1,
+    );
+    print!("{}", p.text);
+    if p.truncated {
         println!("… (预览已截断，完整内容 {} 字节)", c.text.len());
     }
     Ok(())
@@ -610,64 +563,53 @@ mod tests {
         assert!((0, 74) >= FZF_MIN);
     }
 
-    /// ★ 条目二段确认全流程：首次挂起不真删 → 同 id 再按真删 → 过期
-    /// 挂起不作数。XDG 环境隔离（共享全局锁，见 lib.rs test_util 注释）
+    /// 回归锁定（真实缺陷）：`--nth` 的下标按 `--with-nth` **变换后**的行计算
+    /// ——历史上写的是 `5..`（按原始 5 列），而变换后只剩 4 列，导致 fzf TUI
+    /// 输入任意查询列表即被清空（实测 fzf 0.74 `--filter` 零命中）。
     #[test]
-    fn fzf_delete_two_step_confirm_on_pinned() {
-        use crate::test_util::ENV_LOCK;
-        let _g = ENV_LOCK.lock().unwrap();
-        let root = std::env::temp_dir().join(format!(
-            "niri-clip-tui-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        std::fs::create_dir_all(root.join("state")).unwrap();
-        let prev = std::env::var("XDG_STATE_HOME").ok();
-        std::env::set_var("XDG_STATE_HOME", root.join("state"));
+    fn fzf_nth_targets_the_preview_column() {
+        // 布局不变式：原始 5 列隐藏 id 列后剩 4 列，preview 是变换后的最后一列
+        let hidden_cols = 1; // id 列被 --with-nth 隐藏
+        let transformed_cols = FZF_ORIGINAL_COLS - hidden_cols;
+        let nth_first: usize = FZF_NTH
+            .trim_end_matches("..")
+            .parse()
+            .expect("FZF_NTH 形如 \"4..\"");
+        assert_eq!(
+            nth_first, transformed_cols,
+            "--nth 按变换后的行计下标：隐藏 id 后 preview 应在第 {transformed_cols} 列"
+        );
+        // 变换后的列确实来自原始第 5 列（preview），且占位符仍用原始下标
+        assert!(
+            FZF_WITH_NTH.split(',').any(|c| c.starts_with('5')),
+            "preview（原始第 5 列）必须在展示列中"
+        );
+        assert_eq!(FZF_ID_NTH, "4", "id 是原始第 4 列");
+    }
 
-        store::insert("tui-del-entry-甲".into(), None).unwrap();
-        let clip = store::list(10)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.text.starts_with("tui-del-entry-甲"))
-            .expect("seeded");
-        store::toggle_pin(clip.id).unwrap();
-
-        // 第一次 Ctrl-X：仅挂起，不真删；list-raw 标记指向该行
-        assert!(matches!(
-            delete_with_fzf_confirm(clip.id).unwrap(),
-            DeleteConfirm::Pending
-        ));
-        assert!(store::get(clip.id).is_ok(), "挂起阶段不得真删");
-        assert_eq!(pending_delete_marker(), Some(clip.id));
-
-        // 第二次 Ctrl-X：真删，挂起清空
-        assert!(matches!(
-            delete_with_fzf_confirm(clip.id).unwrap(),
-            DeleteConfirm::Deleted
-        ));
-        assert!(store::get(clip.id).is_err());
-        assert_eq!(pending_delete_marker(), None);
-
-        // 过期挂起（时间戳写 0）不作数：仍走挂起而不是误删
-        store::insert("tui-del-entry-乙".into(), None).unwrap();
-        let clip2 = store::list(10)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.text.starts_with("tui-del-entry-乙"))
-            .expect("seeded 2");
-        store::toggle_pin(clip2.id).unwrap();
-        std::fs::write(pending_delete_path(), format!("{} 0", clip2.id)).unwrap();
-        assert!(matches!(
-            delete_with_fzf_confirm(clip2.id).unwrap(),
-            DeleteConfirm::Pending
-        ));
-        assert!(store::get(clip2.id).is_ok(), "过期挂起不得触发真删");
-
-        match prev {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
-        let _ = std::fs::remove_dir_all(&root);
+    /// 端到端：fzf 可用时用真实 fzf 校验参数确实能命中 preview 列。
+    /// 环境无 fzf 则跳过（CI 不保证安装），口径一致性由上一测试兜底。
+    #[test]
+    fn fzf_args_actually_match_the_preview_column() {
+        let sample = "1\t▶\t \t11\tpreview-aaa\n2\t \t★\t22\tother-bbb\n";
+        let Ok(mut child) = Command::new("fzf")
+            .arg("--filter=aaa")
+            .arg("--delimiter=\t")
+            .arg(format!("--nth={FZF_NTH}"))
+            .arg(format!("--with-nth={FZF_WITH_NTH}"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            return; // 无 fzf，跳过
+        };
+        use std::io::Write as _;
+        let _ = child.stdin.as_mut().unwrap().write_all(sample.as_bytes());
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("preview-aaa"),
+            "传入的 fzf 参数必须能命中 preview 列（历史缺陷：--nth=5.. 时零命中）"
+        );
     }
 }

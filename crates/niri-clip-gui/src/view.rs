@@ -33,7 +33,7 @@ impl App {
         let rows = filtered
             .iter()
             .enumerate()
-            .take(MAX_RENDER_ROWS)
+            .take(store::MENU_LIMIT)
             .map(|(idx, clip)| {
                 let selected = idx == self.selected;
                 let cursor = if selected { "❯" } else { " " };
@@ -256,19 +256,17 @@ impl App {
             .and_then(|(_, v)| v.clone())
     }
 
-    /// 底部预览：可滚窗格内容（80 行 / 每行 300 字符上限，超出补 …）。
-    /// ↵ → ⏎，同行的 tofu 规避
+    /// 底部预览窗格内容：多行截断的唯一实现下沉在 core（任务 2.6 / C5），
+    /// 此处只做 GUI 特有的处理——`↵` 在该字体下是 tofu，换成 `⏎`；
+    /// 截断提示按 core 返回的 `truncated`（此前用字节长度比较，会漏判）
     fn preview_text(&self, clip: &store::Clip) -> String {
-        let mut out = String::new();
-        for line in clip.text.lines().take(80) {
-            let l: String = line.chars().take(300).collect();
-            out.push_str(&l);
-            out.push('\n');
-        }
-        if clip.text.len() > out.len() {
+        let p =
+            preview::preview_multiline(clip, preview::MULTILINE_GUI.0, preview::MULTILINE_GUI.1);
+        let mut out = p.text.replace('↵', "⏎");
+        if p.truncated {
             out.push('…');
         }
-        out.replace('↵', "⏎")
+        out
     }
 
     /// 图片条目的渲染 Handle：只查缓存（解码由后台线程完成后经

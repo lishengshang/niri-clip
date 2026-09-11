@@ -32,7 +32,7 @@ use iced::widget::{
 use iced::{
     keyboard, mouse, Background, Border, Element, Font, Length, Shadow, Subscription, Task,
 };
-use niri_clip_core::{config, preview, store};
+use niri_clip_core::{config, confirm, preview, store};
 
 /// 主字体：JetBrainsMono Nerd Font（真机已装）。
 /// 不用 Font::MONOSPACE（fontconfig 解析到 Noto Sans Mono）：❯▶◆⏎ 等符号
@@ -124,6 +124,68 @@ where
     )
 }
 
+/// 过滤结果缓存条目。
+///
+/// `idxs` 的**下标空间取决于来源**——早期实现漏了这个区分，把 FTS 候选链产出的
+/// 下标直接拿去索引 `clips`，造成两个后果：① 搜索结果错位（显示的变成列表前 N 条
+/// 而非真正命中，Enter/复制会复制到非命中项）；② `max_items < SEARCH_LIMIT` 时
+/// `clips[i]` 越界 panic。故来源必须与下标一起缓存。
+#[derive(Clone)]
+struct FilteredCache {
+    /// `clips` 代数：整表重载即失效（pin/delete/copy 后长度可能不变，不能只比长度）
+    gen: u64,
+    query: String,
+    /// true = `idxs` 指向 `search_hits`（FTS/LIKE 候选链）；false = 指向 `clips`
+    from_search: bool,
+    idxs: Vec<usize>,
+}
+
+/// 计算过滤结果，返回 `(下标是否指向 search_hits, 下标列表)`。
+///
+/// 三条路径：空查询 = 原序；有新鲜搜索候选 = 相关度重排；其余 = 对已载入窗口
+/// 做内存子序列过滤。
+///
+/// **返回的第一项必须与 `idxs` 一起使用**——`search_hits` 与 `clips` 是顺序和
+/// 内容都不同的两个 Vec，拿候选链的下标去索引 `clips` 会取到错误条目，并在候选数
+/// 超过列表窗口（`max_items` 设小于 `SEARCH_LIMIT`）时越界 panic（历史缺陷，
+/// 已由 `search_hit_indices_resolve_against_search_hits` 等单测锁定）。
+fn compute_filtered(
+    query: &str,
+    clips: &[store::Clip],
+    search_hits: &[store::Clip],
+    search_hits_query: &str,
+    search_hits_gen: u64,
+    clips_gen: u64,
+) -> (bool, Vec<usize>) {
+    if query.is_empty() {
+        return (false, (0..clips.len()).collect());
+    }
+    // 候选是子串命中，fuzzy 子序列必命中；极端大小写折叠差异导致全不匹配时
+    // 回落搜索自身序（不展示空列表）
+    if search_hits_query == query && search_hits_gen == clips_gen && !search_hits.is_empty() {
+        let q = query.to_lowercase();
+        let mut scored: Vec<(i32, usize)> = search_hits
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| fuzzy_score(&q, &c.text).map(|s| (s, i)))
+            .collect();
+        if scored.is_empty() {
+            return (true, (0..search_hits.len()).collect());
+        }
+        // 稳定排序：并列保持搜索自身的相关度序
+        scored.sort_by_key(|s| Reverse(s.0));
+        return (true, scored.into_iter().map(|(_, i)| i).collect());
+    }
+    let q = query.to_lowercase();
+    let mut scored: Vec<(i32, usize)> = clips
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| fuzzy_score(&q, &c.text).map(|s| (s, i)))
+        .collect();
+    scored.sort_by_key(|s| Reverse(s.0));
+    (false, scored.into_iter().map(|(_, i)| i).collect())
+}
+
 struct App {
     search_id: iced::widget::Id,
     /// 行列表 scrollable 的 Id：键盘导航时 scroll_to 跟随选中
@@ -142,9 +204,9 @@ struct App {
     search_hits_query: String,
     search_hits_gen: u64,
     query: String,
-    /// 过滤结果缓存：(代数, 查询, 命中的 clips 下标)。悬停/选中/复制等
-    /// 高频事件都会调 filtered()，750 条全量评分排序 O(n·m) 不能每事件重算
-    filtered_cache: RefCell<Option<(u64, String, Vec<usize>)>>,
+    /// 过滤结果缓存。悬停/选中/复制等高频事件都会调 filtered()，全量评分排序
+    /// O(n·m) 不能每事件重算；来源与下标必须成对缓存，见 `FilteredCache`
+    filtered_cache: RefCell<Option<FilteredCache>>,
     selected: usize,
     /// 选中项身份（fzf --track 的确定性实现）：clips 只增代数不保序——
     /// store::list 把 ▶ 当前项置顶、星标可置顶，daemon 捕获/其他窗口操作
@@ -214,18 +276,20 @@ impl App {
         }
     }
 
+    /// 列表窗口上限：与 fzf TUI 取同一常量（`store::MENU_LIMIT`），
+    /// 保证两个后端看到的条目数一致。搜索面不受此窗口限制——任何非空查询
+    /// 都走 `store::search`（≥3 字符 FTS / <3 字符 LIKE 全库回退）
     fn load_limit() -> usize {
-        // 全量载入（DB 本身受 max_items 约束）：搜索范围不再止于旧
-        // TUI_LIMIT=300，渲染侧另有 MAX_RENDER_ROWS 兜底
-        let cfg = config::Config::load();
-        cfg.max_items
+        store::MENU_LIMIT
     }
 
-    /// FTS 全库搜索请求（任务 2.1）：查询 ≥3 字符才走 trigram MATCH
-    ///（trigram 索引对短查询无增益，回落内存模糊过滤）。发出即失效
-    /// 旧结果（回落内存过滤，不展示过期候选）；worker panic 静默空集
+    /// 全库搜索请求（任务 2.1；门槛调整见任务 2.6）：**任何非空查询**都走
+    /// `store::search`——≥3 字符用 FTS trigram MATCH，<3 字符由 store 内部回落
+    /// LIKE 全库扫描。门槛从 3 降到 1 的原因：列表窗口已统一为 `MENU_LIMIT`，
+    /// 若短查询只做内存过滤，超出窗口的旧条目将永远搜不到。发出即清空旧结果
+    /// （回落内存过滤，不展示过期候选）；worker 异常静默空集
     fn request_search(&mut self) -> Task<Message> {
-        if self.query.trim().chars().count() < 3 {
+        if self.query.trim().is_empty() {
             self.search_hits_query.clear();
             return Task::none();
         }
@@ -251,62 +315,60 @@ impl App {
         )
     }
 
-    /// 过滤后的视图：fzf 风格子序列匹配 + 简易评分排序
-    /// （连续命中/词首加权，命中越早越好）；空查询保持存储序。
+    /// 过滤后的视图：空查询=存储序；有查询时优先用后台线程产出的
+    /// FTS/LIKE 候选链（覆盖全库），否则回落内存子序列过滤。
     /// 结果按 (clips 代数, 查询) 缓存——同一输入下悬停/选中/复制等
     /// 事件重复调用直接复用，不在事件路径上重算全库评分
     fn filtered(&self) -> Vec<&store::Clip> {
+        // 缓存命中：按下标取（连来源一起取回，见 FilteredCache）
         {
             let cache = self.filtered_cache.borrow();
-            if let Some((gen, q, idxs)) = cache.as_ref() {
-                if *gen == self.clips_gen && *q == self.query {
-                    return idxs.iter().map(|&i| &self.clips[i]).collect();
+            if let Some(c) = cache.as_ref() {
+                if c.gen == self.clips_gen && c.query == self.query {
+                    let source = self.source_of(c.from_search);
+                    return c.idxs.iter().filter_map(|&i| source.get(i)).collect();
                 }
             }
         }
-        let idxs: Vec<usize> = if self.query.is_empty() {
-            (0..self.clips.len()).collect()
-        } else if self.search_hits_query == self.query
-            && self.search_hits_gen == self.clips_gen
-            && !self.search_hits.is_empty()
-        {
-            // FTS 全库候选（后台线程产出，任务 2.1）+ fzf 风格评分重排，
-            // 与内存过滤同 UX。候选是子串命中，fuzzy 子序列必命中；
-            // 极端大小写折叠差异导致全部不匹配时回落 FTS 相关度序
-            let q = self.query.to_lowercase();
-            let mut scored: Vec<(i32, usize)> = self
-                .search_hits
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| fuzzy_score(&q, &c.text).map(|s| (s, i)))
-                .collect();
-            if scored.is_empty() {
-                (0..self.search_hits.len()).collect()
-            } else {
-                // 稳定排序：并列保持 FTS bm25 相关度序
-                scored.sort_by_key(|s| Reverse(s.0));
-                scored.into_iter().map(|(_, i)| i).collect()
-            }
-        } else {
-            let q = self.query.to_lowercase();
-            let mut scored: Vec<(i32, usize)> = self
-                .clips
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| fuzzy_score(&q, &c.text).map(|s| (s, i)))
-                .collect();
-            scored.sort_by_key(|s| Reverse(s.0));
-            scored.into_iter().map(|(_, i)| i).collect()
-        };
-        *self.filtered_cache.borrow_mut() =
-            Some((self.clips_gen, self.query.clone(), idxs.clone()));
-        idxs.into_iter().map(|i| &self.clips[i]).collect()
+        let (from_search, idxs) = self.compute_filtered();
+        let source = self.source_of(from_search);
+        // 用 `.get` 而非 `[]`：下标空间一旦再有偏差，宁缺勿 panic
+        // （历史缺陷：FTS 下标被拿去索引 clips，见 FilteredCache 注释）
+        let out = idxs.iter().filter_map(|&i| source.get(i)).collect();
+        *self.filtered_cache.borrow_mut() = Some(FilteredCache {
+            gen: self.clips_gen,
+            query: self.query.clone(),
+            from_search,
+            idxs,
+        });
+        out
     }
 
-    /// 可渲染行数：过滤结果与渲染上限取小。选中态/快选/导航必须以此为界——
-    /// 只画前 MAX_RENDER_ROWS 行，越界的高亮会落在不存在的行上
+    /// 下标空间对应的数据源
+    fn source_of(&self, from_search: bool) -> &[store::Clip] {
+        if from_search {
+            &self.search_hits
+        } else {
+            &self.clips
+        }
+    }
+
+    /// 计算过滤结果，委托给纯函数 `compute_filtered`（便于单测）
+    fn compute_filtered(&self) -> (bool, Vec<usize>) {
+        compute_filtered(
+            &self.query,
+            &self.clips,
+            &self.search_hits,
+            &self.search_hits_query,
+            self.search_hits_gen,
+            self.clips_gen,
+        )
+    }
+
+    /// 可渲染行数：过滤结果与列表窗口取小。选中态/快选/导航必须以此为界——
+    /// 只画前 `MENU_LIMIT` 行，越界的高亮会落在不存在的行上
     fn visible_len(&self) -> usize {
-        self.filtered().len().min(MAX_RENDER_ROWS)
+        self.filtered().len().min(store::MENU_LIMIT)
     }
 
     /// 设置选中（索引 + 身份同步）。所有选中变更的唯一入口：
@@ -369,9 +431,6 @@ const ROW_HEIGHT: f32 = 27.0;
 const ROW_PITCH: f32 = ROW_HEIGHT + 1.0;
 /// 视口半高初始估算（675 - 头行/提示符/预览窗格），on_scroll 回填实测值
 const VIEWPORT_HALF: f32 = 240.0;
-/// 渲染行数上限：全库载入后（max_items 可到 750）布局成本兜底；
-/// 过滤命中超过上限时只渲染相关度最高的前 300 行
-const MAX_RENDER_ROWS: usize = 300;
 /// 图片 Handle LRU 上限：缓存的是已解码 RGBA（1080p 截图 ≈8MB/张），
 /// 4 张约 32MB 上限——内存预算与回滚免解码体验的折中
 const IMAGE_CACHE_CAP: usize = 4;
@@ -383,7 +442,8 @@ fn theme_dark(_state: &App) -> iced::Theme {
 }
 
 fn main() -> iced::Result {
-    ensure_single_instance();
+    // 单实例守卫必须存活到进程结束（drop 即释放 flock）
+    let _instance = ensure_single_instance();
     // 常规 xdg 窗口：受 niri window-rule 约束（悬浮/位置/边框由用户
     // rule.kdl 约定，app-id = "niri-clip-gui"），winit 原生 IME
     iced::application(
@@ -413,4 +473,78 @@ fn main() -> iced::Result {
         ..Default::default()
     })
     .run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn clip(id: i64, text: &str) -> store::Clip {
+        store::Clip {
+            id,
+            hash: format!("h{id}"),
+            text: text.to_string(),
+            mime: "text/plain".to_string(),
+            pinned: false,
+            image_path: None,
+        }
+    }
+
+    /// 按下标取条目（与 `App::filtered()` 同口径：越界宁缺勿 panic）
+    fn pick(source: &[store::Clip], idxs: &[usize]) -> Vec<i64> {
+        idxs.iter()
+            .filter_map(|&i| source.get(i))
+            .map(|c| c.id)
+            .collect()
+    }
+
+    /// 回归锁定（真实缺陷）：搜索候选链的下标必须按 `search_hits` 解释。
+    /// 历史实现把 `search_hits` 的下标拿去索引 `clips`（两者顺序与内容都不同）
+    /// → 显示成列表前 N 条而非真正命中，Enter/复制会作用到非命中项。
+    #[test]
+    fn search_hit_indices_resolve_against_search_hits() {
+        let clips = vec![clip(1, "alpha"), clip(2, "bravo"), clip(3, "charlie")];
+        // 顺序与 clips 相反：命中 bravo 时若按 clips 解释会取到 alpha
+        let hits = vec![clip(2, "bravo"), clip(3, "charlie")];
+        let (from_search, idxs) = compute_filtered("ra", &clips, &hits, "ra", 0, 0);
+        assert!(from_search, "有新鲜候选时必须走候选链");
+        assert_eq!(
+            pick(&hits, &idxs),
+            vec![2],
+            "应命中 bravo；若按 clips 解释会错取 alpha（历史缺陷）"
+        );
+    }
+
+    /// 候选数超过列表窗口（`max_items` < `SEARCH_LIMIT`）时不得越界
+    #[test]
+    fn search_hits_longer_than_window_does_not_panic() {
+        let clips = vec![clip(1, "aaa")]; // 列表窗口只有 1 条
+        let hits = vec![clip(9, "aaa"), clip(8, "aab"), clip(7, "aac")];
+        let (from_search, idxs) = compute_filtered("aa", &clips, &hits, "aa", 0, 0);
+        assert!(from_search);
+        assert!(
+            idxs.iter().all(|&i| i < hits.len()),
+            "下标必须落在候选集内：{idxs:?}"
+        );
+        assert_eq!(pick(&hits, &idxs).len(), 3);
+    }
+
+    /// 候选过期（代数不符）时必须回落列表窗口，不得使用陈旧命中
+    #[test]
+    fn stale_search_hits_fall_back_to_loaded_window() {
+        let clips = vec![clip(1, "alpha"), clip(2, "bravo")];
+        let hits = vec![clip(3, "charlie")];
+        let (from_search, idxs) = compute_filtered("ra", &clips, &hits, "ra", 7, 9);
+        assert!(!from_search, "代数不符的候选不得使用");
+        assert_eq!(pick(&clips, &idxs), vec![2]);
+    }
+
+    /// 空查询 = 原序全窗口
+    #[test]
+    fn empty_query_returns_full_window_in_order() {
+        let clips = vec![clip(1, "a"), clip(2, "b"), clip(3, "c")];
+        let (from_search, idxs) = compute_filtered("", &clips, &[], "", 0, 0);
+        assert!(!from_search);
+        assert_eq!(pick(&clips, &idxs), vec![1, 2, 3]);
+    }
 }

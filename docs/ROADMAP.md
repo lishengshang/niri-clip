@@ -1,7 +1,8 @@
 # niri-clip 长期开发路线图
 
-> 基准日期：2026-08-28 · 当前版本：v0.5.2
+> 基准日期：2026-09-11 · 当前版本：v0.5.2
 > 时间估算假设：单人维护者，每周 8–12 有效工时；所有时间节点为**相对量**，按实际投入动态校准。
+> 实测数值（依赖闭包/编译时间/基准）的唯一真相源为 `ARCHITECTURE.md` §9，本文不重复记数。
 
 ---
 
@@ -25,13 +26,19 @@
 
 **开销预算（跟踪项，随 CI 基准更新）：**
 
-| 指标 | 预算 | 当前参考 |
+> 口径原则：**本表只记"预算与是否达标"，实测数值的唯一真相源是
+> ARCHITECTURE §9**。此前两处各自记数，导致同一轮审计出现两套数字
+> （112/108、250/247…），本轮收敛为单一出处。
+
+| 指标 | 预算 | 状态 |
 |---|---|---|
-| 常驻内存 | <40MB | ~40MB |
-| 10k 条 list | <11ms | ✅ |
-| 10k 条 FTS 搜索（v0.6 后） | <50ms | ✅ 实测 0.16ms（fts_search_300_of_10k，trigram；CI 预算断言已纳入） |
-| release 编译时间 | <120s（--locked；2026-09-01 重估，原 <60s 定于依赖树远小的早期） | 主包 77s / GUI 增量 108s ✅（notify-send 交换后二测，原 96s/123s） |
-| 依赖闭包 | wl-clipboard-rs+wayland-client ~40 crate 为已知大头，新增前先 `cargo tree` 审计 | CLI 主包 108 / GUI 247 / workspace 269（1.8 审计 + image 收窄 + notify-send 交换后，自 385 累计 -116） |
+| 常驻内存 | <40MB | 达标（~40MB） |
+| 10k 条 list | <11ms | 达标 |
+| 10k 条 FTS 搜索 | <50ms | 达标（实测 0.16ms，`fts_search_300_of_10k`，trigram；CI 预算断言已纳入） |
+| release 编译时间 | <120s（`--locked`；2026-09-01 重估，原 <60s 定于依赖树远小的早期） | 达标 |
+| 依赖闭包 | 新增依赖须过审计（用途唯一、无重传递依赖）；`cargo tree` 口径见 ARCHITECTURE §9 | 达标（CLI 100 / core 83 / GUI 204 / workspace 222） |
+| 后端载入窗口 | **两后端一致 300**（`store::MENU_LIMIT`；GUI 短查询走 LIKE 全库回退，故无功能损失） | 达标（2.6 已统一） |
+
 
 **最终交付形态（v1.0 定义）：**
 - `paru -S niri-clip` → `Mod+V` 开箱即用，零手工配置
@@ -59,14 +66,14 @@
 ```
 ✅ Phase 0   v0.1–v0.4.1   骨架 → MVP → 优化 → P0 正确性闭环      已交付
 ✅ Phase 1   v0.5.x        TUI 体验闭环                          已交付（v0.5.2）
-▶ Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    进行中（约 3–4 周）
+▶ Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    主线全交付（2.1–2.6 ✅），剩 2.7（不阻塞 v0.6.0）
   Phase 3   v0.7          安全与隐私强化                         约 2–3 周
   Phase 4   v1.0          Production 正式发布                    约 3–4 周
-  Phase 5   v1.x          生态与集成（原生UI已立项/waybar/OSC52）  v1.0 后持续
-  Phase 6   v2.0+         长期愿景（加密/跨合成器/原生UI）        远期
+  Phase 5   v1.x          生态与集成（原生UI核心已交付/waybar/OSC52） v1.0 后持续
+  Phase 6   v2.0+         长期愿景（加密/跨合成器/原生UI增强）     远期
 ```
 
-里程碑节点：**M1 = v0.5.0 发布** → **M2 = v0.6 FTS5 搜索上线** → **M3 = v0.7 安全版本** → **M4 = v1.0 Production GA**。v1.0 前每阶段结束发布正式 tag + AUR 更新；v1.0 后按需 minor/patch。
+里程碑节点：**M1 = v0.5.0 发布** → **M2 = v0.6 搜索与数据治理** → **M3 = v0.7 安全版本** → **M4 = v1.0 Production GA**。v1.0 前每阶段结束发布正式 tag + AUR 更新；v1.0 后按需 minor/patch。
 
 ---
 
@@ -82,13 +89,18 @@
 
 事故复盘沉淀的工程原则（后续阶段沿用）：
 1. 子进程必须有超时边界（capture_timeout_secs 模式）
-2. 错误不得静默吞掉（`let _ =` 禁令）
+2. **业务错误**不得静默吞掉（清理类 best-effort 除外）。"静默吞错"的边界是
+   **后果**而非语法（2.6 精确化：原表述为笼统的"`let _ =` 禁令"，与代码中大量
+   **有意**的 best-effort 调用冲突，导致原则不可执行）——删临时文件 / 写辅助
+   指针（`state/current`、`state/pending_delete`）/ 发桌面通知这类"失败也不影响
+   数据正确性与返回值语义"的动作可忽略错误（仅记 stderr）；凡影响用户数据、
+   返回值语义或状态一致性的错误必须上抛
 3. schema 变更必须走 `PRAGMA user_version` 迁移
 4. 数据文件按 clip id 关联，不依赖 mtime 等间接状态
 
 ---
 
-## 四、Phase 1 — v0.5.x：TUI 体验闭环（进行中）
+## 四、Phase 1 — v0.5.x：TUI 体验闭环（已交付，v0.5.2）
 
 **核心目标：** 补齐 TUI 交互短板，使日常使用无功能缺口；建立性能回归防线。
 
@@ -123,11 +135,13 @@
 | 2.2 | ✅ 文本 hash 统一为 blake3 | DefaultHasher 跨编译器/进程不稳定，**v1.0 硬前置**（ADR-003）：`user_version` v3→4 全表重算 blake3，迁移事务（BEGIN IMMEDIATE + 事务内重读版本防双进程竞态）内合并重复（幸存行 = ts 最大，pinned 取 OR，image_path 继承）；迁移前 `VACUUM INTO` 快照（`state/db.sqlite.pre-blake3`，快照失败即放弃迁移），迁移后重映射 ▶ 指针；图片 `img:` FNV 指纹不动 | 迁移前后条目数只减不增（单测锁定，含幂等/FTS 同步/指针重映射）；跨重启/跨机器去重稳定；blake3 闭包 +3 crate 过开销审计（ARCHITECTURE §9） |
 | 2.3 | ✅ 数据统计与维护命令 | `niri-clip stats`（条数/体积/图片占比；库 = db+wal、图片 = images/ 磁盘实测双口径，-shm 瞬态内存不计）、`vacuum`（VACUUM + WAL 截断，返回前后体积）、`prune --before <YYYY-MM-DD>`（本地日历日零点切分；星标/当前项受保护同 1.3；--dry-run 预览；BEGIN IMMEDIATE 防并发失真） | 用户可自助管理磁盘占用（5 个单测 + 真机冒烟） |
 | 2.4 | ✅ 历史导出/备份 | `export <file\|->` 全量导出 NDJSON（首行 header + 每行一条目，图片内嵌 base64 自包含，ts ASC 稳定排序可 diff，文件 0600）；`--sqlite` 附 `VACUUM INTO` 物理快照（已存在拒绝覆盖）；`import [--dry-run]` 回灌：hash 幂等（已存在跳过不刷 ts/▶ 指针）、逐条重算 hash 完整性校验（损坏跳过警告）、单事务原子提交、保留原 ts/pinned、结束 enforce_max_items。格式为 Phase 5 插件化扩展点，选型见 ADR-004 | 备份可回灌（7 个单测锁定往返/幂等/ts/损坏拦截/裁剪/schema/快照 + 真机冒烟） |
-| 2.5 | 大库长稳测试 | 100k 条写入/查询/迁移自动化测试 | 无锁死、无数据丢失、内存平稳 |
+| 2.5 | ✅ 大库长稳测试 | `crates/niri-clip-core/tests/large_db.rs`：100k 条规模下写入 / 查询 / 并发 / 维护 / 迁移五段自动化，每段自带条目数与内容断言；迁移段照 `migrate.rs` 的 v1/v2/v3 步骤**自建 v3 旧库**（含重复行与星标继承），覆盖外壳脚本做不到的那部分。默认 `#[ignore]`，规模可由 `NIRI_CLIP_STRESS_N` 覆盖。实测数值见 ARCHITECTURE §9 | 无锁死、无数据丢失、内存平稳 —— 三项均已断言并本机 100k 实测通过 |
+| 2.6 | ✅ 工程收敛（v0.6 前置） | 全项目体检：结构冗余 / 文档失真 / 标准性三类共 38 项（含执行中新发现的 2 个 P0 代码缺陷），**零遗留**收尾——对外契约断链修复（AUR 服务单元路径、`cargo publish` 依赖 version）、删除确认三套实现收敛为 core 单一 15s TTL 状态机、`tui` 模块移出 core 恢复自定分层、依赖计数口径修正、文档失效机制写入 AGENTS.md | 38 项逐项有落地结果（修复 / 删除 / 明确驳回三者之一）；文档与代码零冲突；`docs/` 内无指向已删文档的引用；同语义只剩一处实现（`confirm` / `single_instance` / `render_row` / `preview_multiline` / `upsert_clip`）；门禁 fmt + clippy(`-D warnings`) + 71 测试全过 |
+| 2.7 | 列表排序走索引（2.5 暴露） | `list()` 的排序首键是表达式 `(hash = ?2) DESC`（把 ▶ 当前项顶到第 1 行），SQLite 据此无法按索引有序扫描——100500 行库 `EXPLAIN QUERY PLAN` 实测退化为 `SCAN clips + USE TEMP B-TREE FOR ORDER BY`，10k→100k 耗时 0.95ms→108ms（114×，远超数据量增长的 10×）。修法方向：当前项单独取（`WHERE hash = ?2`）后与"其余按 pinned/ts 排序取 N 条"拼接，两条查询都能走索引。**默认 `max_items = 750` 下库不可能这么大，真实用户不触发**，故不阻塞 v0.6.0，可随后续 minor 交付 | 100k 下 `list(300)` 回到与 10k 同阶（不再随规模超线性增长）；实测数值记入 ARCHITECTURE §9 |
 
-**技术要点：** FTS5 中文分词方案（unicode61 起步，按需评估 simple tokenizer）；迁移脚本幂等可回滚。
-**时间节点：** 约 3–4 周；里程碑 **M2 = v0.6.0，FTS5 搜索可用**。
-**依赖：** 1.6 的基准设施（防止 FTS 引入性能回归无感知）。
+**技术要点：** tokenizer 选型已由 ADR-002 定为 **trigram**（原"unicode61 起步"计划已推翻——它对中文子串不可用）；迁移脚本幂等可回滚。
+**时间节点：** 里程碑 **M2 = v0.6.0**（含 2.5 长稳与 2.6 工程收敛，一并收尾）。
+**依赖：** 1.6 的基准设施（防止 FTS 引入性能回归无感知）；2.6 的契约修复为 4.2 AUR 三包齐备的前置。
 
 ---
 
@@ -178,7 +192,7 @@
 
 | 候选项 | 说明 | 前置 |
 |---|---|---|
-| **原生 layer-shell UI（已立项 ▶）** | 消除终端冷启动瓶颈的彻底解：Mod+V ≤50ms、零终端依赖。里程碑 M5.1 选型 PoC/ADR → M5.2 MVP → M5.3 语义对齐 → M5.4 发布，任务分解与技术候选见 [docs/NATIVE-UI.md](NATIVE-UI.md)；执行窗口 v1.0 GA 之后 | 5.0 core 下沉 lib crate |
+| **原生 UI 后续（核心已交付，收尾项见下）** | 消除终端冷启动瓶颈的彻底解。**已交付**：M5.1 选型 ADR-001（含修订 1：layer-shell → 常规 xdg 窗口 + tiny-skia 软渲染）→ M5.2 MVP → M5.3 语义对齐 → M5.4.1 后端选择接入，`crates/niri-clip-gui` 随 v0.5.x 发布。**剩余收尾**：① 窗口启动延迟真机实测（目标 ≤50ms，记入开销预算表）② 兼容矩阵（niri stable / sway）③ 随 minor 的文档与 CHANGELOG 补齐。原立项详案 `docs/NATIVE-UI.md` 已于本轮删除（内容已全部收敛至此表与 ADR-001） | 无（`niri-clip-core` 下沉早于 Phase 1 完成） |
 | OSC52 远程剪贴板 | SSH/终端场景同步历史 | 1.1（selection 抽象） |
 | niri overview 集成 | 预览窗口嵌入 niri 概览 | layer-shell 协议调研（随原生 UI 立项一并推进） |
 | 历史内容动作插件化 | 自定义 action（URL 直接打开等） | 2.4 导出格式稳定 |
@@ -218,7 +232,7 @@
 
 1. **版本 ↔ 里程碑映射**：GitHub Milestones 与本文档 Phase 一一对应；每个任务建 issue，label 标注 `phase/1` … 与任务编号（如 `P1-3 图片配额 GC`）
 2. **DoD 门禁**：任何任务关闭前必须——代码合并主分支、`cargo clippy -D warnings` 零警告、测试覆盖核心路径、CHANGELOG 有条目
-3. **CI 门禁**（已有基础上递增）：fmt / clippy / test / release build / 冒烟（v0.4.1 已有）→ + benchmark 阈值（P1）→ + release 打包与 AUR bump（P4）
+3. **CI 门禁**（已有基础上递增）：fmt / clippy / test / release build / 冒烟（v0.4.1 已有）→ + benchmark 阈值（P1）→ + release 打包与 AUR bump（P4）；另有 **100k 大库长稳（2.5）走手动触发**的 `stress` job（`workflow_dispatch`，不入 PR 必过检查）
 4. **CHANGELOG.md**：每个 tag 必须有对应章节，文档即发布记录
 5. **本文档即单一真相源**：完成一项勾一项，Phase 状态标记（进行中/已交付）随 tag 更新
 
@@ -243,7 +257,7 @@
 | 风险 | 等级 | 应对 |
 |---|---|---|
 | fzf 上游破坏 `--track --id-nth` 行为 | 高 | 版本门控 + 兼容矩阵测试（4.7）；fuzzel 回退路径保持可用 |
-| FTS5 中文搜索效果不佳 | 中 | unicode61 起步；预留 simple/pinyin tokenizer 升级路径（2.1） |
+| FTS5 中文搜索效果不佳 | 低（已闭环） | 已由 ADR-002 定 **trigram**（中英文子串均命中，实测 0.16ms）；若未来需按词命中，换 tokenizer 须走 `user_version` 新迁移重建索引 |
 | wl-clipboard-rs API 变更/停维护 | 中 | 锁定 Cargo.lock；事件驱动主路径已不依赖其轮询 |
 | blake3 全表重算迁移出错致数据翻倍/丢失 | 中 | 迁移事务内合并 + 条目数只减不增断言（2.2）；100k 长稳测试（2.5）；迁移前 VACUUM INTO 快照 |
 | 依赖蔓生拖慢编译、增大二进制 | 中 | 新增依赖过开销审计（1.8 ✅，基线见 ARCHITECTURE §9）；编译时间/依赖数进开销预算表跟踪（预算已重估为 <120s，当前达标） |

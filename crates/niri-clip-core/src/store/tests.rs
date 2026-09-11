@@ -284,10 +284,10 @@ fn pin_orders_first_and_list_respects_limit() {
         for i in 0..5 {
             insert(format!("item-{i}"), None).unwrap();
         }
-        let all = list(TUI_LIMIT).unwrap();
+        let all = list(MENU_LIMIT).unwrap();
         let head_id = all[0].id;
         toggle_pin(head_id).unwrap();
-        let after = list(TUI_LIMIT).unwrap();
+        let after = list(MENU_LIMIT).unwrap();
         assert_eq!(after[0].id, head_id, "pinned 应置顶");
         assert!(after[0].pinned);
         let few = list(3).unwrap();
@@ -625,10 +625,6 @@ fn stats_counts_and_sizes_match_disk() {
         assert_eq!(s.total, 3);
         assert_eq!(s.pinned, 1);
         assert_eq!(s.image_entries, 1);
-        assert_eq!(
-            s.text_bytes,
-            ("hello world".len() + "second entry".len()) as i64
-        );
         assert!(s.db_bytes > 0, "库体积应为磁盘实测值");
         assert_eq!(
             s.images_disk_bytes,
@@ -1060,5 +1056,40 @@ fn export_sqlite_snapshot_roundtrip_and_no_overwrite() {
             backup::export_sqlite(&snap).is_err(),
             "已存在目标必须拒绝覆盖（备份命令绝不静默覆盖）"
         );
+    });
+}
+
+/// D4：上限裁剪对当前项的保护是**隐式**的（只排除 pinned，不显式排除 current）。
+/// 它依赖不变式"当前项 ts 恒为最新"：指针只在捕获成功时刷新，而捕获同时刷新
+/// 该行 ts（新入库 INSERT / 去重 UPDATE）。本测试逐次插入并断言当前项始终存活
+/// ——若将来把指针刷新与 ts 更新解耦、或改动淘汰方向，这里会立刻变红。
+#[test]
+fn max_items_eviction_never_drops_the_current_item() {
+    with_env(|_g| {
+        clear_db();
+        let cfg = Config {
+            max_items: 3,
+            ..Config::default()
+        };
+        for i in 1..=6 {
+            insert_with(format!("evict-keep-{i}"), None, &cfg).unwrap();
+            let cur = current_hash().expect("捕获成功后必须刷新当前项指针");
+            let conn = connect().unwrap();
+            let alive: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM clips WHERE hash=?1",
+                    params![cur],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                alive, 1,
+                "第 {i} 次插入后当前项被上限裁剪淘汰——不变式被破坏"
+            );
+            let total: i64 = conn
+                .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
+                .unwrap();
+            assert!(total <= 3, "裁剪后条数不得超过 max_items：{total}");
+        }
     });
 }

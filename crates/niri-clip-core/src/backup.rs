@@ -76,7 +76,7 @@ struct ExportEntry {
 
 /// 全量导出为 NDJSON。`out = None` 写 stdout（可管道 `| gzip`），
 /// `Some(path)` 写文件（0600——内容是全量剪贴板明文）。全表导出不受
-/// max_items / TUI_LIMIT 限制。
+/// max_items / MENU_LIMIT 限制。
 pub fn export_json_file(out: Option<&Path>) -> Result<ExportOutcome> {
     let mut conn = crate::store::connect()?;
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
