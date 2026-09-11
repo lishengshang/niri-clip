@@ -107,11 +107,18 @@ jobs:
           set -euo pipefail
           cargo bench -p niri-clip-core --bench store -- --output-format bencher | tee bench.txt
           check_budget() {
+            # criterion 在基线数据缺失/损坏时会把 "test <name> ..." 与
+            # "bench: <ns>" 拆成两行（中间夹一条 baseline 读取 ERROR——
+            # 2026-09-12 CI 实证：Cargo.lock 变动 → rust-cache 键失配 →
+            # criterion 基线不完整）。故按"最近一个 test 行"记名、到
+            # bench: 行取其后的数值字段，单行与拆行两种格式都兼容
             awk -v n="$1" -v lim="$2" '
-              $0 ~ n && /bench:/ {
+              $1 == "test" && $3 == "..." { cur = $2 }
+              /bench:/ && cur == n {
                 found = 1
-                gsub(/,/, "", $5)
-                if ($5 + 0 >= lim) { printf "%s 预算超限: %s ns (阈值 %s)\n", n, $5, lim; bad = 1 }
+                for (i = 1; i <= NF; i++) if ($i == "bench:") { v = $(i+1); break }
+                gsub(/,/, "", v)
+                if (v + 0 >= lim) { printf "%s 预算超限: %s ns (阈值 %s)\n", n, v, lim; bad = 1 }
               }
               END {
                 if (!found) { printf "%s 未出现在 bench 输出中——门禁失效，请检查 bench 名或 criterion 配置\n", n; exit 2 }
