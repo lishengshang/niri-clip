@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.6.0 - 2026-09-12
 
 ### Fixed
 - **AUR 安装后 systemd 单元不可用（打包契约，任务 2.6 A1）**：单元随二进制内置

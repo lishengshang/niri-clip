@@ -3,7 +3,7 @@
 > 为 `niri` 合成器打造的 **全新、高性能、开箱即用** Wayland 剪贴板历史管理器
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.2-blue)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.6.0-blue)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/Wayland-niri-4a90e2)](https://github.com/YaLTeR/niri)
 [![AUR](https://img.shields.io/badge/AUR-审核中-blue)](https://aur.archlinux.org/packages/niri-clip)
@@ -27,7 +27,7 @@
 
 ### 📦 安装
 
-> **分发状态（v0.5.2）**：AUR 与 crates.io **均未上架**，当前请走源码 / makepkg。
+> **分发状态（v0.6.0）**：AUR 与 crates.io **均未上架**，当前请走源码 / makepkg。
 > 三渠道分发（AUR release/git/bin + crates.io + GitHub Releases）是 **v1.0 任务 4.2/4.3**。
 
 #### 源码 / makepkg（当前可用）

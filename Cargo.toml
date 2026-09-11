@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.2"
+version = "0.6.0"
 edition = "2021"
 # MSRV：README 承诺 1.75+，显式声明让 cargo 给出明确报错而非编译乱码（任务 2.6 D7）
 rust-version = "1.75"
@@ -20,7 +20,7 @@ repository = "https://github.com/lishengshang/niri-clip"
 # （"all dependencies must have a version specified when publishing"）。
 # 缺它则 ROADMAP 4.3 的 cargo install 与 README 的 Cargo 安装路径不可达（任务 2.6 A2）。
 # 发布时随 [workspace.package].version 同步 bump
-niri-clip-core = { version = "0.5.2", path = "crates/niri-clip-core" }
+niri-clip-core = { version = "0.6.0", path = "crates/niri-clip-core" }
 anyhow = "1"
 # 任务 2.4：NDJSON 导出/回灌的 base64 编解码（零传递依赖）
 base64 = "0.22"
