@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 100k 大库长稳（任务 2.5）：耗时以分钟计、要写 ~200 MiB 临时数据，
+  # 不适合每次 PR，改为手动触发——Actions → CI → Run workflow，选目标分支
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -120,3 +123,23 @@ jobs:
           check_budget sqlite_select_300_of_10k  4000000
           check_budget fts_search_300_of_10k    50000000
           echo "BENCH OK"
+
+  # 100k 大库长稳（任务 2.5）：**仅手动触发**，不进 PR 门禁（分支保护要求的
+  # 六道工序不含本 job，增删它都不改变 PR 的必过检查）。
+  stress:
+    name: large-db stress 100k (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev
+      # 沙盒位置显式指到 runner 的临时盘。测试自身还会把 SQLITE_TMPDIR 指到
+      # 同一处——否则库在大盘、SQLite 的临时 b-tree 在小 tmpfs 时会以
+      # SQLITE_FULL（"database or disk is full"）失败，而磁盘其实还有几十 G
+      - name: 100k 条长稳（写入 / 查询 / 并发 / 维护 / 迁移）
+        env:
+          NIRI_CLIP_STRESS_DIR: ${{ runner.temp }}
+        run: cargo test --locked --release -p niri-clip-core --test large_db -- --ignored --nocapture
