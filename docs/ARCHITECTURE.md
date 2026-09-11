@@ -20,7 +20,7 @@
         │ clips(hash UNIQUE, image_path)│ PRAGMA user_version 版本化迁移
         │ idx_hash, idx_pinned_ts       │
         └────────┬──────────────────────┘
-                 │ list(min(max_items, TUI_LIMIT)) 直查（无缓存层）
+                 │ list(min(max_items, MENU_LIMIT)) 直查（无缓存层）
         ┌────────▼─────────┐  --track --id-nth 2
         │ tui (fzf)        │  execute-silent + reload-sync
         │ fuzzel 回退      │  chafa 预览 ← images/{id}.bin 按 clip id 关联
@@ -114,7 +114,8 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
   双双通过检查后一方撞 UNIQUE 报错被静默吞掉
 - **上限裁剪**：超出 `max_items` 时删除最旧的非 pinned 条目（抽成
   `enforce_max_items`，文本/图片共用）
-- **菜单直查**：`list(min(max_items, TUI_LIMIT))`，TUI_LIMIT=300。
+- **菜单直查**：`list(min(max_items, MENU_LIMIT))`，MENU_LIMIT=300（2.6/D1 由
+  `TUI_LIMIT` 更名：`tui` 移出 core 后该常量语义已是"菜单取数窗口"，与 UI 后端无关）。
   进程内缓存层已移除——fzf 每次 reload-sync spawn 全新 `list-raw` 进程，
   OnceLock 缓存在该路径从未生效；实测 list 300 <11ms 无需缓存
 - **全库搜索（2.1）**：`store::search` ≥3 字符走 `clips_fts MATCH` 短语查询
@@ -131,6 +132,15 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
   `list_300_of_10k` ≈0.95ms（含 Config::load + connect 全口径）、
   `sqlite_select_300_of_10k` ≈0.47ms、`fts_search_300_of_10k` ≈0.16ms，
   均远低于 ROADMAP 预算（11ms / 4ms / 50ms）。运行：`cargo bench -p niri-clip-core`
+
+- **大库长稳设施（2.5）**：`crates/niri-clip-core/tests/large_db.rs`——100k 条
+  规模下跑写入 / 查询 / 并发 / 维护 / 迁移五段，每段自带条目数与内容断言。
+  迁移段在**自建的 v3 旧库**上运行（照上一小节的 v1/v2/v3 步骤构造，含
+  "同文本不同旧 hash"的重复行与星标继承），因此覆盖了外壳脚本无法触及的
+  路径——这也是它必须留在 core 集成测试里的原因。**默认 `#[ignore]`**：耗时
+  以分钟计，不进 PR 门禁；规模由 `NIRI_CLIP_STRESS_N` 覆盖（便于二分定位），
+  沙盒位置由 `NIRI_CLIP_STRESS_DIR` 指定（`/tmp` 为小容量 tmpfs 的环境下必需，
+  否则会以 `SQLITE_FULL` 死在写入中途）。实测数值见 §9
 
 - **导出/回灌（2.4，backup.rs）**：NDJSON 流式格式（首行 header + 每行一条目，
   图片内嵌 base64，选型与被拒备选见 ADR-004）。导出读事务（deferred 快照）
@@ -192,7 +202,7 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 - **SQLite WAL**：单文件备份，`FTS5` 搜索，`WAL` 读写不锁
 - **fzf**：`--track` 是唯一“删除不跳顶”不闪的实现，`ratatui` 自绘后续可选
 
-## 9. 依赖与构建开销审计（1.8，2026-09-01；**口径修正 2026-09-10**）
+## 9. 实测数值基线（依赖/构建开销 1.8 + 大库长稳 2.5）
 
 > **口径（唯一权威、可复现）**——由任务 2.6 修正：
 >
@@ -265,6 +275,61 @@ GUI 增量 108s（原 96s / 123s），预算内余量进一步扩大。
 > 口径说明：编译时间为**单一测量轮次的历史记录**，不随依赖微调重测；
 > 若需刷新，须在同一机器、`cargo clean` 后整体重测并替换本段，
 > 不得只改动其中一个数字。
+
+**大库长稳基线（任务 2.5，2026-09-11 实测，N=100_000）：**
+
+```
+NIRI_CLIP_STRESS_DIR=/path/on/big/disk \
+  cargo test -p niri-clip-core --release --test large_db -- --ignored --nocapture
+```
+
+> CI 侧另有**手动触发**的 `stress` job（`workflow_dispatch`，不进 PR 门禁，
+> 也不改变分支保护要求的六道工序）：Actions → CI → Run workflow 选分支即可。
+
+| 项目（100k 条） | 实测 | 备注 |
+|---|---|---|
+| 批量写入（单事务） | 6.0s（0.06ms/条） | 库体积 56 MiB（db 56 + wal 0） |
+| `list(300)` | **108ms** | 见下"已知扩展性缺口" |
+| FTS 搜索（trigram，≥3 字符） | 6.7ms | ROADMAP 的 <50ms 预算定义在 10k 口径 |
+| LIKE 回退（<3 字符，全库扫描） | 90ms | 短查询拿不到 FTS 增益的固有代价 |
+| `stats` | 12.8ms | |
+| `prune` 101197 条 | dry-run 与实际**完全一致** | 星标与当前项受保护（存活数断言） |
+| `vacuum` | 55.9 → 25.7 MiB | |
+| v3→v4 blake3 迁移（101000 行 / 500 组重复） | 3.3s | 合并 500 组；峰值 RSS 57.7 MiB（基线 16.7） |
+| 重复 200 轮 list+search | RSS 12.0 → 12.0 MiB | "内存平稳"判据：增长 <32 MiB |
+| 并发写入 4 线程 × 250 条 | 2.0s，零失败 | 无锁死、无丢条 |
+| 逐条捕获（`insert_with`） | 12.1ms/条 | **见下方口径警告第 2 条，勿当代码基线** |
+
+**复现口径警告（三条，缺一都会把数读歪）：**
+
+1. 上表全部来自 `tests/large_db.rs` 的自建沙盒（`XDG_*` 全隔离），不是真实用户库。
+2. **"逐条捕获 12.1ms"不是 niri-clip 的开销**。`insert_with` 每次调用都
+   `connect()` 一次（open + PRAGMA + 迁移检查 + drop），其绝对值由文件系统决定：
+   本机沙盒的文件创建/删除异常昂贵——实测 `create+write+unlink` 单次 **43ms**、
+   `sqlite open+insert+close` **10.1ms**，与此处的 12.1ms 吻合。因此该行只说明
+   "本机量不出代码开销"，**不得**当作性能基线引用。
+3. 沙盒位置必须可覆盖（`NIRI_CLIP_STRESS_DIR`）：100k 库含 FTS5 trigram 索引约
+   56 MiB，两个沙盒加迁移快照约 150 MiB。`/tmp` 为小容量 tmpfs 时若不改指，
+   会以 `SQLITE_FULL`（"database or disk is full"）死在写入或 prune 中途——
+   而磁盘明明还有几百 G，极难定位。测试内已把 `SQLITE_TMPDIR` 一并指向沙盒根，
+   避免"库在大盘、临时文件在 /tmp"这种错配（prune 的 `id IN (… ORDER BY ts)`
+   在 10 万行上必建临时索引）。
+
+**已知扩展性缺口（2.5 暴露，未修，不计入 2.5 交付范围）：**
+
+`list()` 的排序首键是表达式 `(hash = ?2) DESC`（把 ▶ 当前项顶到第 1 行），
+SQLite 无法据此走索引有序扫描。100500 行库上 `EXPLAIN QUERY PLAN` 实证：
+
+```
+现状            SCAN clips                              + USE TEMP B-TREE FOR ORDER BY
+去掉表达式首键   SCAN clips USING INDEX idx_pinned_ts     + USE TEMP B-TREE FOR LAST TERM
+```
+
+即现状退化为**全表扫描 + 完整排序**：10k 时 0.95ms、100k 时 108ms（114×，
+而非数据量增长的 10×）。**默认 `max_items = 750` 下库不可能有这么大，真实用户
+不触发**；只有把 `max_items` 调到数万级才会踩到。修法方向（待立项）：把当前项
+单独取（`WHERE hash = ?2`）再与"其余按 pinned/ts 排序取 N 条"拼接，两条查询
+都能走索引。
 
 ## 10. 原生 UI - niri-clip-gui（Phase 5 已交付）
 

@@ -199,10 +199,16 @@ cargo clippy --all-targets --locked -- -D warnings    # lint 门禁（零警告�
 ./tests/manual.sh                                    # CLI 端到端冒烟（隔离 XDG）：
                                                      # CRUD / 置顶 / 删除后 pos 跟随 / 性能计时
 cargo bench -p niri-clip-core                        # 性能基准（criterion）
+cargo test -p niri-clip-core --release --test large_db -- --ignored --nocapture
+                                                     # 100k 条长稳（2.5）：写入/查询/并发/维护/
+                                                     # 迁移五段；默认 #[ignore]，耗时以分钟计
 ```
 
-> `manual.sh` 只做 CLI 冒烟与粗粒度计时，**不做 10k 压测**——大库长稳归 ROADMAP
-> 任务 2.5，性能预算由 CI 的 bench 工序用绝对阈值断言。
+> `manual.sh` 只做 CLI 冒烟与粗粒度计时，**不做大库压测**——100k 条长稳归
+> `crates/niri-clip-core/tests/large_db.rs`（默认 `#[ignore]`；规模由
+> `NIRI_CLIP_STRESS_N` 覆盖，沙盒位置由 `NIRI_CLIP_STRESS_DIR` 指定，
+> 后者在 `/tmp` 为小容量 tmpfs 的环境下必需）。性能预算由 CI 的 bench
+> 工序用绝对阈值断言。
 
 ---
 
@@ -211,7 +217,7 @@ cargo bench -p niri-clip-core                        # 性能基准（criterion�
 - **v0.3 ✅** 原生 daemon + 300 缓存 + chafa
 - **v0.4.x ✅** P0 修复（并发/图片/panic/state 迁移）+ 事件驱动捕获 + systemd 托管 + CI
 - **v0.5.x ✅** TUI 体验闭环（PRIMARY selection / 图片配额 GC / 星标删除二段确认 / 基准进 CI / man 与补全）+ 原生 UI（iced xdg 窗口，`tui_backend=native|auto`）
-- **v0.6 ▶ 进行中** 搜索与数据治理：FTS5 全文搜索 ✅ / blake3 统一指纹 ✅ / stats·vacuum·prune ✅ / NDJSON 导出回灌 ✅ / 大库长稳测试 / 工程收敛
+- **v0.6 ▶ 任务全交付，待 tag** 搜索与数据治理：FTS5 全文搜索 ✅ / blake3 统一指纹 ✅ / stats·vacuum·prune ✅ / NDJSON 导出回灌 ✅ / 大库长稳测试 ✅ / 工程收敛 ✅
 - **v0.7** 安全与隐私强化（过滤规则 / systemd 沙箱 / 加密 PoC）
 - **v1.0** Production GA：AUR 三包、crates.io、waybar、CI 深化
 

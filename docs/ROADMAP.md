@@ -1,6 +1,6 @@
 # niri-clip 长期开发路线图
 
-> 基准日期：2026-09-10 · 当前版本：v0.5.2
+> 基准日期：2026-09-11 · 当前版本：v0.5.2
 > 时间估算假设：单人维护者，每周 8–12 有效工时；所有时间节点为**相对量**，按实际投入动态校准。
 > 实测数值（依赖闭包/编译时间/基准）的唯一真相源为 `ARCHITECTURE.md` §9，本文不重复记数。
 
@@ -66,7 +66,7 @@
 ```
 ✅ Phase 0   v0.1–v0.4.1   骨架 → MVP → 优化 → P0 正确性闭环      已交付
 ✅ Phase 1   v0.5.x        TUI 体验闭环                          已交付（v0.5.2）
-▶ Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    进行中（2.1–2.4、2.6 已交付，剩 2.5）
+▶ Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    主线全交付（2.1–2.6 ✅），剩 2.7（不阻塞 v0.6.0）
   Phase 3   v0.7          安全与隐私强化                         约 2–3 周
   Phase 4   v1.0          Production 正式发布                    约 3–4 周
   Phase 5   v1.x          生态与集成（原生UI核心已交付/waybar/OSC52） v1.0 后持续
@@ -135,8 +135,9 @@
 | 2.2 | ✅ 文本 hash 统一为 blake3 | DefaultHasher 跨编译器/进程不稳定，**v1.0 硬前置**（ADR-003）：`user_version` v3→4 全表重算 blake3，迁移事务（BEGIN IMMEDIATE + 事务内重读版本防双进程竞态）内合并重复（幸存行 = ts 最大，pinned 取 OR，image_path 继承）；迁移前 `VACUUM INTO` 快照（`state/db.sqlite.pre-blake3`，快照失败即放弃迁移），迁移后重映射 ▶ 指针；图片 `img:` FNV 指纹不动 | 迁移前后条目数只减不增（单测锁定，含幂等/FTS 同步/指针重映射）；跨重启/跨机器去重稳定；blake3 闭包 +3 crate 过开销审计（ARCHITECTURE §9） |
 | 2.3 | ✅ 数据统计与维护命令 | `niri-clip stats`（条数/体积/图片占比；库 = db+wal、图片 = images/ 磁盘实测双口径，-shm 瞬态内存不计）、`vacuum`（VACUUM + WAL 截断，返回前后体积）、`prune --before <YYYY-MM-DD>`（本地日历日零点切分；星标/当前项受保护同 1.3；--dry-run 预览；BEGIN IMMEDIATE 防并发失真） | 用户可自助管理磁盘占用（5 个单测 + 真机冒烟） |
 | 2.4 | ✅ 历史导出/备份 | `export <file\|->` 全量导出 NDJSON（首行 header + 每行一条目，图片内嵌 base64 自包含，ts ASC 稳定排序可 diff，文件 0600）；`--sqlite` 附 `VACUUM INTO` 物理快照（已存在拒绝覆盖）；`import [--dry-run]` 回灌：hash 幂等（已存在跳过不刷 ts/▶ 指针）、逐条重算 hash 完整性校验（损坏跳过警告）、单事务原子提交、保留原 ts/pinned、结束 enforce_max_items。格式为 Phase 5 插件化扩展点，选型见 ADR-004 | 备份可回灌（7 个单测锁定往返/幂等/ts/损坏拦截/裁剪/schema/快照 + 真机冒烟） |
-| 2.5 | 大库长稳测试 | 100k 条写入/查询/迁移自动化测试 | 无锁死、无数据丢失、内存平稳 |
+| 2.5 | ✅ 大库长稳测试 | `crates/niri-clip-core/tests/large_db.rs`：100k 条规模下写入 / 查询 / 并发 / 维护 / 迁移五段自动化，每段自带条目数与内容断言；迁移段照 `migrate.rs` 的 v1/v2/v3 步骤**自建 v3 旧库**（含重复行与星标继承），覆盖外壳脚本做不到的那部分。默认 `#[ignore]`，规模可由 `NIRI_CLIP_STRESS_N` 覆盖。实测数值见 ARCHITECTURE §9 | 无锁死、无数据丢失、内存平稳 —— 三项均已断言并本机 100k 实测通过 |
 | 2.6 | ✅ 工程收敛（v0.6 前置） | 全项目体检：结构冗余 / 文档失真 / 标准性三类共 38 项（含执行中新发现的 2 个 P0 代码缺陷），**零遗留**收尾——对外契约断链修复（AUR 服务单元路径、`cargo publish` 依赖 version）、删除确认三套实现收敛为 core 单一 15s TTL 状态机、`tui` 模块移出 core 恢复自定分层、依赖计数口径修正、文档失效机制写入 AGENTS.md | 38 项逐项有落地结果（修复 / 删除 / 明确驳回三者之一）；文档与代码零冲突；`docs/` 内无指向已删文档的引用；同语义只剩一处实现（`confirm` / `single_instance` / `render_row` / `preview_multiline` / `upsert_clip`）；门禁 fmt + clippy(`-D warnings`) + 71 测试全过 |
+| 2.7 | 列表排序走索引（2.5 暴露） | `list()` 的排序首键是表达式 `(hash = ?2) DESC`（把 ▶ 当前项顶到第 1 行），SQLite 据此无法按索引有序扫描——100500 行库 `EXPLAIN QUERY PLAN` 实测退化为 `SCAN clips + USE TEMP B-TREE FOR ORDER BY`，10k→100k 耗时 0.95ms→108ms（114×，远超数据量增长的 10×）。修法方向：当前项单独取（`WHERE hash = ?2`）后与"其余按 pinned/ts 排序取 N 条"拼接，两条查询都能走索引。**默认 `max_items = 750` 下库不可能这么大，真实用户不触发**，故不阻塞 v0.6.0，可随后续 minor 交付 | 100k 下 `list(300)` 回到与 10k 同阶（不再随规模超线性增长）；实测数值记入 ARCHITECTURE §9 |
 
 **技术要点：** tokenizer 选型已由 ADR-002 定为 **trigram**（原"unicode61 起步"计划已推翻——它对中文子串不可用）；迁移脚本幂等可回滚。
 **时间节点：** 里程碑 **M2 = v0.6.0**（含 2.5 长稳与 2.6 工程收敛，一并收尾）。
@@ -231,7 +232,7 @@
 
 1. **版本 ↔ 里程碑映射**：GitHub Milestones 与本文档 Phase 一一对应；每个任务建 issue，label 标注 `phase/1` … 与任务编号（如 `P1-3 图片配额 GC`）
 2. **DoD 门禁**：任何任务关闭前必须——代码合并主分支、`cargo clippy -D warnings` 零警告、测试覆盖核心路径、CHANGELOG 有条目
-3. **CI 门禁**（已有基础上递增）：fmt / clippy / test / release build / 冒烟（v0.4.1 已有）→ + benchmark 阈值（P1）→ + release 打包与 AUR bump（P4）
+3. **CI 门禁**（已有基础上递增）：fmt / clippy / test / release build / 冒烟（v0.4.1 已有）→ + benchmark 阈值（P1）→ + release 打包与 AUR bump（P4）；另有 **100k 大库长稳（2.5）走手动触发**的 `stress` job（`workflow_dispatch`，不入 PR 必过检查）
 4. **CHANGELOG.md**：每个 tag 必须有对应章节，文档即发布记录
 5. **本文档即单一真相源**：完成一项勾一项，Phase 状态标记（进行中/已交付）随 tag 更新
 

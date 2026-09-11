@@ -81,6 +81,19 @@
   （仅一处测试断言），顺带少一次全表 SUM 查询
 
 ### Added
+- **大库长稳测试（2.5）**：新增 `crates/niri-clip-core/tests/large_db.rs`，100k 条
+  规模下覆盖写入 / 查询 / 并发 / 维护 / 迁移五段，逐条对齐本任务的验收口径——
+  **无锁死**（每段上报耗时，外层 `timeout` 兜底）、**无数据丢失**（每段条目数
+  断言；迁移段进一步断"只减不增 + 精确合并数 + 指纹全局唯一 + 抽检
+  hash == blake3(text) + FTS 仍能命中幸存行"）、**内存平稳**（200 轮
+  list+search 下 RSS 不得膨胀；迁移峰值 RSS 单独上报）。迁移段照 `migrate.rs`
+  的 v1/v2/v3 步骤**自建 v3 旧库**（含 500 组"同文本不同旧 hash"的重复行，
+  其中一条被并行带星标，用于验证合并时 pinned 取 OR），这是外壳脚本做不到、
+  而 `migrate.rs` 注释里明确挂账给 2.5 的压力验证。**默认 `#[ignore]`**——
+  100k 规模耗时以分钟计，不进 PR 门禁（门禁仍是 71 个快速用例）；规模可由
+  `NIRI_CLIP_STRESS_N` 覆盖，便于二分定位。实测数值见 ARCHITECTURE §9。
+  另在 CI 增加**手动触发**的 `stress` job（`workflow_dispatch`）供需要时在干净
+  环境跑一遍——不进 PR 门禁，分支保护要求的六道工序不受影响
 - **删除确认状态机（任务 2.6 C1 / ADR-005）**：新增 `niri-clip-core/src/confirm.rs`，
   ★ 条目二次确认的**唯一实现**（15s TTL，状态落盘 `state/pending_delete`）；CLI 与
   原生 UI 只负责呈现挂起态。判定分两层——`decide()` 纯 fs 判定（供长驻 UI 在消息
