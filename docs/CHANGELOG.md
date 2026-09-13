@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **默认 `ignore_regex` 强化（3.1）**：新增密码管理器输出格式的精确匹配——
+  1Password 秘密引用 `op://`、OTP 迁移 `otpauth[-migration]://`、Bitwarden
+  `bitwarden://`（scheme 词边界 + `://` 锚定，普通 URL 不误伤）、KeePassXC
+  占位符 `{REF:`/`{TOTP}`/`{TIMEOTP}`；原关键词 `password|secret|token|otp|auth`
+  保持子串语义不收窄（regex crate 无 lookahead，加词边界会把 password123
+  这类真实密钥放过去——误报代价是少存一条，漏报代价是明文落盘）。命中
+  链路本就静默（不落盘/不通知/不动 ▶ 指针），本任务零行为回归。已知
+  边界：管理器复制的裸密码无格式特征，正则不可辨，兜底见 ROADMAP 3.3
+  `wipe --sensitive`。**用户已有自定义 `ignore_regex` 的不受影响**（仅默认值
+  变化）；`config.toml.example` 与 README 示例同步为 TOML 单引号字面量
+  （`\b` `\{` 在双引号串里会被 TOML 转义规则损坏）。单测覆盖主流管理器
+  格式 + 原关键词语义不回归 + scheme 边界不误伤
+
 ## v0.6.0 - 2026-09-12
 
 ### Fixed
