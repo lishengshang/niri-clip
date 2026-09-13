@@ -153,7 +153,7 @@
 
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
-| 3.1 | `ignore_regex` 强化 | 默认规则扩展（1Password/Bitwarden/OTP URI/KeePassXC 格式）；命中不落盘不通知 | 单元测试覆盖主流密码管理器输出格式 |
+| 3.1 | ✅ `ignore_regex` 强化 | 默认规则扩展：1Password `op://` / OTP `otpauth[-migration]://` / Bitwarden `bitwarden://`（scheme 词边界 + `://` 锚定）/ KeePassXC `{REF:`/`{TOTP}`/`{TIMEOTP}` 占位符；原关键词保持子串语义不收窄（无 lookahead 下收窄 = 漏报回归）；命中不落盘不通知链路本就静默，零行为回归；已知边界（裸密码不可辨）兜底移交 3.3 | 单元测试覆盖主流密码管理器输出格式（含语义不回归与 scheme 边界不误伤断言） |
 | 3.2 | 粘贴后通知脱敏 | 通知内容截断/打码 | 通知不泄露明文 |
 | 3.3 | 敏感条目快速清除 | `wipe --sensitive`；TUI 内 `Ctrl-D` 快速删除当前 | 审计：密码类条目留存时长可人为清零 |
 | 3.4 | 加密存储 PoC（调研） | 评估 age/sqlite encryption extension 的取舍，产出 ADR 文档；可行则出实验 flag | PoC 结论文档化，决定 v2.0 是否落地 |

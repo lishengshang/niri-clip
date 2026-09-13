@@ -7,7 +7,11 @@ max_items = 750
 preview_width = 100
 min_store_length = 1
 enable_image_preview = false  # 图片捕获/chafa 预览（默认关：开启后轮询兜底路径会尝试图片 MIME）
-ignore_regex = "(?i)password|secret|token|otp|auth"
+# 3.1：默认敏感过滤。格式特征（1Password 秘密引用 op://、OTP 迁移 otpauth[-migration]://、
+# Bitwarden bitwarden://、KeePassXC 占位符 {REF:/{TOTP}/{TIMEOTP}）+ 关键词子串
+# （password|secret|token|otp|auth）。命中即不落盘、不通知、不动 ▶ 指针。
+# 注意用 TOML 单引号字面量：\b \w \{ 必须原样传给 regex，双引号会转义损坏
+ignore_regex = '(?i)(\b(?:op|otpauth|bitwarden)[\w-]*://|\{REF:|\{TOTP\}|\{TIMEOTP\})|password|secret|token|otp|auth'
 pinned_on_top = true
 tui_backend = "auto"      # auto | native | fzf | fuzzel
                           # native: 原生 iced xdg 窗口（需 niri-clip-gui，见 ADR-001）

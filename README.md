@@ -20,7 +20,7 @@
 - **事件驱动捕获**：`wl-paste --watch` 主路径，selection 变化才入库、零空闲轮询；每次捕获子进程受 `capture_timeout_secs` 时间边界保护，从机制上杜绝"进程活着但捕获停摆"；原生 500ms 轮询仅为无 wl-paste 环境兜底
 - **数据持久安全**：历史库位于 `~/.local/state/niri-clip/`（XDG state 规范，不会被系统清理工具误删），旧 `~/.cache` 库自动快照搬迁；目录 0700 / 库文件 0600 权限收紧
 - **图片预览**：`chafa` / `kitty icat`，`enable_image_preview=true` 时 `image/png/jpeg/webp` 终端渲染
-- **安全**：`ignore_regex` 默认过滤 `password|secret|token|otp`，`min_store_length` 可配
+- **安全**：`ignore_regex` 默认过滤密码管理器输出（1Password `op://` 秘密引用、`otpauth[-migration]://`、`bitwarden://`、KeePassXC `{REF:`/`{TOTP}` 占位符）+ `password|secret|token|otp|auth` 关键词，命中不落盘不通知；`min_store_length` 可配（注：管理器复制的裸密码无格式特征，正则不可辨，可自定义规则或等 3.3 `wipe --sensitive`）
 - **开箱即用**：装好即 `Mod+V` 直接可用（AUR 上架前用 `cargo install` / `makepkg`），`fuzzel` 自动回退无 `fzf` 环境
 
 ---
@@ -95,7 +95,7 @@ max_items = 750
 preview_width = 100
 min_store_length = 1
 enable_image_preview = false   # 图片捕获 + chafa 终端预览（默认关：开启后轮询兜底路径会尝试图片 MIME）
-ignore_regex = "(?i)password|secret|token|otp|auth"
+ignore_regex = '(?i)(\b(?:op|otpauth|bitwarden)[\w-]*://|\{REF:|\{TOTP\}|\{TIMEOTP\})|password|secret|token|otp|auth' # 3.1 敏感过滤（管理器 URI/占位符 + 关键词；TOML 必须单引号字面量）
 pinned_on_top = true
 tui_backend = "auto"  # auto|native|fzf|fuzzel（native=无终端原生窗口）
 notify_enabled = true # v0.5 桌面通知开关（false 完全静默）

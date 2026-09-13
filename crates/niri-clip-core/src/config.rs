@@ -57,7 +57,18 @@ mod defaults {
     pub const MAX_ITEMS: usize = 750;
     pub const PREVIEW_WIDTH: usize = 100;
     pub const MIN_STORE_LENGTH: usize = 1;
-    pub const IGNORE_REGEX: &str = r"(?i)password|secret|token|otp|auth";
+    /// 3.1（v0.7）默认敏感过滤，两段语义：
+    /// - 格式特征（精确）：1Password 秘密引用 `op://`、OTP 迁移
+    ///   `otpauth[-migration]://`、Bitwarden `bitwarden://`、KeePassXC
+    ///   占位符 `{REF:` / `{TOTP}` / `{TIMEOTP}`——匹配到即基本可断定是密钥
+    /// - 关键词（子串语义，与 v0.1 一致，不收窄）：regex crate 无 lookahead，
+    ///   加词边界会把 password123 / Bearer-token 这类真实密钥放过去，宁可
+    ///   保留 author/secretary 误报也不引入漏报（误报代价 = 少存一条，
+    ///   漏报代价 = 明文密码落盘）
+    ///
+    /// 已知边界：密码管理器复制的裸密码本身无格式特征，正则不可辨——
+    /// 兜底在 3.3 `wipe --sensitive`
+    pub const IGNORE_REGEX: &str = r"(?i)(\b(?:op|otpauth|bitwarden)[\w-]*://|\{REF:|\{TOTP\}|\{TIMEOTP\})|password|secret|token|otp|auth";
     pub const TUI_BACKEND: &str = "auto";
     pub const CAPTURE_TIMEOUT_SECS: u64 = 5;
     pub const MAX_CLIP_BYTES: usize = 1_048_576; // 1 MiB（文本）
@@ -213,6 +224,71 @@ mod tests {
         assert!(!cfg.ignore_re.as_ref().unwrap().is_match("hello world"));
     }
 
+    /// 3.1：默认规则覆盖主流密码管理器的剪贴板输出格式，且原关键词语义不回归
+    #[test]
+    fn default_ignore_regex_covers_password_manager_formats() {
+        let re = Regex::new(defaults::IGNORE_REGEX).expect("默认正则必须可编译");
+
+        // 1Password 秘密引用（Copy Secret Reference 的输出）
+        assert!(re.is_match("op://Private/GitHub/password"), "op://");
+        assert!(
+            re.is_match("op://Employee/vault-2/item-1/credential"),
+            "op:// 多段"
+        );
+        // OTP：标准 TOTP URI 与 Google Authenticator 迁移格式
+        assert!(
+            re.is_match("otpauth://totp/GitHub:me?secret=JBSWY3DPEHPK3PXP"),
+            "otpauth://"
+        );
+        assert!(re.is_match("otpauth://hotp/counter=1"), "otpauth hotp");
+        assert!(
+            re.is_match("otpauth-migration://offline?data=CiAKGhB"),
+            "otpauth-migration://"
+        );
+        // Bitwarden URI scheme
+        assert!(re.is_match("bitwarden://vault/item/9a2b"), "bitwarden://");
+        // KeePassXC 占位符（占位符未被解析就上屏是已知扰点）
+        assert!(re.is_match("{REF:P@I:47C2DB50AA....}"), "{{REF:");
+        assert!(re.is_match("{TOTP}"), "{{TOTP}}");
+        assert!(re.is_match("{TIMEOTP}"), "{{TIMEOTP}}");
+
+        // 原关键词子串语义不回归（不收窄）
+        assert!(re.is_match("my password is hunter2"));
+        assert!(re.is_match("Bearer token=abc"));
+        assert!(re.is_match("db auth credentials"));
+        assert!(re.is_match("password123"), "词尾粘连数字的密码必须命中");
+        assert!(
+            re.is_match("secretary"),
+            "子串语义：secret 命中（已知误报，不收窄）"
+        );
+
+        // scheme 有词边界 + :// 锚定：普通 URL/单词不误伤
+        assert!(
+            !re.is_match("https://developer.mozilla.org/operate"),
+            "op 无 :// 不命中"
+        );
+        assert!(!re.is_match("see https://example.com/docs"), "普通 URL");
+        assert!(!re.is_match("plain prose about opera"), "普通单词");
+    }
+
+    /// 3.1：should_ignore 走默认配置端到端命中管理器格式（不只为 Regex::new 可编译）
+    #[test]
+    fn should_ignore_catches_password_manager_output_end_to_end() {
+        let cfg = Config::default();
+        assert!(crate::store::should_ignore(
+            "op://Private/GitHub/password",
+            &cfg
+        ));
+        assert!(crate::store::should_ignore(
+            "otpauth://totp/x?secret=ABC",
+            &cfg
+        ));
+        assert!(!crate::store::should_ignore(
+            "https://github.com/lishengshang/niri-clip",
+            &cfg
+        ));
+    }
+
     #[test]
     fn load_parses_toml_and_compiles_custom_regex() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -236,6 +312,44 @@ mod tests {
         assert!(cfg.ignore_re.is_some());
         assert!(cfg.ignore_re.as_ref().unwrap().is_match("topsecret-data"));
         assert!(!cfg.ignore_re.as_ref().unwrap().is_match("password"));
+    }
+
+    /// config/config.toml.example 文件头声称"与 config.rs 默认值必须保持一致"，
+    /// 此前无测试锁定——example 单方面漂移（尤其 ignore_regex 在 TOML 双引号
+    /// 串里写 `\b`/`\{` 被转义规则损坏）不会被发现。源码仓库内必须存在该文件；
+    /// 缺失即断言失败（防止它被静默删除后本测试空转）
+    #[test]
+    fn example_config_matches_defaults_and_parses() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/config.toml.example");
+        assert!(
+            path.exists(),
+            "config/config.toml.example 必须存在: {}",
+            path.display()
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let parsed: Config = toml::from_str(&raw).expect("example 必须是合法 TOML 且全字段可解析");
+        // 逐字段对齐内置默认值（example 即"带注释的默认值快照"）
+        let d = Config::default();
+        assert_eq!(parsed.max_items, d.max_items);
+        assert_eq!(parsed.preview_width, d.preview_width);
+        assert_eq!(parsed.min_store_length, d.min_store_length);
+        assert_eq!(parsed.enable_image_preview, d.enable_image_preview);
+        assert_eq!(parsed.ignore_regex, d.ignore_regex);
+        assert_eq!(parsed.pinned_on_top, d.pinned_on_top);
+        assert_eq!(parsed.tui_backend, d.tui_backend);
+        assert_eq!(parsed.notify_enabled, d.notify_enabled);
+        assert_eq!(parsed.enable_preview, d.enable_preview);
+        assert_eq!(parsed.capture_timeout_secs, d.capture_timeout_secs);
+        assert_eq!(parsed.capture_primary, d.capture_primary);
+        assert_eq!(parsed.max_clip_bytes, d.max_clip_bytes);
+        assert_eq!(parsed.max_image_bytes, d.max_image_bytes);
+        assert_eq!(parsed.max_image_total_bytes, d.max_image_total_bytes);
+        // example 的正则必须可编译且过滤语义与默认一致（单引号字面量验证）
+        let re = Regex::new(&parsed.ignore_regex).expect("example 的 ignore_regex 必须可编译");
+        assert!(re.is_match("op://Private/GitHub/password"));
+        assert!(re.is_match("otpauth://totp/x"));
+        assert!(!re.is_match("https://example.com/docs"));
     }
 
     #[test]
