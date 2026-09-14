@@ -68,8 +68,9 @@ fn notify_oversize(msg: &str) {
 
 /// `niri-clip store` : 入库一段剪贴板载荷。
 ///
-/// * stdin 有数据（主模式：wl-paste 管道直灌）→ 直接按文本处理，
-///   不再触碰本进程内的 Wayland 连接，热点路径零阻塞面；
+/// * stdin 有数据（主模式：wl-paste 管道直灌）→ 按 `max_clip_bytes` 裁决；
+///   管道不辨 MIME，超文本限的载荷可能是图片，须先探测图片 MIME 再定
+///   归宿（见超限分支注释）；
 /// * stdin 为空（历史兼容：直接手动执行 store）→ 保持旧的
 ///   get_contents(Text) 探测，并在开启图片预览时尝试图片 MIME。
 ///
@@ -83,6 +84,15 @@ pub fn store_from_stdin() -> Result<()> {
     std::io::stdin().lock().take(cap).read_to_end(&mut buf)?;
 
     if buf.len() as u64 > cfg.max_clip_bytes as u64 {
+        // 主模式管道不辨 MIME：截图经 wl-paste 直灌的是原始图片字节，超文本限
+        // 不代表超图片限——若此处直接拒绝，带 10 MiB 限额的图片路径永不可达，
+        // >1 MiB 截图全军覆没且文案误导（报的是文本限额）。开启图片捕获且
+        // 剪贴板提供图片 MIME 时交图片路径按 max_image_bytes 重新裁决（其
+        // 超限通知自行负责，此处不再叠加文本报错）；仅图片不可走时才拒绝。
+        if cfg.enable_image_preview && clipboard_offers_image() {
+            capture_image_if_enabled()?;
+            return Ok(());
+        }
         notify_oversize(&format!(
             "条目超过 max_clip_bytes={} 字节",
             cfg.max_clip_bytes
@@ -154,6 +164,23 @@ fn try_system_capture() -> Result<bool> {
     }
 }
 
+/// 受支持的图片 MIME，探测序即尝试序（png 优先——截图场景的主型）。
+const IMAGE_MIMES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
+
+/// 剪贴板是否提供任一受支持的图片 MIME。仅探测可用性不读取内容：
+/// 超限复查路径只需知道"图片可走"，真正的读取与限额裁决交给
+/// [`capture_image_if_enabled`]。
+fn clipboard_offers_image() -> bool {
+    IMAGE_MIMES.iter().any(|mime| {
+        get_contents(
+            ClipboardType::Regular,
+            Seat::Unspecified,
+            MimeType::Specific(mime),
+        )
+        .is_ok()
+    })
+}
+
 fn capture_image_if_enabled() -> Result<bool> {
     let cfg = Config::load();
     if !cfg.enable_image_preview {
@@ -161,7 +188,7 @@ fn capture_image_if_enabled() -> Result<bool> {
     }
     let max = cfg.max_image_bytes;
     let cap = max as u64 + 1;
-    for mime in ["image/png", "image/jpeg", "image/webp"] {
+    for mime in IMAGE_MIMES {
         if let Ok((pipe, _)) = get_contents(
             ClipboardType::Regular,
             Seat::Unspecified,
