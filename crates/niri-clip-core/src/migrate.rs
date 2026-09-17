@@ -55,6 +55,8 @@ pub(crate) fn migrate_legacy_db(new_path: &Path) -> Result<()> {
 /// 由三触发器与 clips 行同步；存量行迁移时一次性回填。旧库升级无损：
 /// 只增表/触发器，不动 clips 行
 /// 版本 3 -> 4（任务 2.2）：文本 hash 统一为 blake3（见 migrate_blake3）
+/// 版本 4 -> 5（任务 2.7）：补 idx_ts（ts DESC, id DESC），list() 非
+/// pinned_on_top 分支的 ts 排序从 TEMP B-TREE 降为索引有序扫描
 pub(crate) fn migrate_schema(conn: &Connection) -> Result<()> {
     let ver: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if ver < 1 {
@@ -112,6 +114,17 @@ pub(crate) fn migrate_schema(conn: &Connection) -> Result<()> {
     }
     if ver < 4 {
         migrate_blake3(conn)?;
+    }
+    if ver < 5 {
+        // 2.7：list() 的 pinned_on_top=false 分支按 ts 排序，原 idx_pinned_ts
+        // 以 pinned 为首键帮不上忙——补一条 ts 序索引让该分支也能有序扫描。
+        // 纯增索引不动行，存量库升级无损
+        conn.execute_batch(
+            "
+            CREATE INDEX IF NOT EXISTS idx_ts ON clips(ts DESC, id DESC);
+            PRAGMA user_version=5;
+            ",
+        )?;
     }
     Ok(())
 }

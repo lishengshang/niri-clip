@@ -20,7 +20,7 @@
 - **事件驱动捕获**：`wl-paste --watch` 主路径，selection 变化才入库、零空闲轮询；每次捕获子进程受 `capture_timeout_secs` 时间边界保护，从机制上杜绝"进程活着但捕获停摆"；原生 500ms 轮询仅为无 wl-paste 环境兜底
 - **数据持久安全**：历史库位于 `~/.local/state/niri-clip/`（XDG state 规范，不会被系统清理工具误删），旧 `~/.cache` 库自动快照搬迁；目录 0700 / 库文件 0600 权限收紧
 - **图片预览**：`chafa` / `kitty icat`，`enable_image_preview=true` 时 `image/png/jpeg/webp` 终端渲染
-- **安全**：`ignore_regex` 默认过滤密码管理器输出（1Password `op://` 秘密引用、`otpauth[-migration]://`、`bitwarden://`、KeePassXC `{REF:`/`{TOTP}` 占位符）+ `password|secret|token|otp|auth` 关键词，命中不落盘不通知；`min_store_length` 可配（注：管理器复制的裸密码无格式特征，正则不可辨，可自定义规则或等 3.3 `wipe --sensitive`）
+- **安全**：`ignore_regex` 默认过滤密码管理器输出（1Password `op://` 秘密引用、`otpauth[-migration]://`、`bitwarden://`、KeePassXC `{REF:`/`{TOTP}` 占位符）+ `password|secret|token|otp|auth` 关键词，命中不落盘不通知；`min_store_length` 可配。裸密码无格式特征正则不可辨，可自定义规则；规则缺失期的存量可用 `niri-clip wipe --sensitive` 一键清除（TUI 内 `Ctrl-D` 快删当前项）
 - **开箱即用**：装好即 `Mod+V` 直接可用（AUR 上架前用 `cargo install` / `makepkg`），`fuzzel` 自动回退无 `fzf` 环境
 
 ---
@@ -141,7 +141,11 @@ niri-clip search <query> [--limit N]
 niri-clip preview <id>
 niri-clip pin <id>    # 切换固定
 niri-clip delete <id> [-f]   # -f 跳过星标确认（脚本/无头环境）
-niri-clip wipe
+niri-clip delete-current     # 删除当前项 ▶（最后复制的内容，无需定位选中行；
+                             # 星标条目二段确认同 delete）
+niri-clip wipe [--sensitive] [--dry-run]
+                             # --sensitive 只清除命中 ignore_regex 的敏感条目
+                             # （含星标，清存量密码类残留）；--dry-run 仅预览
 niri-clip stats        # 条数/体积/图片占比（库 = db+wal，图片 = 目录实测）
 niri-clip vacuum       # VACUUM 压缩库文件（返回前后体积）
 niri-clip prune --before 2026-08-01 [--dry-run]

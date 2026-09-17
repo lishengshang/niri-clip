@@ -15,6 +15,11 @@ use std::process::Command;
 /// 发送桌面通知，summary 固定为 `niri-clip`。不阻塞、不报错：
 /// 无通知服务 / notify-send 缺失时静默。
 ///
+/// **脱敏不变式（任务 3.2）**：body 只允许状态文案/数量/尺寸/条目 ID 等
+/// 非内容信息，**不得携带条目明文**——桌面通知会显示在锁屏与录屏里，
+/// 是比数据库更外泄的通道。该不变式由 `tests/notify_redaction.rs` 端到端
+/// 锁定（假 notify-send 捕获真实通知内容）；新增调用点时同样遵守。
+///
 /// 超时边界（ROADMAP 工程原则 1）：notify-send 经 coreutils `timeout 5s`
 /// 划界（与 capture_timeout_secs 默认一致）——D-Bus 会话总线异常时
 /// libnotify 默认超时可达 ~25s，不设界则最坏情况 daemon 内阻塞线程/

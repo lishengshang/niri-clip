@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -634,17 +634,36 @@ pub fn list(limit: usize) -> Result<Vec<Clip>> {
     let cfg = Config::load();
     let conn = connect()?;
     // 当前项永远第 1 行（星标之上）：第 1 行 = Ctrl+V 会粘出的内容。
-    // 无指针时绑空串（hash 列不存在空值），排序退化为原行为。
+    // 无指针时绑空串（hash 列不存在空值），过滤退化为不过滤。
     let cur_hash = current_hash().unwrap_or_default();
-    let order = if cfg.pinned_on_top {
-        "(hash = ?2) DESC, pinned DESC, ts DESC, id DESC"
-    } else {
-        "(hash = ?2) DESC, ts DESC, id DESC"
-    };
-    let sql = format!("SELECT {CLIP_COLS} FROM clips ORDER BY {order} LIMIT ?1");
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![limit as i64, cur_hash], row_to_clip)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
+    // 2.7：当前项单独点查（走 idx_hash），不再用表达式 (hash = ?2) DESC 作
+    // 排序首键——表达式键令 SQLite 无法按索引有序扫描，100k 行库实测退化为
+    // SCAN + USE TEMP B-TREE FOR ORDER BY（数值见 ARCHITECTURE §9）
+    if !cur_hash.is_empty() {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {CLIP_COLS} FROM clips WHERE hash = ?1 LIMIT 1"
+        ))?;
+        let mut rows = stmt.query_map(params![cur_hash], row_to_clip)?;
+        if let Some(r) = rows.next() {
+            out.push(r?);
+        }
+    }
+    // 其余条目按 pinned/ts 排序取 N 条：排序键为纯列名，pinned_on_top 走
+    // idx_pinned_ts、否则走 idx_ts（v5），两分支均为索引有序扫描。
+    // hash UNIQUE，!= 过滤恰好剔除当前项
+    let order = if cfg.pinned_on_top {
+        "pinned DESC, ts DESC, id DESC"
+    } else {
+        "ts DESC, id DESC"
+    };
+    let rest_limit = limit - out.len();
+    let sql = format!("SELECT {CLIP_COLS} FROM clips WHERE hash != ?2 ORDER BY {order} LIMIT ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![rest_limit as i64, cur_hash], row_to_clip)?;
     for r in rows {
         out.push(r?);
     }
@@ -733,6 +752,76 @@ pub fn wipe() -> Result<()> {
     Ok(())
 }
 
+/// `wipe --sensitive`（任务 3.3）：删除命中 `ignore_regex` 的敏感条目。
+///
+/// "敏感"的定义与捕获过滤**同一把尺子**：凡命中 ignore_regex 的内容本不该
+/// 落盘（3.1 前捕获的存量、自定义规则弱于默认值的历史条目都是残留），库里
+/// 存在即泄漏，故 **星标与当前项不保护**——若保护，密码类条目被星标后留存
+/// 时长就无法清零，3.3 的验收（审计：留存可人为清零）即落空。
+///
+/// 只按正则判定，不含 `min_store_length`（那是入库噪声门槛，不是敏感语义）。
+/// 正则编译失败时**报错而非静默返回 0**——用户要求清除敏感数据时"删了 0 条"
+/// 的成功假象是危险误导。
+///
+/// dry-run 只统计不删除；与 prune 同口径：SUM/DELETE 包在 BEGIN IMMEDIATE
+/// 事务里，图片文件删除放 commit 之后（见 prune 注释）。
+pub struct WipeOutcome {
+    pub deleted: usize,
+    pub images_deleted: usize,
+}
+
+pub fn wipe_sensitive(dry_run: bool) -> Result<WipeOutcome> {
+    let cfg = Config::load();
+    let re = cfg
+        .ignore_re
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("ignore_regex 编译失败，无法判定敏感条目；请检查配置"))?;
+    let mut conn = connect()?;
+    // 先在连接上按正则筛出目标 id（SQL 不做正则），再进事务按 id 删
+    let mut ids: Vec<i64> = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, text FROM clips")?;
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            let text: String = r.get(1)?;
+            if re.is_match(&text) {
+                ids.push(id);
+            }
+        }
+    }
+    if dry_run {
+        return Ok(WipeOutcome {
+            deleted: ids.len(),
+            images_deleted: 0,
+        });
+    }
+    if ids.is_empty() {
+        return Ok(WipeOutcome {
+            deleted: 0,
+            images_deleted: 0,
+        });
+    }
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let mut image_files: Vec<String> = Vec::new();
+    for id in &ids {
+        image_files.extend(delete_rows_image_paths(
+            &tx,
+            "DELETE FROM clips WHERE id = ?1 RETURNING image_path",
+            &[id],
+        )?);
+    }
+    tx.commit()?;
+    let images_deleted = image_files.len();
+    for p in image_files {
+        let _ = std::fs::remove_file(p);
+    }
+    Ok(WipeOutcome {
+        deleted: ids.len(),
+        images_deleted,
+    })
+}
+
 pub fn toggle_pin(id: i64) -> Result<bool> {
     let conn = connect()?;
     let cur: i64 = conn.query_row("SELECT pinned FROM clips WHERE id=?1", params![id], |r| {
@@ -749,6 +838,18 @@ pub fn is_pinned(id: i64) -> Result<bool> {
         r.get(0)
     })?;
     Ok(v != 0)
+}
+
+/// 按当前项指针的 hash 反查 id（`delete-current` 用）。hash UNIQUE，至多一行；
+/// 指针失效（条目已删）返回 None，由调用方决定提示语
+pub fn find_id_by_hash(hash: &str) -> Result<Option<i64>> {
+    let conn = connect()?;
+    let id = conn
+        .query_row("SELECT id FROM clips WHERE hash=?1", params![hash], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(id)
 }
 
 pub fn get(id: i64) -> Result<Clip> {

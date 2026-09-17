@@ -50,8 +50,23 @@ enum Commands {
         #[arg(long)]
         fzf: bool,
     },
-    /// 清空历史
-    Wipe,
+    /// 快速删除当前项（▶ 最后一次复制的内容，任务 3.3）：无需定位选中行，
+    /// Mod+V 打开后一把 Ctrl-D 即可清掉刚复制进来的敏感内容。确认语义同
+    /// delete（星标需二次确认，ADR-005）；--fzf 由 fzf 绑定调用
+    DeleteCurrent {
+        #[arg(long)]
+        fzf: bool,
+    },
+    /// 清空历史；--sensitive 只清除命中 ignore_regex 的敏感条目（含星标，
+    /// 任务 3.3）
+    Wipe {
+        /// 只删除命中 ignore_regex 的条目（定义与捕获过滤同一把尺子）
+        #[arg(long)]
+        sensitive: bool,
+        /// 只统计将删除的条数，不实际删除（需与 --sensitive 同用）
+        #[arg(long, requires = "sensitive")]
+        dry_run: bool,
+    },
     /// 数据统计（条数/体积/图片占比，库与图片均为磁盘实测口径）
     Stats,
     /// VACUUM 压缩库文件（回收删除/淘汰留下的空洞，返回前后体积）
@@ -117,6 +132,30 @@ fn fmt_bytes(b: u64) -> String {
     }
 }
 
+/// 单条删除 + 二段确认（delete / delete-current 共用）。星标条目的二段确认
+/// 统一走 core 状态机（任务 2.6 / ADR-005）：15s TTL 落盘，fzf TUI / 原生
+/// UI / CLI 共用同一语义，前端只负责呈现。--force 供脚本与无头环境显式绕过
+/// （不再依赖 fuzzel 弹窗——ADR-005）
+fn delete_with_confirm(id: i64, force: bool, fzf: bool) -> Result<()> {
+    if force {
+        store::delete(id)?;
+        outln!("deleted {}", id);
+        return Ok(());
+    }
+    match confirm::request(id)? {
+        confirm::Decision::Deleted => outln!("deleted {}", id),
+        confirm::Decision::Pending => {
+            // fzf 内嵌路径由 list-raw 的行尾标记呈现挂起态，无需文案；
+            // 其它调用方（脚本/手工）必须被告知"这只是第一段"，否则会
+            // 误以为删除失败
+            if !fzf {
+                outln!("pending: ★ 条目需二次确认，15 秒内再次执行同一命令即删除（或加 --force）");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 毫秒时间戳 -> 本地时区 YYYY-MM-DD（stats 最旧/最新条目展示用）；
 /// 非法值（理论上不存在）退回原始数字，不因展示挂掉命令
 fn fmt_date(ms: i64) -> String {
@@ -165,31 +204,37 @@ async fn main() -> Result<()> {
             outln!("{} {}", msg, id);
         }
         Some(Commands::Delete { id, force, fzf }) => {
-            // 星标条目的二段确认统一走 core 状态机（任务 2.6 / ADR-005）：
-            // 15s TTL 落盘，fzf TUI / 原生 UI / CLI 共用同一语义，前端只负责呈现。
-            // --force 供脚本与无头环境显式绕过（不再依赖 fuzzel 弹窗——ADR-005）
-            if force {
-                store::delete(id)?;
-                outln!("deleted {}", id);
+            delete_with_confirm(id, force, fzf)?;
+        }
+        Some(Commands::DeleteCurrent { fzf }) => {
+            let Some(hash) = store::current_hash() else {
+                if !fzf {
+                    outln!("当前项不在历史中（指针为空）");
+                }
                 return Ok(());
-            }
-            match confirm::request(id)? {
-                confirm::Decision::Deleted => outln!("deleted {}", id),
-                confirm::Decision::Pending => {
-                    // fzf 内嵌路径由 list-raw 的行尾标记呈现挂起态，无需文案；
-                    // 其它调用方（脚本/手工）必须被告知"这只是第一段"，否则会
-                    // 误以为删除失败
+            };
+            match store::find_id_by_hash(&hash)? {
+                Some(id) => delete_with_confirm(id, false, fzf)?,
+                None => {
+                    // 指针失效（条目已被删除路径清走）：对用户表现为"已经没了"
                     if !fzf {
-                        outln!(
-                            "pending: ★ 条目需二次确认，15 秒内再次执行同一命令即删除（或加 --force）"
-                        );
+                        outln!("当前项不在历史中");
                     }
                 }
             }
         }
-        Some(Commands::Wipe) => {
-            store::wipe()?;
-            outln!("wiped");
+        Some(Commands::Wipe { sensitive, dry_run }) => {
+            if sensitive {
+                let r = store::wipe_sensitive(dry_run)?;
+                if dry_run {
+                    outln!("dry-run: 将删除 {} 条敏感条目", r.deleted);
+                } else {
+                    outln!("wiped {}（含图片 {}）", r.deleted, r.images_deleted);
+                }
+            } else {
+                store::wipe()?;
+                outln!("wiped");
+            }
         }
         Some(Commands::Stats) => {
             let s = store::stats()?;

@@ -307,7 +307,7 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     // header 缺席提示：指针存在但列表第 1 行不匹配 → 当前内容被过滤/超限，
     // 不在历史中（在库中则必因置顶排序出现在第 1 行）
     let mut header =
-        "Alt+1..9快选 · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出 · ▶=当前 · ★删=两次Ctrl-X"
+        "Alt+1..9快选 · Space跳 · /或Ctrl-F搜索 · Enter复制 · Ctrl-Y不退出 · ▶=当前 · ★删=两次Ctrl-X · Ctrl-D删当前"
             .to_string();
     if cur
         .as_ref()
@@ -328,6 +328,8 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     let reload_cmd = format!("{} list-raw", exe);
     let pin_cmd = format!("{} pin {{4}}", exe);
     let del_cmd = format!("{} delete --fzf {{4}}", exe);
+    // Ctrl-D 删当前项（▶ 第 1 行）：定位已捕获的敏感内容后无需选中即可删除
+    let del_cur_cmd = format!("{} delete-current --fzf", exe);
     let wipe_cmd = format!("{} wipe", exe);
 
     let preview_cmd = if cfg.enable_preview {
@@ -378,6 +380,10 @@ fn run_fzf(cfg: &Config) -> Result<()> {
         .arg(format!(
             "--bind=ctrl-x:execute-silent({})+reload-sync({})",
             del_cmd, reload_cmd
+        ))
+        .arg(format!(
+            "--bind=ctrl-d:execute-silent({})+reload-sync({})",
+            del_cur_cmd, reload_cmd
         ))
         .arg(format!("--bind=ctrl-r:reload-sync({})", reload_cmd))
         .arg(format!(
@@ -490,9 +496,11 @@ pub fn list_raw() -> Result<()> {
     let stdout = io::stdout();
     let mut out = stdout.lock();
     for (idx, c) in clips.iter().enumerate() {
-        // 二段确认标记：追加在第 5 列尾部，不破坏 tab 列布局
+        // 二段确认标记：追加在第 5 列尾部，不破坏 tab 列布局。
+        // 不写死键名：挂起可由 Ctrl-X（删选中）或 Ctrl-D（删当前）任一发起，
+        // 同 id 再按任一键即完成确认
         let marker = if pending == Some(c.id) {
-            "  ◆ 再按Ctrl-X确认删除"
+            "  ◆ 再按同键确认删除"
         } else {
             ""
         };
