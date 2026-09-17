@@ -154,7 +154,7 @@
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
 | 3.1 | ✅ `ignore_regex` 强化 | 默认规则扩展：1Password `op://` / OTP `otpauth[-migration]://` / Bitwarden `bitwarden://`（scheme 词边界 + `://` 锚定）/ KeePassXC `{REF:`/`{TOTP}`/`{TIMEOTP}` 占位符；原关键词保持子串语义不收窄（无 lookahead 下收窄 = 漏报回归）；命中不落盘不通知链路本就静默，零行为回归；已知边界（裸密码不可辨）兜底移交 3.3 | 单元测试覆盖主流密码管理器输出格式（含语义不回归与 scheme 边界不误伤断言） |
-| 3.2 | 粘贴后通知脱敏 | 通知内容截断/打码 | 通知不泄露明文 |
+| 3.2 | ✅ 通知脱敏 | 审计确认全部 `notify::send` 调用点（daemon 超限提示 / GUI 失败提示 / TUI 环境提示）均只发状态文案、配置数字与条目 ID，**无一处携带条目明文**。交付为结构不变式：`notify.rs` 文档声明 body 只允许非内容信息 + `tests/notify_redaction.rs` 端到端锁定（假 notify-send 捕获真实通知：超限分支只报限额数字不回显载荷，正常捕获零通知）。**被否方案**：引入"粘贴成功 + 截断预览"式通知——纯通知噪音，与轻量化诉求相悖 | 通知不泄露明文（端到端测试锁定，新增调用点若格式化条目内容即红） |
 | 3.3 | ✅ 敏感条目快速清除 | `wipe --sensitive`：清除命中 `ignore_regex` 的存量条目（"敏感"与捕获过滤同一把尺子——命中者本不该落盘，库存即泄漏；**含星标**，否则密码类条目被星标后留存时长无法清零；正则编译失败报错而非静默删 0；`--dry-run` 预览）。`delete-current` 子命令 + fzf TUI `Ctrl-D`：一把删除 ▶ 当前项（最后复制的内容），无需定位选中行；确认语义走 `core::confirm`（星标二段确认，ADR-005） | 审计：密码类条目留存时长可人为清零（端到端测试：弱规则期入库 → 强化规则 → 清除） |
 | 3.4 | 加密存储 PoC（调研） | 评估 age/sqlite encryption extension 的取舍，产出 ADR 文档；可行则出实验 flag | PoC 结论文档化，决定 v2.0 是否落地 |
 | 3.5 | 安全审计自查 | 文件权限、日志脱敏、seccomp/systemd 沙箱加固（systemd user 单元加 ProtectSystem 等指令） | `systemd-analyze security` 评分改善；检查项清单归档 |
@@ -194,10 +194,20 @@
 |---|---|---|
 | **原生 UI 后续（核心已交付，收尾项见下）** | 消除终端冷启动瓶颈的彻底解。**已交付**：M5.1 选型 ADR-001（含修订 1：layer-shell → 常规 xdg 窗口 + tiny-skia 软渲染）→ M5.2 MVP → M5.3 语义对齐 → M5.4.1 后端选择接入，`crates/niri-clip-gui` 随 v0.5.x 发布。**剩余收尾**：① 窗口启动延迟真机实测（目标 ≤50ms，记入开销预算表）② 兼容矩阵（niri stable / sway）③ 随 minor 的文档与 CHANGELOG 补齐。原立项详案 `docs/NATIVE-UI.md` 已于本轮删除（内容已全部收敛至此表与 ADR-001） | 无（`niri-clip-core` 下沉早于 Phase 1 完成） |
 | OSC52 远程剪贴板 | SSH/终端场景同步历史 | 1.1（selection 抽象） |
-| niri overview 集成 | 预览窗口嵌入 niri 概览 | layer-shell 协议调研（随原生 UI 立项一并推进） |
 | 历史内容动作插件化 | 自定义 action（URL 直接打开等） | 2.4 导出格式稳定 |
-| foot server 模式 | `foot --server` 常驻 + `footclient` ~10ms 拉窗（终端方案的极限优化，原生 UI 交付后自然退役） | 用户安装 foot |
+| 多选批量删除（TUI/GUI） | fzf `--multi` + GUI 多选；同类均有（clipse 多选、cliphist 2025 已支持多行 delete），批量清理大历史的刚需 | 无 |
+| 捕获暂停 / 忽略下一次 | opt-out 热键（Maccy 的 Option-click 语义）：粘贴密码管理器内容前临时停捕。需 daemon 控制面（单实例 flock 之外新增轻量 IPC），中复杂度，按需求热度立项 | 无 |
 | 跨合成器通用化 | 抽离 niri 特定假设，支持 sway/hyprland | 无破坏性改动审计 |
+
+> **同类项目调研结论（2026-09-18，裁剪依据）**：对 cliphist / CopyQ / clipse /
+> Maccy 的功能对照——本项目已覆盖主流能力面（历史/去重/max_items、删除/清空/
+> 按日期 prune、星标置顶、图片捕获+chafa 预览、ignore_regex 过滤），且原生 GUI
+> 与按内容（而非按来源应用）的敏感过滤是差异项——Wayland data-control 协议
+> 不暴露来源应用，CopyQ 式"按应用黑名单"在 Wayland 下本就不可行，ignore_regex
+> 路线与 Maccy 2025 新增的正则忽略同向。已裁剪：niri overview 集成（嵌入概览
+> 需 layer-shell，与 ADR-001 修订 1 的否决结论冲突，且 niri 无插件协议）、
+> foot server 模式（原生 UI 已交付，其存在意义随之消失）。已明确拒绝纳入：
+> HTML/富文本格式支持（存储与渲染双倍复杂度，违背轻量化）。
 
 节奏：每 6–8 周一个 minor（v1.1 / v1.2 ...），patch 随 bug 修复随时发。
 
@@ -206,8 +216,10 @@
 ## 九、Phase 6 — v2.0+：长期愿景
 
 - **加密历史（age）**：基于 3.4 PoC 结论落地，默认关闭、opt-in
-- **原生 GUI 前端**：iced/gtk4-layer-shell 二选一（以 PoC 定）
 - **多设备同步**（远期探索）：加密导出 + 文件同步方案优先于自建网络服务
+
+> 原生 GUI 已于 v0.5.x 交付（tiny-skia 方案，ADR-001），原"iced/gtk4 前端"
+> 候选随之移除；GUI 后续增强走 Phase 5 原生 UI 收尾与候选表。
 
 > 原则：v2.0 不预设时间表，由 v1.x 使用反馈驱动立项。
 
