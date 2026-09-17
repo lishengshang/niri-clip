@@ -246,6 +246,52 @@ fn list_survives_stale_current_pointer() {
 }
 
 #[test]
+fn wipe_sensitive_purges_ignore_regex_hits_including_pinned() {
+    with_env(|g| {
+        clear_db();
+        let cfg = cfg_dir_for(g);
+        // 阶段一：弱规则期入库——模拟 3.1 前的存量（规则命中者根本进不了库，
+        // 敏感残留只可能来自"入库时规则还不存在"，这正是 3.3 的目标场景）
+        std::fs::write(cfg.join("config.toml"), "ignore_regex = 'NOMATCH_XQ'\n").unwrap();
+        insert("SECRET_1".into(), None).unwrap();
+        insert("normal text".into(), None).unwrap();
+        insert("SECRET_2".into(), None).unwrap();
+        let id1 = list(50)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.text == "SECRET_1")
+            .unwrap()
+            .id;
+        toggle_pin(id1).unwrap();
+
+        // 阶段二：规则强化（自定义整体替换默认值，3.1 语义），随后 dry-run 与真删
+        std::fs::write(cfg.join("config.toml"), "ignore_regex = 'SECRET_[0-9]+'\n").unwrap();
+
+        // dry-run 只统计不删除
+        let dry = wipe_sensitive(true).unwrap();
+        assert_eq!(dry.deleted, 2, "两条 SECRET_ 命中");
+        assert_eq!(list(50).unwrap().len(), 3, "dry-run 不得真删");
+
+        // 真删：星标的 SECRET_1 一并清除（敏感清除不保护星标——留存时长必须
+        // 可人为清零），普通条目保留
+        let r = wipe_sensitive(false).unwrap();
+        assert_eq!(r.deleted, 2);
+        let rest = list(50).unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].text, "normal text");
+
+        // 幂等：再跑一次删 0 条
+        assert_eq!(wipe_sensitive(false).unwrap().deleted, 0);
+    });
+}
+
+fn cfg_dir_for(g: &EnvGuard) -> std::path::PathBuf {
+    let dir = g.root.join("config/niri-clip");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
 fn oversize_or_ignored_capture_does_not_move_current_pointer() {
     with_env(|g| {
         clear_db();

@@ -163,8 +163,8 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
   `num \t ▶ \t ★ \t id \t preview`（列序即下方 fzf 参数的下标依据）
 - **fzf**：`fzf --delimiter='\t' --nth=5.. --with-nth=1,2,3,5.. --id-nth=4
   --track --no-input --no-sort --preview='niri-clip preview {4}'`；
-  绑定 `ctrl-p:pin{4}` / `ctrl-x:delete --fzf {4}` / `ctrl-y:copy {4}` /
-  `ctrl-r:list-raw` / `alt-1..9:pos(n)+accept`，各动作后接 `reload-sync`
+  绑定 `ctrl-p:pin{4}` / `ctrl-x:delete --fzf {4}` / `ctrl-d:delete-current`
+  / `ctrl-y:copy {4}` / `ctrl-r:list-raw` / `alt-1..9:pos(n)+accept`，各动作后接 `reload-sync`
   （`--track` + `--id-nth` 是"删除/固定后不跳顶"的实现基础）；
   匹配只作用于第 5 列，隐藏的序号/标记/id 列不参与搜索（否则查询 `1`
   会命中所有含 1 的序号与 id）
