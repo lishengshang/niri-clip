@@ -625,7 +625,7 @@ fn large_db_long_stability() {
     let mig_elapsed = t.elapsed();
     let rss_peak = rss_kib().map(|(_, hwm)| hwm as f64 / 1024.0);
 
-    assert_eq!(db_user_version(), 4, "迁移后 user_version 应为 4");
+    assert_eq!(db_user_version(), 5, "迁移后 user_version 应为 5");
     assert_eq!(
         st.total, fx.after,
         "迁移后条目数应为 {}（合并 {DUP_GROUPS} 组重复），实为 {}",

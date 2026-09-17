@@ -66,7 +66,7 @@
 ```
 ✅ Phase 0   v0.1–v0.4.1   骨架 → MVP → 优化 → P0 正确性闭环      已交付
 ✅ Phase 1   v0.5.x        TUI 体验闭环                          已交付（v0.5.2）
-✅ Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    已交付（v0.6.0）；2.7 延续至后续 minor
+✅ Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    已交付（v0.6.0）；2.7 已于 v0.7 前补交付
   Phase 3   v0.7          安全与隐私强化                         约 2–3 周
   Phase 4   v1.0          Production 正式发布                    约 3–4 周
   Phase 5   v1.x          生态与集成（原生UI核心已交付/waybar/OSC52） v1.0 后持续
@@ -137,7 +137,7 @@
 | 2.4 | ✅ 历史导出/备份 | `export <file\|->` 全量导出 NDJSON（首行 header + 每行一条目，图片内嵌 base64 自包含，ts ASC 稳定排序可 diff，文件 0600）；`--sqlite` 附 `VACUUM INTO` 物理快照（已存在拒绝覆盖）；`import [--dry-run]` 回灌：hash 幂等（已存在跳过不刷 ts/▶ 指针）、逐条重算 hash 完整性校验（损坏跳过警告）、单事务原子提交、保留原 ts/pinned、结束 enforce_max_items。格式为 Phase 5 插件化扩展点，选型见 ADR-004 | 备份可回灌（7 个单测锁定往返/幂等/ts/损坏拦截/裁剪/schema/快照 + 真机冒烟） |
 | 2.5 | ✅ 大库长稳测试 | `crates/niri-clip-core/tests/large_db.rs`：100k 条规模下写入 / 查询 / 并发 / 维护 / 迁移五段自动化，每段自带条目数与内容断言；迁移段照 `migrate.rs` 的 v1/v2/v3 步骤**自建 v3 旧库**（含重复行与星标继承），覆盖外壳脚本做不到的那部分。默认 `#[ignore]`，规模可由 `NIRI_CLIP_STRESS_N` 覆盖。实测数值见 ARCHITECTURE §9 | 无锁死、无数据丢失、内存平稳 —— 三项均已断言并本机 100k 实测通过 |
 | 2.6 | ✅ 工程收敛（v0.6 前置） | 全项目体检：结构冗余 / 文档失真 / 标准性三类共 38 项（含执行中新发现的 2 个 P0 代码缺陷），**零遗留**收尾——对外契约断链修复（AUR 服务单元路径、`cargo publish` 依赖 version）、删除确认三套实现收敛为 core 单一 15s TTL 状态机、`tui` 模块移出 core 恢复自定分层、依赖计数口径修正、文档失效机制写入 AGENTS.md | 38 项逐项有落地结果（修复 / 删除 / 明确驳回三者之一）；文档与代码零冲突；`docs/` 内无指向已删文档的引用；同语义只剩一处实现（`confirm` / `single_instance` / `render_row` / `preview_multiline` / `upsert_clip`）；门禁 fmt + clippy(`-D warnings`) + 71 测试全过 |
-| 2.7 | 列表排序走索引（2.5 暴露） | `list()` 的排序首键是表达式 `(hash = ?2) DESC`（把 ▶ 当前项顶到第 1 行），SQLite 据此无法按索引有序扫描——100500 行库 `EXPLAIN QUERY PLAN` 实测退化为 `SCAN clips + USE TEMP B-TREE FOR ORDER BY`，10k→100k 耗时 0.95ms→108ms（114×，远超数据量增长的 10×）。修法方向：当前项单独取（`WHERE hash = ?2`）后与"其余按 pinned/ts 排序取 N 条"拼接，两条查询都能走索引。**默认 `max_items = 750` 下库不可能这么大，真实用户不触发**，故不阻塞 v0.6.0，可随后续 minor 交付 | 100k 下 `list(300)` 回到与 10k 同阶（不再随规模超线性增长）；实测数值记入 ARCHITECTURE §9 |
+| 2.7 | ✅ 列表排序走索引（2.5 暴露） | `list()` 原以表达式 `(hash = ?2) DESC` 作排序首键（把 ▶ 当前项顶到第 1 行），SQLite 据此无法按索引有序扫描——100500 行库 `EXPLAIN QUERY PLAN` 实测 `SCAN clips + USE TEMP B-TREE FOR ORDER BY`，10k→100k 耗时 0.95ms→108ms（114×，远超数据量增长的 10×）。修法：当前项单独点查（`WHERE hash = ?2`，走 idx_hash）后与"其余按 pinned/ts 排序取 N 条"拼接；并新增 idx_ts（ts DESC, id DESC，schema v4→v5）使 `pinned_on_top=false` 分支同样有序扫描。**默认 `max_items = 750` 下库不可能这么大，真实用户本不触发**，属防御性修复 | 100k 下 `list(300)` 回到与 10k 同阶（不再随规模超线性增长）；实测数值记入 ARCHITECTURE §9 |
 
 **技术要点：** tokenizer 选型已由 ADR-002 定为 **trigram**（原"unicode61 起步"计划已推翻——它对中文子串不可用）；迁移脚本幂等可回滚。
 **时间节点：** 里程碑 **M2 = v0.6.0** ✅（2026-09-12 发布，含 2.5 长稳与 2.6 工程收敛，一并收尾）。

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Fixed
+- **大库 `list()` 查询退化（2.7，2.5 长稳暴露）**：排序首键原是表达式
+  `(hash = ?2) DESC`（把 ▶ 当前项顶到第 1 行），SQLite 无法按索引有序扫描，
+  100500 行库实测全表 SCAN + 完整排序，10k→100k 耗时 0.95ms→108ms（114×，
+  远超数据量增长）。修复：当前项单独点查（走 idx_hash）后与其余条目按
+  pinned/ts 排序拼接；新增 `idx_ts`（ts DESC, id DESC，schema v4→v5 迁移，
+  纯增索引无损升级）使 `pinned_on_top=false` 分支同样走索引有序扫描。
+  默认 `max_items = 750` 下真实用户本不触发，属防御性修复。10k 基准
+  `list(300)` 1.01ms（预算 <11ms），100k 数值见 ARCHITECTURE §9
+
 ### Changed
 - **默认 `ignore_regex` 强化（3.1）**：新增密码管理器输出格式的精确匹配——
   1Password 秘密引用 `op://`、OTP 迁移 `otpauth[-migration]://`、Bitwarden

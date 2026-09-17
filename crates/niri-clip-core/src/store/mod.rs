@@ -634,17 +634,36 @@ pub fn list(limit: usize) -> Result<Vec<Clip>> {
     let cfg = Config::load();
     let conn = connect()?;
     // 当前项永远第 1 行（星标之上）：第 1 行 = Ctrl+V 会粘出的内容。
-    // 无指针时绑空串（hash 列不存在空值），排序退化为原行为。
+    // 无指针时绑空串（hash 列不存在空值），过滤退化为不过滤。
     let cur_hash = current_hash().unwrap_or_default();
-    let order = if cfg.pinned_on_top {
-        "(hash = ?2) DESC, pinned DESC, ts DESC, id DESC"
-    } else {
-        "(hash = ?2) DESC, ts DESC, id DESC"
-    };
-    let sql = format!("SELECT {CLIP_COLS} FROM clips ORDER BY {order} LIMIT ?1");
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![limit as i64, cur_hash], row_to_clip)?;
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
+    // 2.7：当前项单独点查（走 idx_hash），不再用表达式 (hash = ?2) DESC 作
+    // 排序首键——表达式键令 SQLite 无法按索引有序扫描，100k 行库实测退化为
+    // SCAN + USE TEMP B-TREE FOR ORDER BY（数值见 ARCHITECTURE §9）
+    if !cur_hash.is_empty() {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {CLIP_COLS} FROM clips WHERE hash = ?1 LIMIT 1"
+        ))?;
+        let mut rows = stmt.query_map(params![cur_hash], row_to_clip)?;
+        if let Some(r) = rows.next() {
+            out.push(r?);
+        }
+    }
+    // 其余条目按 pinned/ts 排序取 N 条：排序键为纯列名，pinned_on_top 走
+    // idx_pinned_ts、否则走 idx_ts（v5），两分支均为索引有序扫描。
+    // hash UNIQUE，!= 过滤恰好剔除当前项
+    let order = if cfg.pinned_on_top {
+        "pinned DESC, ts DESC, id DESC"
+    } else {
+        "ts DESC, id DESC"
+    };
+    let rest_limit = limit - out.len();
+    let sql = format!("SELECT {CLIP_COLS} FROM clips WHERE hash != ?2 ORDER BY {order} LIMIT ?1");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![rest_limit as i64, cur_hash], row_to_clip)?;
     for r in rows {
         out.push(r?);
     }

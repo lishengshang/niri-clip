@@ -18,7 +18,7 @@
         ┌───────────────────────────────┐
         │ store (SQLite WAL)            │ BEGIN IMMEDIATE + busy_timeout=5000
         │ clips(hash UNIQUE, image_path)│ PRAGMA user_version 版本化迁移
-        │ idx_hash, idx_pinned_ts       │
+        │ idx_hash, idx_pinned_ts, idx_ts│
         └────────┬──────────────────────┘
                  │ list(min(max_items, MENU_LIMIT)) 直查（无缓存层）
         ┌────────▼─────────┐  --track --id-nth 2
@@ -97,6 +97,7 @@ CREATE TABLE clips(
 );
 CREATE INDEX idx_hash ON clips(hash);
 CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
+CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list() 非 pinned_on_top 分支的 ts 序扫描
 -- FTS5 全文索引（v3，任务 2.1）：clips_fts 外部内容表（content='clips'，
 -- 不复制正文）+ insert/delete/update 三触发器同步，tokenizer=trigram
 -- （选型见 ADR-002：中英文子串均命中）
@@ -108,7 +109,8 @@ CREATE INDEX idx_pinned_ts ON clips(pinned DESC, ts DESC);
 - **schema 迁移**：`PRAGMA user_version` 驱动。0→1 建基表并清理 FTS 占位；
   1→2 补 `image_path` 列；2→3 建 clips_fts 全文索引并回填存量；3→4 文本 hash
   全表重算为 blake3（事务内合并重复 + 前置 VACUUM INTO 快照 + ▶ 指针重映射，
-  见 ADR-003）。此后 schema 变更必须新增版本号与迁移步骤
+  见 ADR-003）；4→5 补 idx_ts（2.7，纯增索引无损升级）。此后 schema 变更必须
+  新增版本号与迁移步骤
 - **插入原子性**：SELECT 去重检查 + INSERT 包在 `BEGIN IMMEDIATE` 事务里。
   否则多进程并发（典型：fzf 选中旧条目 → wl-copy 写回 → daemon 同时捕获）
   双双通过检查后一方撞 UNIQUE 报错被静默吞掉
@@ -289,7 +291,7 @@ NIRI_CLIP_STRESS_DIR=/path/on/big/disk \
 | 项目（100k 条） | 实测 | 备注 |
 |---|---|---|
 | 批量写入（单事务） | 6.0s（0.06ms/条） | 库体积 56 MiB（db 56 + wal 0） |
-| `list(300)` | **108ms** | 见下"已知扩展性缺口" |
+| `list(300)` | **4.3ms**（修复前 108ms，2.7 复测） | 见下"列表排序走索引" |
 | FTS 搜索（trigram，≥3 字符） | 6.7ms | ROADMAP 的 <50ms 预算定义在 10k 口径 |
 | LIKE 回退（<3 字符，全库扫描） | 90ms | 短查询拿不到 FTS 增益的固有代价 |
 | `stats` | 12.8ms | |
@@ -315,21 +317,23 @@ NIRI_CLIP_STRESS_DIR=/path/on/big/disk \
    避免"库在大盘、临时文件在 /tmp"这种错配（prune 的 `id IN (… ORDER BY ts)`
    在 10 万行上必建临时索引）。
 
-**已知扩展性缺口（2.5 暴露，未修，不计入 2.5 交付范围）：**
+**列表排序走索引（2.5 暴露的扩展性缺口，2.7 已修复）：**
 
-`list()` 的排序首键是表达式 `(hash = ?2) DESC`（把 ▶ 当前项顶到第 1 行），
-SQLite 无法据此走索引有序扫描。100500 行库上 `EXPLAIN QUERY PLAN` 实证：
+`list()` 原以表达式 `(hash = ?2) DESC` 作排序首键（把 ▶ 当前项顶到第 1 行），
+SQLite 无法据此走索引有序扫描，退化为全表扫描 + 完整排序：10k 时 0.95ms、
+100k 时 108ms（114×，而非数据量增长的 10×）。修复（schema v4→v5）：
 
-```
-现状            SCAN clips                              + USE TEMP B-TREE FOR ORDER BY
-去掉表达式首键   SCAN clips USING INDEX idx_pinned_ts     + USE TEMP B-TREE FOR LAST TERM
-```
+1. 当前项单独点查 `WHERE hash = ?2`（走 idx_hash），不再进排序键；
+2. 其余条目按 `pinned DESC, ts DESC, id DESC`（pinned_on_top）或
+   `ts DESC, id DESC`（否则）取 N 条——前者走 idx_pinned_ts，后者走新增的
+   idx_ts（ts DESC, id DESC）。
 
-即现状退化为**全表扫描 + 完整排序**：10k 时 0.95ms、100k 时 108ms（114×，
-而非数据量增长的 10×）。**默认 `max_items = 750` 下库不可能有这么大，真实用户
-不触发**；只有把 `max_items` 调到数万级才会踩到。修法方向（待立项）：把当前项
-单独取（`WHERE hash = ?2`）再与"其余按 pinned/ts 排序取 N 条"拼接，两条查询
-都能走索引。
+100500 行库复测 `list(300)` **4.3ms**（原 108ms，25×）；10k 基准
+`list_300_of_10k` 1.01ms（预算 <11ms）。idx_ts 的轻量化代价：100k 行库体积
+56 → 59 MiB（+3 MiB，≈30 KiB/千条），写入侧多一次索引 B-tree 插入，在逐条
+捕获被文件系统 I/O 主导的量级下不可分辨。默认 `max_items = 750` 下库不可
+能达 100k，此修复对真实用户是防御性的（心智收益：排序复杂度不再随时限
+配置埋雷）。
 
 ## 10. 原生 UI - niri-clip-gui（Phase 5 已交付）
 

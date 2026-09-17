@@ -118,7 +118,10 @@ fn busy_timeout_is_set_on_connection() {
         let uv: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(uv, 4, "schema 应迁移到版本 4（FTS5 + blake3 统一）");
+        assert_eq!(
+            uv, 5,
+            "schema 应迁移到版本 5（FTS5 + blake3 统一 + idx_ts）"
+        );
     });
 }
 
@@ -224,6 +227,21 @@ fn current_pointer_tracks_capture_and_tops_list() {
         insert("old-a".into(), None).unwrap();
         let cur = current_hash().unwrap();
         assert_eq!(list(10).unwrap()[0].hash, cur, "▶ 应跟随最后一次捕获");
+    });
+}
+
+#[test]
+fn list_survives_stale_current_pointer() {
+    with_env(|_| {
+        clear_db();
+        insert("newest".into(), None).unwrap();
+        insert("older".into(), None).unwrap();
+        // 指针指向已删除条目（删除路径不保证清指针）：点查落空，
+        // list 不得报错或丢行，退化为纯时间序
+        touch_current("deadbeef");
+        let all = list(10).unwrap();
+        assert_eq!(all.len(), 2, "指针失效不得丢行");
+        assert_eq!(all[0].text, "older", "指针失效时按时间序，无当前项置顶");
     });
 }
 
@@ -522,7 +540,7 @@ fn blake3_migration_merges_duplicates_and_never_doubles() {
         let ver: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 4, "迁移必须推进到 v4");
+        assert_eq!(ver, 5, "迁移必须推进到 v5");
 
         // 防翻倍断言：5 行（4 文本 + 1 图片）合并 1 条重复 → 4 行，只减不增
         let n: i64 = conn
@@ -970,7 +988,7 @@ fn import_enforces_max_items_and_protects_pinned() {
         // 手工构造 4 条合法条目（1 条星标）：绕开 insert 路径的入库即裁剪，
         // 才能让回灌数据量超过 max_items
         let mut lines = vec![format!(
-            "{{\"format\":\"{EXPORT_FORMAT}\",\"version\":{EXPORT_VERSION},\"user_version\":4,\"exported_at\":0,\"count\":4}}"
+            "{{\"format\":\"{EXPORT_FORMAT}\",\"version\":{EXPORT_VERSION},\"user_version\":5,\"exported_at\":0,\"count\":4}}"
         )];
         for i in 1..=4 {
             let text = format!("imp-{i}");
@@ -1011,7 +1029,7 @@ fn export_header_and_image_entry_schema() {
         let header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
         assert_eq!(header["format"], EXPORT_FORMAT);
         assert_eq!(header["version"], EXPORT_VERSION);
-        assert_eq!(header["user_version"], 4, "与 migrate.rs 当前 schema 对齐");
+        assert_eq!(header["user_version"], 5, "与 migrate.rs 当前 schema 对齐");
         assert_eq!(header["count"], 2);
 
         let img_line = lines
