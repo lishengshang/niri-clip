@@ -157,7 +157,7 @@
 | 3.2 | ✅ 通知脱敏 | 审计确认全部 `notify::send` 调用点（daemon 超限提示 / GUI 失败提示 / TUI 环境提示）均只发状态文案、配置数字与条目 ID，**无一处携带条目明文**。交付为结构不变式：`notify.rs` 文档声明 body 只允许非内容信息 + `tests/notify_redaction.rs` 端到端锁定（假 notify-send 捕获真实通知：超限分支只报限额数字不回显载荷，正常捕获零通知）。**被否方案**：引入"粘贴成功 + 截断预览"式通知——纯通知噪音，与轻量化诉求相悖 | 通知不泄露明文（端到端测试锁定，新增调用点若格式化条目内容即红） |
 | 3.3 | ✅ 敏感条目快速清除 | `wipe --sensitive`：清除命中 `ignore_regex` 的存量条目（"敏感"与捕获过滤同一把尺子——命中者本不该落盘，库存即泄漏；**含星标**，否则密码类条目被星标后留存时长无法清零；正则编译失败报错而非静默删 0；`--dry-run` 预览）。`delete-current` 子命令 + fzf TUI `Ctrl-D`：一把删除 ▶ 当前项（最后复制的内容），无需定位选中行；确认语义走 `core::confirm`（星标二段确认，ADR-005） | 审计：密码类条目留存时长可人为清零（端到端测试：弱规则期入库 → 强化规则 → 清除） |
 | 3.4 | ✅ 加密存储 PoC（调研） | 实测三路线：**按条目 AEAD**（chacha20poly1305+argon2，闭包 +6，2.5µs/条，密文 +16B）、age（闭包 +109@i18n 栈，慢 24×，拒）、SQLCipher（+69s openssl 构建链、与 bundled 互斥、拒）。核心矛盾：FTS 索引是明文投影，加密必须同时回答搜索——按条目方案加密条目排除 FTS、线性解密扫描（750 条 ≈1.7ms）。**结论（ADR-006）：v2.0 落地，方案=按条目 AEAD，opt-in 默认关**；密钥两档（state/secret.key 0600 / passphrase argon2id 22ms）；本轮不写实现 | PoC 结论文档化（ADR-006），决定 v2.0 落地方案 ✅ |
-| 3.5 | 安全审计自查 | 文件权限、日志脱敏、seccomp/systemd 沙箱加固（systemd user 单元加 ProtectSystem 等指令） | `systemd-analyze security` 评分改善；检查项清单归档 |
+| 3.5 | ✅ 安全审计自查 | 审计全过：文件权限（db/图片/export/迁移快照全覆盖 0600/0700；flock 与 pending_delete 两非敏感文件走默认权限，父目录 0700 已阻断）+ 日志脱敏（55 处调用点零条目明文，与 3.2 守卫互证）。systemd 沙箱：service 新增 23 项指令，离线评分 9.4 UNSAFE → **1.7 OK**；`StateDirectory=`（自动建目录 + 跟随自定义 XDG_STATE_HOME，要求 systemd ≥248）；`PrivateUsers`/`MemoryDenyWriteExecute` 留强化档不开（wayland SO_PEERCRED uid 校验风险）。清单归档 `docs/SECURITY-AUDIT.md`；真机 daemon-reload + restart 验证捕获链路待用户执行 | `systemd-analyze security` 评分改善 ✅（9.4→1.7）；检查项清单归档 ✅ |
 
 **技术要点：** age 加密对 SQLite 的透明层代价高，优先评估按条目加密（敏感类单独加密表）；systemd 沙箱指令零成本优先落地。
 **时间节点：** 约 2–3 周；里程碑 **M3 = v0.7.0 安全版本**。
