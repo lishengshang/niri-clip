@@ -14,8 +14,11 @@ RestartSec=2
 #    docs/SECURITY-AUDIT.md §③）──
 # 白名单到"daemon + wl-paste/wl-copy/notify-send 子进程"所需最小面：
 # AF_UNIX 通信 + 自身 state 目录读写，无网络/设备/capability。
-# 前提 systemd >= 248（user manager 支持 StateDirectory=，目录不存在时
-# 自动创建并纳入读写白名单，且跟随自定义 XDG_STATE_HOME）。
+# 网络防线 = RestrictAddressFamilies=AF_UNIX（seccomp 层，user manager 生效）；
+# IPAddressDeny 在 user unit 下 systemd 明确警告不生效（IP firewall 需
+# root），故不配，避免虚假安全感。前提 systemd >= 248（user manager 支持
+# StateDirectory=，目录不存在时自动创建并纳入读写白名单，且跟随自定义
+# XDG_STATE_HOME）。
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
@@ -25,7 +28,6 @@ ProtectHome=read-only
 StateDirectory=niri-clip
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX
-IPAddressDeny=any
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true

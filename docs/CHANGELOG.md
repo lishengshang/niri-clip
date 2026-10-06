@@ -3,20 +3,25 @@
 ## Unreleased
 
 ### Changed
-- **daemon systemd 单元沙箱加固（3.5）**：`niri-clip.service` 新增 23 项
+- **daemon systemd 单元沙箱加固（3.5）**：`niri-clip.service` 新增 22 项
   沙箱指令，白名单到"daemon + wl-paste/wl-copy/notify-send 子进程"所需
   最小面：AF_UNIX + 自身 state 目录读写（`StateDirectory=`，目录自动创建
-  且跟随自定义 `XDG_STATE_HOME`，要求 systemd ≥248）、无网络（IPAddressDeny=
-  any）、无 capability、系统调用限 `@system-service`（`~@resources` 二次
-  收窄）、`UMask=0077`（顺带把 flock/pending_delete 等默认 0644 文件收为
-  0600）、ProtectSystem=strict + ProtectHome=read-only + 内核接口/时钟/
-  主机名全锁。`systemd-analyze security` 离线评分 **9.4 UNSAFE → 1.7 OK**
-  （复现：`systemd-analyze security --offline=true assets/niri-clip.service`）。
-  剩余扣分为结构性地板（wayland 必需 AF_UNIX、state 必须在 home 下）与
-  强化档留白（`PrivateUsers` 有 wayland SO_PEERCRED uid 校验风险，默认
-  不开）。文件权限与日志脱敏审计全过（55 处日志调用点零条目明文，与 3.2
-  通知守卫互证），检查项清单归档 `docs/SECURITY-AUDIT.md`。**真机验证**：
-  重装单元后 `daemon-reload` + restart 确认捕获/粘贴/通知链路正常
+  且跟随自定义 `XDG_STATE_HOME`，要求 systemd ≥248）、无 capability、
+  系统调用限 `@system-service`（`~@resources` 二次收窄）、`UMask=0077`
+  （顺带把 flock/pending_delete 等默认 0644 文件收为 0600）、
+  ProtectSystem=strict + ProtectHome=read-only + 内核接口/时钟/主机名全锁。
+  网络防线 = `RestrictAddressFamilies=AF_UNIX`（seccomp 层，user unit
+  生效）——`IPAddressDeny` 经真机实测在 user manager 下不生效（IP
+  firewall 需 root，systemd 启动即警告），不配以免虚假安全感。
+  `systemd-analyze security` 离线评分 **9.4 UNSAFE → 1.9 OK**，真机运行
+  中单元 **1.6 OK**；真机 drop-in 实测 daemon 在沙箱内捕获链路正常、零
+  seccomp 错误（复现：`systemd-analyze security --offline=true
+  assets/niri-clip.service`）。剩余扣分为结构性地板（wayland 必需 AF_UNIX、
+  state 必须在 home 下）与强化档留白（`PrivateUsers` 有 wayland
+  SO_PEERCRED uid 校验风险，默认不开）。文件权限与日志脱敏审计全过（55
+  处日志调用点零条目明文，与 3.2 通知守卫互证），检查项清单归档
+  `docs/SECURITY-AUDIT.md`。**真机部署**：重装单元后 `daemon-reload` +
+  restart 确认捕获/粘贴/通知链路正常
 
 ### Added
 - **加密存储 PoC 结论（3.4 / ADR-006）**：实测评估三条路线后**决定 v2.0 以

@@ -73,7 +73,6 @@ ProtectHome=read-only
 StateDirectory=niri-clip
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX
-IPAddressDeny=any
 RestrictNamespaces=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
@@ -89,14 +88,25 @@ SystemCallFilter=~@resources
 SystemCallErrorNumber=EPERM
 ```
 
-**实测结果（2026-09-26）**：`9.4 UNSAFE → 1.7 OK`。剩余扣分构成该服务
-的结构性地板，不再追求：AF_UNIX（wayland 必需）、ProtectHome read-only
-（state 在 home 下）、PrivateNetwork/PrivateUsers（强化档）、ProtectProc/
-ProcSubset/MemoryDenyWriteExecute（强化档）、DeviceAllow char-rtc:r
-（PrivateDevices 默认白名单，只读时钟）、User=/RootDirectory（`--offline`
-按 system 上下文口径误判，user manager 实机不计）。可选再拿分项（收益
-≤0.4，未采用）：`SystemCallArchitectures=native`、`SystemCallFilter=
-~@privileged`（会把 @chown 一并禁掉，收益 0.2，真机验证后可加）。
+**实测结果（2026-09-26，离线 `--offline` + 真机 drop-in 双口径）**：
+`9.4 UNSAFE → 1.9 OK`（离线）；真机运行中单元（`systemd-analyze --user
+security niri-clip.service`）**1.6 OK**。真机 drop-in 实测：daemon 在沙箱内
+正常启动、wl-paste 捕获链路正常、无 seccomp/EPERM 错误，db 路径与
+StateDirectory 解析一致。
+
+**IPAddressDeny 已删除（真机发现）**：user manager 下该指令不生效——
+systemd 启动即警告 "configures an IP firewall, but not running as root"
+（IP firewall 需 root）。实际网络防线由 `RestrictAddressFamilies=AF_UNIX`
+承担（seccomp 层，user unit 生效，daemon 连 wayland/dbus 实测正常）。
+
+剩余扣分构成该服务的结构性地板，不再追求：AF_UNIX（wayland 必需）、
+ProtectHome read-only（state 在 home 下）、PrivateNetwork/PrivateUsers
+（强化档）、ProtectProc/ProcSubset/MemoryDenyWriteExecute（强化档）、
+DeviceAllow char-rtc:r（PrivateDevices 默认白名单，只读时钟）、User=/
+RootDirectory（`--offline` 按 system 上下文口径误判，user manager 实机
+不计）。可选再拿分项（收益 ≤0.4，未采用）：`SystemCallArchitectures=
+native`、`SystemCallFilter=~@privileged`（会把 @chown 一并禁掉，收益
+0.2，真机验证后可加）。
 
 关键取舍：
 
