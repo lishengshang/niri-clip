@@ -3,6 +3,14 @@
 
 use super::*;
 
+/// 列表行预览的列宽预算（显示列，CJK/emoji 计 2），与窗口像素的换算口径：
+/// 窗口 500 逻辑 px − 行 padding 左右 20 − 垂直滚动条 ~12 − 前缀 9 字符
+/// （JetBrainsMono @14px 的 advance ≈ 8.4px，9×8.4≈75.6）≈ 392px，
+/// ÷8.4 ≈ 46 列，取 44 留渲染余量。宁紧勿松：估松了 iced 会在行尾像素级
+/// 硬裁（省略号被裁、字切半——正是本常量要修的"生硬截断"），估紧了只是
+/// 省略号早现一格。`cfg.preview_width` 仍作用户上限（配小生效）。
+const PREVIEW_COLS: usize = 44;
+
 impl App {
     pub(super) fn view(&self) -> Element<'_, Message> {
         let cur = self.cur_hash();
@@ -50,9 +58,14 @@ impl App {
                     9 => "0".to_string(),
                     _ => " ".to_string(),
                 };
-                let prefix = format!("{cursor} {quick} {cur_mark}{star} ");
-                // ↵（U+21B5）字形覆盖差（tofu），GUI 侧换成 ⏎
-                let preview = preview::preview_text(clip, self.preview_width).replace('↵', "⏎");
+                // cur_mark 与 star 之间必须留空格：▶◆ 直接拼接时两个图标
+                // 贴死（当前项恰被固定是最常见组合），视觉上糊成一个字形
+                let prefix = format!("{cursor} {quick} {cur_mark} {star} ");
+                // ↵（U+21B5）字形覆盖差（tofu），GUI 侧换成 ⏎；截断按显示
+                // 列宽（PREVIEW_COLS 口径），cfg.preview_width 作为用户上限
+                let preview =
+                    preview::preview_text_columns(clip, self.preview_width.min(PREVIEW_COLS))
+                        .replace('↵', "⏎");
                 let base = if selected { ROW_FG_SELECTED } else { ROW_FG };
 
                 // fzf 灵魂：命中查询子序列的字符用 hl 色点亮

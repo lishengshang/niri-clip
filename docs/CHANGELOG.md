@@ -23,6 +23,17 @@
   `docs/SECURITY-AUDIT.md`。**真机部署**：重装单元后 `daemon-reload` +
   restart 确认捕获/粘贴/通知链路正常
 
+### Fixed
+- **GUI 列表行两处显示问题（用户反馈）**：① 当前项指针 ▶ 与固定标记 ◆
+  原本直接拼接，条目"既是当前项又被固定"时两图标贴死糊成一个字形——
+  前缀中间补空格；② 长文本列表行生硬截断：`preview_width` 的"字符数"
+  预算（默认 100）远超 500px 窗口实际行宽（约 46 列），且 CJK/emoji 的
+  advance 约为拉丁 2 倍，混排文本行尾被渲染器像素级硬裁、省略号一并被
+  裁掉。修复：core 新增按显示列宽截断的 `preview_text_columns`（宽字符
+  计 2 列，截断必补 `…`，5 个单测锁定），GUI 按 500px 窗口换算预算
+  （44 列，口径见 view.rs `PREVIEW_COLS`），`cfg.preview_width` 降为
+  用户上限；TUI 终端走字符网格继续用 `preview_text`，语义不变
+
 ### Added
 - **加密存储 PoC 结论（3.4 / ADR-006）**：实测评估三条路线后**决定 v2.0 以
   按条目 AEAD（chacha20poly1305 + argon2id）落地，opt-in 默认关**——闭包
