@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.7.0 - 2026-10-06
 
 ### Changed
 - **daemon systemd 单元沙箱加固（3.5）**：`niri-clip.service` 新增 22 项
