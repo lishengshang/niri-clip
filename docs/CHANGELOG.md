@@ -2,7 +2,45 @@
 
 ## Unreleased
 
+### Changed
+- **daemon systemd 单元沙箱加固（3.5）**：`niri-clip.service` 新增 22 项
+  沙箱指令，白名单到"daemon + wl-paste/wl-copy/notify-send 子进程"所需
+  最小面：AF_UNIX + 自身 state 目录读写（`StateDirectory=`，目录自动创建
+  且跟随自定义 `XDG_STATE_HOME`，要求 systemd ≥248）、无 capability、
+  系统调用限 `@system-service`（`~@resources` 二次收窄）、`UMask=0077`
+  （顺带把 flock/pending_delete 等默认 0644 文件收为 0600）、
+  ProtectSystem=strict + ProtectHome=read-only + 内核接口/时钟/主机名全锁。
+  网络防线 = `RestrictAddressFamilies=AF_UNIX`（seccomp 层，user unit
+  生效）——`IPAddressDeny` 经真机实测在 user manager 下不生效（IP
+  firewall 需 root，systemd 启动即警告），不配以免虚假安全感。
+  `systemd-analyze security` 离线评分 **9.4 UNSAFE → 1.9 OK**，真机运行
+  中单元 **1.6 OK**；真机 drop-in 实测 daemon 在沙箱内捕获链路正常、零
+  seccomp 错误（复现：`systemd-analyze security --offline=true
+  assets/niri-clip.service`）。剩余扣分为结构性地板（wayland 必需 AF_UNIX、
+  state 必须在 home 下）与强化档留白（`PrivateUsers` 有 wayland
+  SO_PEERCRED uid 校验风险，默认不开）。文件权限与日志脱敏审计全过（55
+  处日志调用点零条目明文，与 3.2 通知守卫互证），检查项清单归档
+  `docs/SECURITY-AUDIT.md`。**真机部署**：重装单元后 `daemon-reload` +
+  restart 确认捕获/粘贴/通知链路正常
+
+### Fixed
+- **GUI 列表行两处显示问题（用户反馈）**：① 当前项指针 ▶ 与固定标记 ◆
+  原本直接拼接，条目"既是当前项又被固定"时两图标贴死糊成一个字形——
+  前缀中间补空格；② 长文本列表行生硬截断：`preview_width` 的"字符数"
+  预算（默认 100）远超 500px 窗口实际行宽（约 46 列），且 CJK/emoji 的
+  advance 约为拉丁 2 倍，混排文本行尾被渲染器像素级硬裁、省略号一并被
+  裁掉。修复：core 新增按显示列宽截断的 `preview_text_columns`（宽字符
+  计 2 列，截断必补 `…`，5 个单测锁定），GUI 按 500px 窗口换算预算
+  （44 列，口径见 view.rs `PREVIEW_COLS`），`cfg.preview_width` 降为
+  用户上限；TUI 终端走字符网格继续用 `preview_text`，语义不变
+
 ### Added
+- **加密存储 PoC 结论（3.4 / ADR-006）**：实测评估三条路线后**决定 v2.0 以
+  按条目 AEAD（chacha20poly1305 + argon2id）落地，opt-in 默认关**——闭包
+  +6 crate、加密 2.5µs/条、密文开销 16 字节；加密条目排除 FTS，搜索走线性
+  解密扫描（默认库规模 ≈1.7ms）。age 被拒（闭包 +109@本地化栈，慢 24×）、
+  SQLCipher 被拒（+69s openssl 构建链，与 bundled 特性互斥）。本轮仅交付
+  决策文档，实现随 v2.0 立项
 - **通知脱敏不变式守卫（3.2）**：审计确认全部 `notify::send` 调用点
   （daemon 超限提示 / GUI 失败提示 / TUI 环境提示）均只发状态文案、
   配置数字与条目 ID，**无一处携带条目明文**——"通知泄露明文"在当前
