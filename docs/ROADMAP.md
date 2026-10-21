@@ -283,17 +283,21 @@
 > 目的：main 分支只接受经过 CI 验证的变更，防止直推；单人维护同样执行
 > （规范即未来协作者的 onboarding 文档）。
 
-**1. main 保护（GitHub 设置，一次性配置）**
+**1. main 保护（GitHub 设置）**
 - Settings → Branches → Add branch protection rule（`main`）：
-  - ✅ Require a pull request before merging（单人场景可设 "require 0 approvals"）
-  - ✅ Require status checks：勾选 CI 全部六道工序（fmt/clippy/test/build/smoke/bench）
+  - ✅ Require a pull request before merging（单人场景 "require 0 approvals"）
+  - ⬜ Require status checks：勾选 CI 五道自动工序（fmt/clippy/test/smoke/
+    bench，stress 为手动 job）——**2026-10-06 核查未配置**（required
+    checks 为空，CI 红仍可合并），待用户在 Settings 补勾
   - ✅ Do not allow force pushes / Do not allow deletions
 - 未配置前的人工红线：`git push origin main` 禁止；只推功能分支
 
-**2. 分支命名与 issue 关联**
-- 格式：`<type>/<issue>-<slug>`，type ∈ feat / fix / perf / docs / chore / epic
-- 例：`feat/12-native-ui-mvp`、`fix/15-reload-flash`、`epic/native-ui`
-- ROADMAP 任务编号（P1-2、5.2.1）即 issue 标题前缀，分支必须挂 issue
+**2. 分支命名与任务关联**
+- 格式：`<type>/<任务号或slug>`，type ∈ feat / fix / perf / docs / chore /
+  refactor / ci / test / epic
+- 例：`feat/3.5-security-audit`、`fix/oversize-image-gate`、`chore/release-v0.7.0`
+- 关联以 **ROADMAP 任务编号**为准（如 3.5）；GitHub issue 台账未启用
+  （启用条件见 §七），若启用则任务编号即 issue 标题前缀
 
 **3. PR 规则**
 - 一个 PR 聚焦一个任务；>400 行建议拆分
@@ -301,9 +305,31 @@
   每个 PR 独立可运行、CI 全绿、可演示（附截图/asciinema）
 - 合并方式：**squash merge**，保持 main 线性历史；commit 标题用 Conventional Commits
 
-**4. commit message（Conventional Commits）**
-- 格式：`<type>(<scope>): <what>`，正文回答"为什么"，ADR/事故关联放正文
-- 例：`perf(tui): 启动提速 + 关闭闪窗修复`（正文含诊断结论与取舍）
+**4. commit message（Conventional Commits，2026-10-21 定稿）**
+- **主题行**：`<英文 type>(<scope>): <中文标题>`（type/scope 英文、标题中文），
+  一行讲清"做了什么"；尽量 ≤50、硬上限 ≤72 显示列（CJK 计 2，git 官方
+  口径），祈使句不加句号，不用"——"拖第二分句
+- **正文默认不写**；仅重大变化/更新（破坏性变更、关键取舍需溯源）才写，
+  尽量 ≤60 字，只写"为什么"与关键取舍。不复述 diff、不罗列文件、不放
+  部署步骤与长数据；诊断数据、实测结论、部署细节落 ADR / 专项文档 /
+  CHANGELOG / 代码注释
+- **squash 合并**：默认无正文，确需时 ≤60 字；不用 GitHub 默认的全量
+  commit 列表，溯源靠标题 `(#N)` 与 PR 页
+- **footer**：关联任务 `Refs #N` / `Closes #N`；破坏性变更标题加 `!` 并配
+  `BREAKING CHANGE:` footer（footer 不计入正文字数）
+- 例（常规，无正文）：
+
+  ```
+  fix(daemon): 主捕获路径超 1 MiB 图片被 max_clip_bytes 误杀
+  ```
+
+- 例（重大变化，带 ≤60 字正文）：
+
+  ```
+  feat(core): 加密条目改为按条目 AEAD
+
+  全库加密会让 FTS 存明文影子副本；改为按条目 AEAD，密文条目不进 FTS。见 ADR-006。
+  ```
 
 **5. 紧急修复 fast-track**
 - 线上事故（如 v0.4.1 捕获停摆级）走 `hotfix/<issue>-<slug>` 分支 + 最小 PR，
