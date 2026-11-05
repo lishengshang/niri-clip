@@ -68,27 +68,46 @@ fn notify_oversize(msg: &str) {
 
 /// `niri-clip store` : 入库一段剪贴板载荷。
 ///
-/// * stdin 有数据（主模式：wl-paste 管道直灌）→ 按 `max_clip_bytes` 裁决；
-///   管道不辨 MIME，超文本限的载荷可能是图片，须先探测图片 MIME 再定
-///   归宿（见超限分支注释）；
+/// * stdin 有数据（主模式：wl-paste 管道直灌）→ 先按 magic 判定图片
+///   （png/jpeg/webp，任务 4.1），命中即按 `max_image_bytes` 裁决入库；
+///   否则按 `max_clip_bytes` 裁决文本，超限且剪贴板另有图片 MIME 时才回头
+///   走图片探测（见超限分支注释）；
 /// * stdin 为空（历史兼容：直接手动执行 store）→ 保持旧的
 ///   get_contents(Text) 探测，并在开启图片预览时尝试图片 MIME。
 ///
 /// v0.5 限流：读取用 `Read::take(max+1)` 划界——读满 max+1 即判定超限
 /// 整体拒绝，未超限时 take 内已到 EOF 载荷完整；杜绝超大载荷全内存直通
-/// （读取过程内存上限 = max_clip_bytes + 1 字节）。
+/// （文本路径内存上限 = max_clip_bytes + 1，图片路径 = max_image_bytes + 1）。
 pub fn store_from_stdin() -> Result<()> {
     let cfg = Config::load();
-    let cap = cfg.max_clip_bytes as u64 + 1;
+    let text_cap = cfg.max_clip_bytes as u64;
+    let mut stdin = std::io::stdin().lock();
     let mut buf = Vec::new();
-    std::io::stdin().lock().take(cap).read_to_end(&mut buf)?;
+    stdin.by_ref().take(text_cap + 1).read_to_end(&mut buf)?;
+
+    // 图片：stdin 不带 MIME（wl-paste watch 在无文本可给时按 try_any 兜底
+    // 输出任意类型），只能靠 magic 判定。先按文本限额读够判定所需的头，命中
+    // 后再**沿同一 stdin 续读**到图片限额——单次读取直接入库，不再"丢弃字节
+    // + 回头再读一次剪贴板"（第二次读到的不一定是触发时那份内容，且来源应用
+    // 已退出时直接失败）。内存上限仍是该分支自己的限额 +1。
+    if cfg.enable_image_preview {
+        if let Some(mime) = sniff_image_mime(&buf) {
+            let image_cap = cfg.max_image_bytes as u64;
+            if (buf.len() as u64) <= image_cap {
+                let rest = image_cap + 1 - buf.len() as u64;
+                stdin.by_ref().take(rest).read_to_end(&mut buf)?;
+            }
+            ingest_image(mime, &buf, &cfg)?;
+            return Ok(());
+        }
+    }
 
     if buf.len() as u64 > cfg.max_clip_bytes as u64 {
-        // 主模式管道不辨 MIME：截图经 wl-paste 直灌的是原始图片字节，超文本限
-        // 不代表超图片限——若此处直接拒绝，带 10 MiB 限额的图片路径永不可达，
-        // >1 MiB 截图全军覆没且文案误导（报的是文本限额）。开启图片捕获且
-        // 剪贴板提供图片 MIME 时交图片路径按 max_image_bytes 重新裁决（其
-        // 超限通知自行负责，此处不再叠加文本报错）；仅图片不可走时才拒绝。
+        // 已由 magic 判定过的图片在上面直接入库；走到这里的是**未识别**的
+        // 二进制（bmp/svg 等图片格式、或任意大文件）。图省事一律拒绝会误杀
+        // 图片，故开启图片捕获且剪贴板确实提供受支持 MIME 时，交图片路径按
+        // max_image_bytes 重新裁决（其超限通知自行负责，此处不再叠加文本
+        // 报错）；图片不可走时才按文本超限拒绝。
         if cfg.enable_image_preview && clipboard_offers_image() {
             capture_image_if_enabled()?;
             return Ok(());
@@ -108,8 +127,8 @@ pub fn store_from_stdin() -> Result<()> {
                 return Ok(());
             }
             Err(broken) => {
-                // 二进制流（如默认类型选到了图片）：不在文本语义里硬塞，
-                // 只记录并交给 stderr 排障；真图片走下方显式 MIME 探测
+                // 非 UTF-8 且不是受支持的图片 magic：不在文本语义里硬塞，
+                // 只记录并交给 stderr 排障（下方再按图片 MIME 探测一次）
                 let raw = broken.as_bytes();
                 let head = String::from_utf8_lossy(&raw[..raw.len().min(64)])
                     .chars()
@@ -167,6 +186,56 @@ fn try_system_capture() -> Result<bool> {
 /// 受支持的图片 MIME，探测序即尝试序（png 优先——截图场景的主型）。
 const IMAGE_MIMES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
 
+/// 按文件头（magic）判断 stdin 载荷是否为受支持的图片。
+///
+/// 需要它的原因：`wl-paste --watch` 的 `--type` 是**单值**（上游 `wl-paste.c`
+/// 里 `case 't': options.explicit_type = strdup(optarg)`，重复给出只有最后一个
+/// 生效），而显式 `--type text` 在"剪贴板只有图片"时会直接失败、根本不触发
+/// 命令。现有实现因此不给 `--type`——上游 `mime_type_to_request()` 在无显式
+/// 类型时按 text/plain;charset=utf-8 → text/plain → 任意 text → **任意类型**
+/// 兜底，图片剪贴板于是以原始字节直灌 stdin，但 stdin 不带 MIME。
+///
+/// 判定只用头部字节，不做完整格式校验：真正的解码在预览/GUI 侧，入库阶段
+/// 只负责"归到哪条存储路径"。未知格式返回 `None`，由调用方走旧的剪贴板
+/// MIME 探测（受支持的三种之外的图片不猜）。
+fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        // JPEG 以 SOI(FFD8) + 任意 marker(FFxx) 开头
+        Some("image/jpeg")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// 图片入库的唯一落点：stdin magic 路径与剪贴板 MIME 路径共用，
+/// 保证两条入口的超限文案与日志格式一致。
+fn ingest_image(mime: &str, bytes: &[u8], cfg: &Config) -> Result<bool> {
+    if bytes.len() > cfg.max_image_bytes {
+        notify_oversize(&format!(
+            "图片超过 max_image_bytes={} 字节",
+            cfg.max_image_bytes
+        ));
+        return Ok(false);
+    }
+    match store::insert_image_with(mime, bytes, cfg) {
+        Ok(Some(img)) => {
+            eprintln!(
+                "[niri-clip store] stored image #{} ({mime}, {} B) -> {}",
+                img.id,
+                bytes.len(),
+                img.path.display()
+            );
+            Ok(true)
+        }
+        Ok(None) => Ok(false),
+        Err(e) => Err(anyhow!("insert image: {e:#}")),
+    }
+}
+
 /// 剪贴板是否提供任一受支持的图片 MIME。仅探测可用性不读取内容：
 /// 超限复查路径只需知道"图片可走"，真正的读取与限额裁决交给
 /// [`capture_image_if_enabled`]。
@@ -186,8 +255,7 @@ fn capture_image_if_enabled() -> Result<bool> {
     if !cfg.enable_image_preview {
         return Ok(false);
     }
-    let max = cfg.max_image_bytes;
-    let cap = max as u64 + 1;
+    let cap = cfg.max_image_bytes as u64 + 1;
     for mime in IMAGE_MIMES {
         if let Ok((pipe, _)) = get_contents(
             ClipboardType::Regular,
@@ -196,22 +264,7 @@ fn capture_image_if_enabled() -> Result<bool> {
         ) {
             let mut v = Vec::new();
             if pipe.take(cap).read_to_end(&mut v).is_ok() && !v.is_empty() {
-                if v.len() as u64 > max as u64 {
-                    notify_oversize(&format!("图片超过 max_image_bytes={max} 字节"));
-                    return Ok(false);
-                }
-                match store::insert_image_with(mime, &v, &cfg) {
-                    Ok(Some(img)) => {
-                        eprintln!(
-                            "[niri-clip store] stored image #{} -> {}",
-                            img.id,
-                            img.path.display()
-                        )
-                    }
-                    Ok(None) => {}
-                    Err(e) => return Err(anyhow!("insert image: {e:#}")),
-                }
-                return Ok(true);
+                return ingest_image(mime, &v, &cfg);
             }
         }
     }
@@ -446,5 +499,26 @@ mod tests {
     fn embedded_service_unit_points_to_cargo_bin() {
         assert!(SERVICE_UNIT.contains("%h/.cargo/bin/niri-clip"));
         assert!(SERVICE_UNIT.contains("Restart="));
+    }
+
+    #[test]
+    fn sniffs_the_three_supported_image_magics() {
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR";
+        let jpeg = b"\xFF\xD8\xFF\xE0\x00\x10JFIF";
+        let webp = b"RIFF\x24\x00\x00\x00WEBPVP8 ";
+        assert_eq!(sniff_image_mime(png), Some("image/png"));
+        assert_eq!(sniff_image_mime(jpeg), Some("image/jpeg"));
+        assert_eq!(sniff_image_mime(webp), Some("image/webp"));
+    }
+
+    #[test]
+    fn sniff_ignores_unknown_and_truncated_payloads() {
+        // 未知二进制格式交回旧的剪贴板 MIME 探测，不猜
+        assert_eq!(sniff_image_mime(b"BM\x00\x00\x00\x00"), None);
+        assert_eq!(sniff_image_mime(b"RIFF\x24\x00\x00\x00WAVE"), None);
+        assert_eq!(sniff_image_mime(b"RIFF"), None);
+        // 文本永不命中（PNG magic 首字节 0x89 不是合法 UTF-8 起始）
+        assert_eq!(sniff_image_mime(b"hello world"), None);
+        assert_eq!(sniff_image_mime(b""), None);
     }
 }

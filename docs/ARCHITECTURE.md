@@ -69,10 +69,13 @@ core**，UI 只做渲染与输入分发；原生 UI 的完整原理见 §10。
   Wayland 会话轮询。每次捕获被 `timeout` 划界（默认 5s，可配置），个别来源应用
   的病态读挂起会被秒级回收。**该结构不存在"daemon 存活但捕获停滞"的形态**
   （issue #2 复盘的根因即纯轮询中 read_to_end 无限阻塞且无错误输出）
-- **store 子命令（热点路径）**：stdin 非空且为 UTF-8 → 直接走 `ignore_regex`
-  过滤 + 事务化 upsert 入库，全程不触碰本进程 Wayland 连接；
-  非 UTF-8 载荷记日志后转入系统剪贴板 MIME 探测（图片按 png/jpeg/webp
-  显式 MIME 抓取）；stdin 为空（手动调用兼容）同样先 Text 探测再尝试图片
+- **store 子命令（热点路径）**：stdin 非空 → 先按 magic 判定图片（png/jpeg/webp，
+  任务 4.1：管道不带 MIME，而 `wl-paste` 的 `--type` 只能给一个值、显式 text 会让
+  纯图片剪贴板根本触发不了 watcher，故走"不指定类型 + 内容嗅探"），命中即按
+  `max_image_bytes` 沿同一 stdin 续读入库；否则按 `max_clip_bytes` 裁决：UTF-8
+  直接走 `ignore_regex` 过滤 + 事务化 upsert，全程不触碰本进程 Wayland 连接；
+  未识别的二进制记日志后转入剪贴板 MIME 探测（图片按 png/jpeg/webp 显式 MIME
+  抓取）；stdin 为空（手动调用兼容）同样先 Text 探测再尝试图片
 - **回退模式（native 轮询）**：仅当系统缺失 `wl-paste` 二进制时启用。
   单次 get_contents 探测通过（Ok 或 ClipboardEmpty/NoMimeType/NoSeats 三类良性错误）
   后进入 500ms 轮询循环。已知取舍须文档明示：<500ms 连续复制的丢帧窗口、

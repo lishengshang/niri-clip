@@ -11,6 +11,22 @@
   `Config::load_checked` 同步暴露配置解析错误（`load` 仍保持静默回退默认值），
   避免 doctor 把损坏配置误报为“使用默认值”。
 
+### Changed
+- **图片捕获改为按 magic 从 stdin 直接入库（任务 4.1）**：`wl-paste` 的
+  `--type` 只能给一个值（上游 `wl-paste.c` 中 `case 't'` 直接覆盖
+  `explicit_type`），显式 `--type text` 会让"剪贴板只有图片"时 watcher 根本
+  不触发；不给 `--type` 时上游按 text → 任意 text → **任意类型**兜底，图片
+  于是以原始字节直灌 `store` 的 stdin，但**管道不带 MIME**。旧实现把非
+  UTF-8 载荷丢弃后回头再读一次剪贴板，第二次读到的未必是触发时那份内容，
+  且来源应用已退出即失败。现改为按文件头判定 png/jpeg/webp：先按
+  `max_clip_bytes` 读够判定所需的头，命中后沿同一 stdin 续读到
+  `max_image_bytes` 上限（内存上限仍是该分支自己的限额 +1），单次读取直接
+  入库；未识别格式仍走旧的剪贴板 MIME 探测。附带统一了图片入库的超限文案
+  与日志（`ingest_image` 是 stdin 与剪贴板两条入口的唯一落点）。
+  新增 `tests/image_pipeline.rs`（6 项端到端：三种格式的 store→copy 字节
+  往返、> 1 MiB 截图不被截断、超图片限额拒绝、去重、无 chafa 时预览提示、
+  关闭开关后不入库）；真机剪贴板路径仍需在 niri 会话内人工复验一次
+
 ## v0.7.0 - 2026-10-06
 
 ### Changed

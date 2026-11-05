@@ -172,7 +172,7 @@
 
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
-| 4.1 | 图片剪贴板完整支持 | 覆盖 image/png、jpeg、webp 全链路（捕获→存储→预览→重粘贴）；`wl-copy < image` 场景 | 手动 + 自动测试全过 |
+| 4.1 | 🟡 图片剪贴板完整支持 | `store` 改为按 magic 判定 png/jpeg/webp 并从 stdin 单次读取入库（`wl-paste` 的 `--type` 是单值，显式 text 会让纯图片剪贴板不触发 watcher；不指定类型时上游按"任意类型"兜底，故管道里可能是图片字节）；超文本限额的截图沿同一 stdin 续读到 `max_image_bytes`，不再丢弃后二次读剪贴板。预览/重粘贴路径复用既有实现 | 自动：`tests/image_pipeline.rs` 6 项端到端全过（三格式字节往返、>1 MiB 不截断、超限拒绝、去重、缺 chafa 提示、开关可关）。**手动：真机 niri 会话内截图 → Mod+V 预览 → 重粘贴 待复验** |
 | 4.2 | AUR 三包齐备 | `niri-clip`（release）、`niri-clip-git`、`niri-clip-bin`（预编译）。**决策（2026-08-28）：AUR 首次发布随 epic（原生 UI）合并后的首个版本一起**；主包构建 `-p niri-clip`（不含 gui 依赖链，makedepends 不需要 libxkbcommon），`niri-clip-gui` 待 M5.4 单独分包；`sqlite` 非运行依赖（rusqlite bundled）已移除 | 三包 CI 自动 bump + 安装冒烟 |
 | 4.3 | crates.io 发布 | `cargo publish`，检查 package metadata 完整 | `cargo install niri-clip` 可用 |
 | 4.4 | waybar 模块 | JSON 输出（历史条数/最新条目/daemon 状态），`niri-clip waybar` | waybar wiki 配置示例可用 |
