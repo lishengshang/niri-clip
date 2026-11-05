@@ -1,6 +1,6 @@
 # niri-clip 长期开发路线图
 
-> 基准日期：2026-10-06 · 当前版本：v0.7.0
+> 基准日期：2026-10-21 · 当前版本：v0.7.0
 > 时间估算假设：单人维护者，每周 8–12 有效工时；所有时间节点为**相对量**，按实际投入动态校准。
 > 实测数值（依赖闭包/编译时间/基准）的唯一真相源为 `ARCHITECTURE.md` §9，本文不重复记数。
 
@@ -54,7 +54,7 @@
 |---|---|---|
 | 语言/运行时 | Rust 1.75+ / Tokio | ✅ 定型 |
 | Wayland | wl-paste --watch 事件驱动 + wl-clipboard-rs 兜底 | ✅ 定型 |
-| 存储 | rusqlite + SQLite WAL，`user_version` 版本化迁移 | ✅ 定型（FTS5 待启用） |
+| 存储 | rusqlite + SQLite WAL，`user_version` 版本化迁移 | ✅ 定型（FTS5 trigram 已启用，ADR-002） |
 | TUI | fzf ≥0.71 `--track --id-nth`，fuzzel 自动回退 | ✅ 定型 |
 | 预览 | chafa / kitty icat | ✅ 定型 |
 | 打包 | PKGBUILD + systemd user 单元 | ✅ 定型 |
@@ -68,7 +68,7 @@
 ✅ Phase 1   v0.5.x        TUI 体验闭环                          已交付（v0.5.2）
 ✅ Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    已交付（v0.6.0）；2.7 已于 v0.7 前补交付
 ✅ Phase 3   v0.7          安全与隐私强化                         已交付（v0.7.0）
-  Phase 4   v1.0          Production 正式发布                    约 3–4 周
+  Phase 4   v1.0          Production 正式发布（进行中，4.9 ✅）    约 3–4 周
   Phase 5   v1.x          生态与集成（原生UI核心已交付/waybar/OSC52） v1.0 后持续
   Phase 6   v2.0+         长期愿景（加密/跨合成器/原生UI增强）     远期
 ```
@@ -164,7 +164,7 @@
 
 ---
 
-## 七、Phase 4 — v1.0：Production 正式发布
+## 七、Phase 4 — v1.0：Production 正式发布（进行中）
 
 **核心目标：** 面向公众的 GA 版本——分发渠道全通、图片支持完整、文档与 CI 达到可维护开源项目标准。
 
@@ -172,7 +172,7 @@
 
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
-| 4.1 | 图片剪贴板完整支持 | 覆盖 image/png、jpeg、webp 全链路（捕获→存储→预览→重粘贴）；`wl-copy < image` 场景 | 手动 + 自动测试全过 |
+| 4.1 | 🟡 图片剪贴板完整支持 | `store` 改为按 magic 判定 png/jpeg/webp 并从 stdin 单次读取入库（`wl-paste` 的 `--type` 是单值，显式 text 会让纯图片剪贴板不触发 watcher；不指定类型时上游按"任意类型"兜底，故管道里可能是图片字节）；超文本限额的截图沿同一 stdin 续读到 `max_image_bytes`，不再丢弃后二次读剪贴板。预览/重粘贴路径复用既有实现 | 自动：`tests/image_pipeline.rs` 6 项端到端全过（三格式字节往返、>1 MiB 不截断、超限拒绝、去重、缺 chafa 提示、开关可关）。**手动：真机 niri 会话内截图 → Mod+V 预览 → 重粘贴 待复验** |
 | 4.2 | AUR 三包齐备 | `niri-clip`（release）、`niri-clip-git`、`niri-clip-bin`（预编译）。**决策（2026-08-28）：AUR 首次发布随 epic（原生 UI）合并后的首个版本一起**；主包构建 `-p niri-clip`（不含 gui 依赖链，makedepends 不需要 libxkbcommon），`niri-clip-gui` 待 M5.4 单独分包；`sqlite` 非运行依赖（rusqlite bundled）已移除 | 三包 CI 自动 bump + 安装冒烟 |
 | 4.3 | crates.io 发布 | `cargo publish`，检查 package metadata 完整 | `cargo install niri-clip` 可用 |
 | 4.4 | waybar 模块 | JSON 输出（历史条数/最新条目/daemon 状态），`niri-clip waybar` | waybar wiki 配置示例可用 |
@@ -180,7 +180,7 @@
 | 4.6 | CI 深化 | 增加：release 自动打包（GitHub Releases + SHA256）、AUR 机器人、benchmark 趋势 | tag 即全渠道发布，人工只做审核 |
 | 4.7 | 兼容性矩阵验证 | fzf 版本门控（<0.71 回退 fuzzel）、主流终端（foot/alacritty/kitty）、niri 最新 stable | 矩阵清单归档并勾验 |
 | 4.8 | 版本语义承诺 | 发布 v1.0.0，宣布 SemVer + 配置格式向后兼容承诺 | CHANGELOG 声明 |
-| 4.9 | 运维体检 `doctor` | 新增 `niri-clip doctor`：自检 systemd 单元/flock 状态/niri spawn-at-startup 与 binds/依赖（fzf≥0.71/chafa）配置；升级文档写明 daemon 与 niri 两处 spawn 的取舍（只留一处，防遗漏） | 全新环境按 doctor 输出 5 分钟完成接入 |
+| 4.9 | ✅ 运维体检 `doctor` | 已交付 `niri-clip doctor`：配置/数据库、daemon flock、systemd 单元/自启/沙箱、niri `spawn-at-startup` 与 binds（展开一层 include）、后端与依赖（fzf≥0.71/chafa/wl-clipboard/notify-send）；`[ok]/[info]/[warn]/[fail]` + 修复提示，失败退出码非零。README 已写明 daemon 与 niri 两处 spawn 二选一 | 全新环境按 doctor 输出 5 分钟完成接入 ✅（假 PATH 集成测试 + 真机 0 失败） |
 
 **时间节点：** 约 3–4 周；里程碑 **M4 = v1.0.0 GA**（项目正式交付点）。
 
@@ -244,7 +244,7 @@
 
 1. **版本 ↔ 里程碑映射**：GitHub Milestones 与本文档 Phase 一一对应；每个任务建 issue，label 标注 `phase/1` … 与任务编号（如 `P1-3 图片配额 GC`）
 2. **DoD 门禁**：任何任务关闭前必须——代码合并主分支、`cargo clippy -D warnings` 零警告、测试覆盖核心路径、CHANGELOG 有条目
-3. **CI 门禁**（已有基础上递增）：fmt / clippy / test / release build / 冒烟（v0.4.1 已有）→ + benchmark 阈值（P1）→ + release 打包与 AUR bump（P4）；另有 **100k 大库长稳（2.5）走手动触发**的 `stress` job（`workflow_dispatch`，不入 PR 必过检查）
+3. **CI 门禁**：lint（fmt + clippy `-D warnings`）/ test（含 release build）/ smoke / bench（预算阈值）四道自动 job；另有 **100k 大库长稳（2.5）走手动触发**的 `stress` job（`workflow_dispatch`，不入 PR 必过检查）
 4. **CHANGELOG.md**：每个 tag 必须有对应章节，文档即发布记录
 5. **本文档即单一真相源**：完成一项勾一项，Phase 状态标记（进行中/已交付）随 tag 更新
 
@@ -283,17 +283,21 @@
 > 目的：main 分支只接受经过 CI 验证的变更，防止直推；单人维护同样执行
 > （规范即未来协作者的 onboarding 文档）。
 
-**1. main 保护（GitHub 设置，一次性配置）**
+**1. main 保护（GitHub 设置）**
 - Settings → Branches → Add branch protection rule（`main`）：
-  - ✅ Require a pull request before merging（单人场景可设 "require 0 approvals"）
-  - ✅ Require status checks：勾选 CI 全部六道工序（fmt/clippy/test/build/smoke/bench）
+  - ✅ Require a pull request before merging（单人场景 "require 0 approvals"）
+  - ⬜ Require status checks：勾选 CI 四道自动 job（lint / test / smoke /
+    bench；stress 为手动 job）——**2026-10-21 复查仍未配置**（required
+    checks 为空，CI 红仍可合并），待用户在 Settings 补勾
   - ✅ Do not allow force pushes / Do not allow deletions
 - 未配置前的人工红线：`git push origin main` 禁止；只推功能分支
 
-**2. 分支命名与 issue 关联**
-- 格式：`<type>/<issue>-<slug>`，type ∈ feat / fix / perf / docs / chore / epic
-- 例：`feat/12-native-ui-mvp`、`fix/15-reload-flash`、`epic/native-ui`
-- ROADMAP 任务编号（P1-2、5.2.1）即 issue 标题前缀，分支必须挂 issue
+**2. 分支命名与任务关联**
+- 格式：`<type>/<任务号或slug>`，type ∈ feat / fix / perf / docs / chore /
+  refactor / ci / test / epic
+- 例：`feat/3.5-security-audit`、`fix/oversize-image-gate`、`chore/release-v0.7.0`
+- 关联以 **ROADMAP 任务编号**为准（如 3.5）；GitHub issue 台账未启用
+  （启用条件见 §七），若启用则任务编号即 issue 标题前缀
 
 **3. PR 规则**
 - 一个 PR 聚焦一个任务；>400 行建议拆分
@@ -301,9 +305,31 @@
   每个 PR 独立可运行、CI 全绿、可演示（附截图/asciinema）
 - 合并方式：**squash merge**，保持 main 线性历史；commit 标题用 Conventional Commits
 
-**4. commit message（Conventional Commits）**
-- 格式：`<type>(<scope>): <what>`，正文回答"为什么"，ADR/事故关联放正文
-- 例：`perf(tui): 启动提速 + 关闭闪窗修复`（正文含诊断结论与取舍）
+**4. commit message（Conventional Commits，2026-10-21 定稿）**
+- **主题行**：`<英文 type>(<scope>): <中文标题>`（type/scope 英文、标题中文），
+  一行讲清"做了什么"；尽量 ≤50、硬上限 ≤72 显示列（CJK 计 2，git 官方
+  口径），祈使句不加句号，不用"——"拖第二分句
+- **正文默认不写**；仅重大变化/更新（破坏性变更、关键取舍需溯源）才写，
+  尽量 ≤60 字，只写"为什么"与关键取舍。不复述 diff、不罗列文件、不放
+  部署步骤与长数据；诊断数据、实测结论、部署细节落 ADR / 专项文档 /
+  CHANGELOG / 代码注释
+- **squash 合并**：默认无正文，确需时 ≤60 字；不用 GitHub 默认的全量
+  commit 列表，溯源靠标题 `(#N)` 与 PR 页
+- **footer**：关联任务 `Refs #N` / `Closes #N`；破坏性变更标题加 `!` 并配
+  `BREAKING CHANGE:` footer（footer 不计入正文字数）
+- 例（常规，无正文）：
+
+  ```
+  fix(daemon): 主捕获路径超 1 MiB 图片被 max_clip_bytes 误杀
+  ```
+
+- 例（重大变化，带 ≤60 字正文）：
+
+  ```
+  feat(core): 加密条目改为按条目 AEAD
+
+  全库加密会让 FTS 存明文影子副本；改为按条目 AEAD，密文条目不进 FTS。见 ADR-006。
+  ```
 
 **5. 紧急修复 fast-track**
 - 线上事故（如 v0.4.1 捕获停摆级）走 `hotfix/<issue>-<slug>` 分支 + 最小 PR，

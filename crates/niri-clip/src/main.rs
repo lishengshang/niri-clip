@@ -6,6 +6,7 @@ use niri_clip_core::{backup, config, confirm, daemon, preview, store};
 // TUI 后端（fzf/fuzzel 编排、终端探测、fzf 版本门控）属 CLI 职责，故住在 CLI
 // crate 而非 core——core 保持"纯逻辑库、不含 UI 后端选择"的分层
 // （见 docs/ARCHITECTURE.md §1 分层边界 / §10；任务 2.6 D1 落地）
+mod doctor;
 mod tui;
 
 #[derive(Parser)]
@@ -101,6 +102,8 @@ enum Commands {
     Migrate,
     /// 查看状态
     Status,
+    /// 环境自检：配置/数据库/daemon/systemd/niri 配置/依赖版本
+    Doctor,
     /// 生成 shell 补全脚本到 stdout（打包安装用：bash|zsh|fish|elvish|powershell）
     Completions { shell: Shell },
     /// 输出 man page 到 stdout（打包安装用：> niri-clip.1）
@@ -373,6 +376,7 @@ async fn main() -> Result<()> {
                 );
             }
         }
+        Some(Commands::Doctor) => doctor::run()?,
         Some(Commands::Completions { shell }) => {
             // 生成器内部对 EPIPE 直接 panic（clap_complete shells/shell.rs），
             // 先写内存缓冲再忽略错误输出，对齐 outln! 的"写失败不 panic"口径

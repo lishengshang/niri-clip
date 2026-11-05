@@ -55,8 +55,8 @@ v0.3 及之前位于 `~/.cache/niri-clip/`；连接时检测旧库并用 `VACUUM
 与原生窗口（`niri-clip-gui`，iced xdg 窗口）。二者的**业务语义全部收敛在
 core**，UI 只做渲染与输入分发；原生 UI 的完整原理见 §10。
 
-**分层边界**：`niri-clip-core` 是**纯逻辑库**（`confirm` / `config` / `daemon` /
-`migrate` / `notify` / `preview` / `single_instance` / `store`），**不含 UI 后端选择
+**分层边界**：`niri-clip-core` 是**纯逻辑库**（`backup` / `confirm` / `config` /
+`daemon` / `migrate` / `notify` / `preview` / `single_instance` / `store`），**不含 UI 后端选择
 与终端编排**——fzf/fuzzel 的进程编排、终端探测、fzf 版本门控住在
 `crates/niri-clip/src/tui.rs`（CLI 职责），原生 UI 不为这些代码买单。
 （任务 2.6 / D1 已把 `tui` 从 core 迁出，此前的分层债已还清。）
@@ -69,10 +69,13 @@ core**，UI 只做渲染与输入分发；原生 UI 的完整原理见 §10。
   Wayland 会话轮询。每次捕获被 `timeout` 划界（默认 5s，可配置），个别来源应用
   的病态读挂起会被秒级回收。**该结构不存在"daemon 存活但捕获停滞"的形态**
   （issue #2 复盘的根因即纯轮询中 read_to_end 无限阻塞且无错误输出）
-- **store 子命令（热点路径）**：stdin 非空且为 UTF-8 → 直接走 `ignore_regex`
-  过滤 + 事务化 upsert 入库，全程不触碰本进程 Wayland 连接；
-  非 UTF-8 载荷显式忽略并记日志；stdin 为空（手动调用兼容）→ 先 Text 探测，
-  再按 `enable_image_preview` 尝试 image/png|jpeg|webp 显式 MIME 抓取
+- **store 子命令（热点路径）**：stdin 非空 → 先按 magic 判定图片（png/jpeg/webp，
+  任务 4.1：管道不带 MIME，而 `wl-paste` 的 `--type` 只能给一个值、显式 text 会让
+  纯图片剪贴板根本触发不了 watcher，故走"不指定类型 + 内容嗅探"），命中即按
+  `max_image_bytes` 沿同一 stdin 续读入库；否则按 `max_clip_bytes` 裁决：UTF-8
+  直接走 `ignore_regex` 过滤 + 事务化 upsert，全程不触碰本进程 Wayland 连接；
+  未识别的二进制记日志后转入剪贴板 MIME 探测（图片按 png/jpeg/webp 显式 MIME
+  抓取）；stdin 为空（手动调用兼容）同样先 Text 探测再尝试图片
 - **回退模式（native 轮询）**：仅当系统缺失 `wl-paste` 二进制时启用。
   单次 get_contents 探测通过（Ok 或 ClipboardEmpty/NoMimeType/NoSeats 三类良性错误）
   后进入 500ms 轮询循环。已知取舍须文档明示：<500ms 连续复制的丢帧窗口、
@@ -177,9 +180,9 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
 ## 5. 配置
 
 `~/.config/niri-clip/config.toml`，`serde(default)` 容错缺字段；缺省值定义在
-`crates/niri-clip-core/src/config.rs`，注释版样例见 `config/config.toml.example`
-（任务 2.6：默认值目前在 `Default::default()` 与 serde 的 `default_*()` 两处
-重复硬编码，将收敛为单一来源 + 一致性单测）。
+`crates/niri-clip-core/src/config.rs` 的 `defaults` 模块（任务 2.6/D5 已收敛为
+单一来源，`Default::default()` 与 serde 缺省由一致性单测锁定），注释版样例见
+`config/config.toml.example`。
 
 读取时机：每个子命令入口 / 入库时各读一次（daemon 轮询循环内亦每 tick 读取，
 成本为一次小文件 IO）；基于 mtime 监听的真正热重载列入选型 backlog，
@@ -193,6 +196,8 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
 - `PKGBUILD` `cargo build --release --locked` → `/usr/bin/niri-clip` + `/usr/share/doc` + `systemd user`
 - `PKGBUILD.git` `git+https://...` + `pkgver()`
 - `AUR` `makepkg --printsrcinfo > .SRCINFO`
+- systemd 单元内置 22 项沙箱指令（AF_UNIX + 自身 state 最小面）；指令取舍、
+  实测评分与强化档见 `SECURITY-AUDIT.md` §③（该文是沙箱细节的唯一出处）
 
 ## 7. 与 cliphist 关系
 
@@ -360,13 +365,14 @@ GPU 需求，二进制 -1/3，与显卡驱动彻底解耦）。winit 原生 IME 
 显式 `"native"` 但二进制缺失时降级 fzf/fuzzel。fzf 版本地板 0.71
 （`--id-nth`）在 `run()` 内二次校验。
 
-**单实例与聚焦**：`state/gui.lock` 存 PID，活实例存在则经 niri IPC
-（`niri msg -j windows`，按 app_id 精确匹配）聚焦已开窗口后本进程退出；
-残留死锁经 `/proc/{pid}/cmdline` 的 argv[0] 精确复核后覆写接管。
-（注：这与 core 的 `daemon.lock` flock 是**两套机制**，收敛计划见任务 2.6。）
+**单实例与聚焦**：经 `core::single_instance::InstanceGuard::try_acquire("gui")`
+对 `state/gui.lock` 加 flock（与 daemon 同一机制，2.6/C4 已收敛）；锁被占用
+则经 niri IPC（`niri msg -j windows`，按 app_id `niri-clip-gui` 精确匹配）
+聚焦已开窗口后本进程退出。进程崩溃由内核释放锁，无 PID 文件与 `/proc` 复核。
 
-**渲染与图片链路**：行列表用 core 的 `preview::preview_text`（单行截断）；
-底部预览窗格另做多行截断。图片解码**全部在后台线程**完成
+**渲染与图片链路**：行列表用 core 的 `preview::preview_text_columns`（按显示
+列宽截断，CJK/emoji 计 2，v0.7 起）；底部预览窗格用
+`preview::preview_multiline`（多行截断）。图片解码**全部在后台线程**完成
 （`load_from_memory` → `Handle::from_rgba`），view 只读 `image_cache`（LRU 上限
 4 张，防 RGBA 内存无界增长）；渲染器零解码。历史上有三个被修掉的坑均与
 "在渲染路径上做 IO"有关：`▶` 指针读文件造成与光标同节奏闪烁（现收敛到
@@ -378,7 +384,7 @@ GPU 需求，二进制 -1/3，与显卡驱动彻底解耦）。winit 原生 IME 
 `/` 或 Ctrl-F 进入搜索态，Esc 退出并轮换输入框 Id（丢弃焦点使光标熄灭 →
 窗口回到零重绘待机，这是最后一次闪烁修复）。
 
-**与 fzf 版的对齐差异（任务 2.6 待收敛，已立项）**：
+**与 fzf 版的对齐差异（任务 2.6 已收敛）**：
 
 > 下表是 2.6 收敛前后的对照；**差异已全部消除**（星标符号除外，属有意的字形选择）。
 

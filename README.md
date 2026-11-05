@@ -6,7 +6,7 @@
 [![Version](https://img.shields.io/badge/version-0.7.0-blue)](Cargo.toml)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange)](https://www.rust-lang.org)
 [![Wayland](https://img.shields.io/badge/Wayland-niri-4a90e2)](https://github.com/YaLTeR/niri)
-[![AUR](https://img.shields.io/badge/AUR-审核中-blue)](https://aur.archlinux.org/packages/niri-clip)
+![AUR](https://img.shields.io/badge/AUR-未上架-lightgrey)
 
 **`niri-clip` 是一个独立的剪贴板历史软件，不是 `cliphist` 的包装。** 它拥有自己的守护进程、数据库和 TUI，专为 `niri` + `Wayland` 优化。
 
@@ -66,25 +66,31 @@ cp /usr/share/doc/niri-clip/config.toml.example ~/.config/niri-clip/config.toml
 # 2. 启动守护进程（已配置 niri spawn-at-startup 或 systemd 则无需手动）
 niri-clip daemon &
 
-# 3. 状态
+# 3. 环境自检（推荐首次安装后运行）
+niri-clip doctor
+
+# 4. 状态
 niri-clip status
 
-# 4. 一次性从 cliphist 迁移（可选，之后独立）
+# 5. 一次性从 cliphist 迁移（可选，之后独立）
 niri-clip migrate
 
-# 5. 打开 TUI
+# 6. 打开 TUI
 niri-clip tui  # 等价 Mod+V
 ```
 
 **niri 集成** `~/.config/niri/config.kdl`：
 
 ```kdl
-// 已自动
-spawn-at-startup "niri-clip daemon"
+// 推荐用 systemd（见下），此时不要加 spawn-at-startup；
+// 不用 systemd 时改用下一行（注意是两个参数）：
+// spawn-at-startup "niri-clip" "daemon"
 binds {
     Mod+V { spawn "niri-clip" "tui"; }
 }
 ```
+
+`niri-clip doctor` 会检查两种自启方式是否重复、`Mod+V` 是否已绑定。
 
 ---
 
@@ -139,6 +145,7 @@ niri-clip search <query> [--limit N]
                       # 全库全文搜索（FTS5 trigram，中英文子串；≥3 字符
                       # 走索引，更短退化为 LIKE）
 niri-clip preview <id>
+niri-clip copy <id>   # 复制条目到剪贴板（图片按 MIME 直灌字节）
 niri-clip pin <id>    # 切换固定
 niri-clip delete <id> [-f]   # -f 跳过星标确认（脚本/无头环境）
 niri-clip delete-current     # 删除当前项 ▶（最后复制的内容，无需定位选中行；
@@ -161,6 +168,10 @@ niri-clip import <file> [--dry-run]
 niri-clip migrate     # 从 cliphist 导入
 niri-clip install-service
                       # 一键安装 systemd user 单元
+niri-clip completions <shell>
+                      # 生成 shell 补全到 stdout（bash|zsh|fish|…）
+niri-clip man         # 输出 man page 到 stdout
+niri-clip doctor      # 环境自检：配置/数据库/daemon/systemd/niri 配置/依赖版本
 niri-clip status
 ```
 
@@ -190,6 +201,7 @@ winit 原生 IME（中文搜索直打）、单实例（Mod+V 连按聚焦已开�
 niri-clip install-service
 systemctl --user daemon-reload
 systemctl --user enable --now niri-clip.service
+niri-clip doctor                       # 自检（单元/自启/依赖）
 journalctl --user -u niri-clip -f      # 日志
 ```
 
@@ -221,9 +233,9 @@ cargo test -p niri-clip-core --release --test large_db -- --ignored --nocapture
 - **v0.3 ✅** 原生 daemon + 300 缓存 + chafa
 - **v0.4.x ✅** P0 修复（并发/图片/panic/state 迁移）+ 事件驱动捕获 + systemd 托管 + CI
 - **v0.5.x ✅** TUI 体验闭环（PRIMARY selection / 图片配额 GC / 星标删除二段确认 / 基准进 CI / man 与补全）+ 原生 UI（iced xdg 窗口，`tui_backend=native|auto`）
-- **v0.6 ▶ 任务全交付，待 tag** 搜索与数据治理：FTS5 全文搜索 ✅ / blake3 统一指纹 ✅ / stats·vacuum·prune ✅ / NDJSON 导出回灌 ✅ / 大库长稳测试 ✅ / 工程收敛 ✅
-- **v0.7** 安全与隐私强化（过滤规则 / systemd 沙箱 / 加密 PoC）
-- **v1.0** Production GA：AUR 三包、crates.io、waybar、CI 深化
+- **v0.6.0 ✅**（2026-09-12）搜索与数据治理：FTS5 全文搜索 / blake3 统一指纹 / stats·vacuum·prune / NDJSON 导出回灌 / 大库长稳测试 / 工程收敛
+- **v0.7.0 ✅**（2026-10-06）安全与隐私强化：过滤规则强化 / 通知脱敏守卫 / 敏感条目清除 / 加密 PoC 决策（ADR-006）/ systemd 沙箱加固
+- **v1.0 ▶ 下一阶段** Production GA：图片全链路、doctor、AUR 三包、crates.io、waybar、CI 深化
 
 完整阶段规划见 [docs/ROADMAP.md](docs/ROADMAP.md)。
 
