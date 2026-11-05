@@ -11,10 +11,10 @@ fn has_bin(name: &str) -> bool {
 
 /// fzf 功能地板：`--no-input`/`show-input` 需 0.59，`--id-nth` 需 0.71。
 /// 低于地板时 fzf 参数解析直接失败，必须主动回退 fuzzel。
-const FZF_MIN: (u32, u32) = (0, 71);
+pub(crate) const FZF_MIN: (u32, u32) = (0, 71);
 
 /// 解析 `fzf --version` 输出（如 "0.74.4 (c0252b6)"）为 (major, minor)
-fn parse_version(s: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_version(s: &str) -> Option<(u32, u32)> {
     let head = s.split_whitespace().next()?;
     let mut it = head.split('.');
     let major: u32 = it.next()?.parse().ok()?;
@@ -54,7 +54,7 @@ fn fzf_version_ok() -> bool {
 /// （cargo install 同仓同目录）→ ~/.cargo/bin。
 /// 必须有兜底：niri spawn 环境的 PATH 常缺 ~/.cargo/bin（真机踩坑），
 /// 否则 auto 会误降级 fzf，GUI 永远打不开。
-fn gui_binary() -> Option<std::path::PathBuf> {
+pub(crate) fn gui_binary() -> Option<std::path::PathBuf> {
     if let Ok(p) = which::which("niri-clip-gui") {
         return Some(p);
     }
@@ -76,7 +76,7 @@ fn gui_binary() -> Option<std::path::PathBuf> {
 /// - "fuzzel"：dmenu 兜底（无 TTY 需求）
 /// - "auto"：native 可用优先；其次 fzf；最后 fuzzel（fzf 版本地板在
 ///   run() 里二次校验，此处只查存在性）
-fn backend(cfg: &Config) -> &'static str {
+pub(crate) fn backend(cfg: &Config) -> &'static str {
     match cfg.tui_backend.as_str() {
         "fuzzel" => "fuzzel",
         "fzf" => "fzf",

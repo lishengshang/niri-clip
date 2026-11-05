@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **`niri-clip doctor` 环境自检（任务 4.9）**：一次检查配置与数据库、daemon
+  flock、systemd 单元/自启/沙箱指令、niri `spawn-at-startup` 与快捷键绑定
+  （含一层 include 展开）、TUI 后端与 wl-clipboard/fzf/chafa/notify-send
+  依赖。逐项输出 `[ok]` / `[info]` / `[warn]` / `[fail]` 与修复提示，失败项
+  退出码非零，供安装脚本/CI 消费；用于 v1.0“全新环境 5 分钟接入”验收。
+  `Config::load_checked` 同步暴露配置解析错误（`load` 仍保持静默回退默认值），
+  避免 doctor 把损坏配置误报为“使用默认值”。
+
 ## v0.7.0 - 2026-10-06
 
 ### Changed

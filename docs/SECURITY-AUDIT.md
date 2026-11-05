@@ -1,8 +1,8 @@
 # 安全审计检查项清单（Phase 3 / 任务 3.5）
 
-> **临时工作文档**：3.5 交付物归档本体。清单项全部闭环（含强化档决策）后，
-> 按文档退役纪律由用户决定去留；有效结论（如沙箱指令取舍）随落地同步进
-> ARCHITECTURE / ADR，不在本文档重复留存。
+> **归档文档**：3.5 交付物。清单项已全部闭环；沙箱指令与评分的细节以本文
+> §③ 为准（`assets/niri-clip.service` 注释与 ROADMAP 3.5 均引用此处），
+> ARCHITECTURE §6 只保留摘要与指针。
 > 审计日期：2026-09-26。审计范围：v0.7 前夕 main（`5b413cd`）。
 
 ## ① 文件权限核查
@@ -115,9 +115,10 @@ native`、`SystemCallFilter=~@privileged`（会把 @chown 一并禁掉，收益
   **目录不存在时自动创建**并纳入读写白名单，规避 `ReadWritePaths=` 指向
   不存在路径导致单元启动失败的坑，且用户自定义 `XDG_STATE_HOME` 自动跟随。
   要求 systemd ≥248（user manager 支持 StateDirectory=）
-- **`PrivateNetwork=true` 不采用**，以 `IPAddressDeny=any` 替代：daemon 与
-  其子进程（wl-paste/wl-copy/notify-send）确无网络需求，但独立 netns 对
-  子进程行为的隔离收益为零，deny-by-address 已拿到同等评分项且失败面更小
+- **`PrivateNetwork=true` 不采用**：daemon 与其子进程（wl-paste/wl-copy/
+  notify-send）确无网络需求，但独立 netns 对子进程行为的隔离收益为零；
+  网络防线由 `RestrictAddressFamilies=AF_UNIX` 承担（`IPAddressDeny` 在
+  user manager 下不生效，已删除，见上）
 - **`PrivateUsers` 不采用**：wayland compositor 侧普遍用 SO_PEERCRED 校验
   client uid，映射 uid 可能被 niri 拒绝连接——归入强化档真机验证后再议
 
@@ -132,7 +133,7 @@ PrivateUsers=true             # ⚠ wayland SO_PEERCRED uid 校验风险，见�
 **验收**（ROADMAP 3.5）：
 
 1. 离线评分：`systemd-analyze security --offline=true assets/niri-clip.service`
-   ✅ 已达标：**9.4 → 1.7 OK**（目标 ≤3.0）
+   ✅ 已达标：**9.4 → 1.9 OK**（目标 ≤3.0；2026-10-21 复测仍为 1.9）
 2. 真机（用户执行）：重装 service 后 `systemctl --user daemon-reload &&
    systemctl --user restart niri-clip`，确认捕获/粘贴/通知链路正常，再跑
    `systemd-analyze security niri-clip.service` 记录实机分

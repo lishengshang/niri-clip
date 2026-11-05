@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -137,20 +137,28 @@ impl Default for Config {
 
 impl Config {
     pub fn load() -> Self {
-        let path = Self::path();
-        if path.exists() {
-            match std::fs::read_to_string(&path) {
-                Ok(s) => match toml::from_str::<Config>(&s) {
-                    Ok(mut c) => {
-                        c.ignore_re = Regex::new(&c.ignore_regex).ok();
-                        return c;
-                    }
-                    Err(e) => eprintln!("[niri-clip] config parse error {e}, using default"),
-                },
-                Err(e) => eprintln!("[niri-clip] read config error {e}"),
+        match Self::load_checked() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[niri-clip] config load error: {e:#}, using default");
+                Self::default()
             }
         }
-        Self::default()
+    }
+
+    /// 与 [`Config::load`] 同源，但把读取/解析错误上抛，供 `doctor` 区分
+    /// “没有配置文件”和“配置损坏后静默回退默认值”。
+    pub fn load_checked() -> Result<Self> {
+        let path = Self::path();
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let s =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let mut c: Config =
+            toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
+        c.ignore_re = Regex::new(&c.ignore_regex).ok();
+        Ok(c)
     }
 
     pub fn path() -> PathBuf {
@@ -301,10 +309,12 @@ mod tests {
         )
         .unwrap();
         std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+        let checked = Config::load_checked().expect("合法 TOML 应可解析");
         let cfg = Config::load();
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(&root);
 
+        assert_eq!(checked.max_items, 42);
         assert_eq!(cfg.max_items, 42);
         // 未写的字段回落默认值
         assert_eq!(cfg.preview_width, 100);
@@ -364,6 +374,10 @@ mod tests {
         )
         .unwrap();
         std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
+        assert!(
+            Config::load_checked().is_err(),
+            "doctor 必须能区分“配置损坏”与“没有配置”"
+        );
         let cfg = Config::load();
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(&root);
