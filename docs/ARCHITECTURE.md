@@ -259,6 +259,10 @@ done
 
 日常 niri 会话已复测。空库与满菜单均超过路线图的可交互目标。测量使用独立 XDG 测试库和 release 构建，由 Linux `uinput` 触发实际 `Mod+V` 绑定。从发送 `V` 按下前的单调时间计起，等 niri 聚焦窗口及 GUI 报出 `Refocus`，发送 `/` 进入搜索，再以 `NIRI_CLIP_DEBUG=1` 输出首个 `Query` 为终点。每种场景分别报告该批首次打开和重复打开的中位数，使用系统当时的页缓存。
 
+分段复测在临时源码的 CLI `main` 入口、启动 GUI 前、GUI `main` 入口和首批 `store::list` 前后记录 `CLOCK_MONOTONIC`。用 `WAYLAND_DEBUG=client` 找到主窗口首次挂载非空缓冲区后的 `wl_surface.commit`，将协议日志的 UTC 时间换算到同一单调时钟。搜索阶段沿用 `Refocus` 到首个 `Query` 的输入流程。两种构建交替运行，普通 release 用于对照总延迟。开始发键前等待 niri 发出新的 `ConfigLoaded` 事件，确认临时绑定已生效。
+
+满菜单的最长单段为读完历史到提交首帧。空库的最长单段为从按下快捷键到进入 CLI，整段启动链路与 GUI 首帧前的开销接近。两种场景下 CLI 入口到派生 GUI、首批历史读取都较短。满菜单优先检查窗口布局和首帧渲染，空库另查 niri 触发绑定到 CLI 入口之间的耗时。
+
 在独立 niri 会话中，分别使用空库和有 300 条以上合成历史的 XDG 目录。确保 `target/release` 在 PATH 首位，并关闭已打开的选择器。以下命令报告热启动中位数。
 
 ```sh
