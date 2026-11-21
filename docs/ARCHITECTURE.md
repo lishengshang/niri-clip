@@ -394,6 +394,53 @@ with (root / 'gui-standby-idle-2026-11-21.csv').open() as f:
 PY
 ```
 
+<a id="selector-config"></a>
+
+#### 选择器配置读取的配对复测
+
+对照为短时待机版 `3b181af`。候选版用同一份 TOML 解析与校验逻辑提取菜单设置，首批列表直接使用本次读取的置顶顺序。捕获与 `doctor` 仍编译配置中的过滤规则。独立库的 `list-raw` 每轮各启动一次，两版的输出逐字节一致。单列首轮后，48 轮中位数在空库从 5.88 降至 2.96 ms，在 300 条库从 7.04 降至 3.75 ms。此段从调用 CLI 算到读完行输出。[逐次 CLI 样本](benchmarks/selector-config-list-2026-11-21.csv)
+
+真机在本批开始时以当前日常配置为底本切换测试绑定。两版均设置 30 秒待机，共用同一启动器和两套合成数据库。在每轮中轮换库和版本的顺序，每版每库先打开新进程，再从待机重开，确认同一 PID 上有两个不同的窗口。随后结束该测试库的无窗口进程，为下一对准备。每次均按实际快捷键，核对焦点后进入搜索，计时截至首个 `Query`。每组首轮单列，下表统计其余 48 轮。RSS 在首字符时从 GUI 进程读取。[392 次快捷键样本](benchmarks/selector-config-hotkey-2026-11-21.csv)
+
+| 历史 | 打开方式 | 对照中位数 / P90 (ms) | 候选中位数 / P90 (ms) | ≤50 ms 对照 → 候选 | RSS 中位数对照 → 候选 (MiB) |
+|---:|---|---:|---:|---:|---:|
+| 0 | 新进程 | 66.25 / 70.29 | 64.31 / 71.74 | 1/48 → 0/48 | 21.56 → 19.96 |
+| 0 | 待机重开 | 47.78 / 59.71 | 47.26 / 55.77 | 29/48 → 31/48 | 22.17 → 20.16 |
+| 300 | 新进程 | 71.09 / 79.12 | 69.56 / 80.25 | 0/48 → 0/48 | 22.92 → 21.46 |
+| 300 | 待机重开 | 57.95 / 65.77 | 54.60 / 63.98 | 15/48 → 11/48 | 23.41 → 21.72 |
+
+按同轮配对，候选减对照的端到端差值中位数及 bootstrap 95% 区间分别为空库冷启动 −2.58 [−4.45, +0.13] ms、空库待机 −4.00 [−5.66, +2.73] ms、300 条冷启动 −1.30 [−5.81, +1.25] ms、300 条待机 −1.20 [−4.92, +3.31] ms。四个区间均包含零。空库待机的两版中位数均低于 50 ms，候选版在 300 条库的达标次数反而少了四次。可确认的收益是 CLI 取数时间缩短、首字符时 GUI 占用下降，以及 GUI release 从 11,003,040 B 缩至 9,596,256 B。两个程序的构建命令见本节“依赖与编译”。
+
+从仓库根目录可复算这些批次。数据库内容和编译设置相同，首轮在 CSV 内标记为 `block=0`。
+
+```sh
+python3 - <<'PY'
+import csv, math, random
+from pathlib import Path
+from statistics import median
+
+for path in sorted(Path('docs/benchmarks').glob('selector-config-*.csv')):
+    with path.open() as f:
+        rows = list(csv.DictReader(f))
+    metric = 'query_ms' if 'opening' in rows[0] else 'elapsed_ms'
+    for size, opening in sorted({(r['history_rows'], r.get('opening')) for r in rows}):
+        by = {(r['build'], int(r['block'])): r for r in rows
+              if (r['history_rows'], r.get('opening')) == (size, opening)}
+        for build in ('standby', 'selector-config'):
+            repeats = [by[build, i] for i in range(1, 49)]
+            times = sorted(float(r[metric]) for r in repeats)
+            rss = [int(r['gui_rss_kib']) / 1024 for r in repeats if 'gui_rss_kib' in r]
+            print(size, opening, build, by[build, 0][metric], median(times),
+                  times[math.ceil(.9 * len(times)) - 1], sum(t <= 50 for t in times),
+                  median(rss) if rss else '')
+        diff = [float(by['selector-config', i][metric]) - float(by['standby', i][metric])
+                for i in range(1, 49)]
+        rng = random.Random(43)
+        boot = sorted(median(rng.choices(diff, k=len(diff))) for _ in range(8000))
+        print('paired', median(diff), boot[200], boot[7799])
+PY
+```
+
 #### niri 派生进程的单独测量
 
 在同一日常会话中，交替由一个 Python 进程直接启动原生打点程序，或通过 niri IPC 的 `Spawn` 动作启动它。该程序在 `main` 入口读取单调时钟，只向本次测量的 FIFO 写入时间戳。IPC 计时从发送已编码的请求前开始，两种路径均使用程序内的时间戳作为终点。单列首次后，各重复 48 次。直接启动的中位数为 1.1 ms，P90 为 1.3 ms。经 niri 的中位数为 34.3 ms，P90 为 39.5 ms。这一批独立于快捷键采样，涵盖 IPC 处理、调度与创建进程。各环节的占比尚待定位。[逐次样本](benchmarks/niri-spawn-2026-11-21.csv)
@@ -482,9 +529,9 @@ cargo metadata --locked --format-version 1 | jq -r '.packages[] | select(.name =
 
 | 范围 | 包数 | release 可执行文件大小 |
 |---|---:|---:|
-| niri-clip | 100 | 5,892,536 B |
+| niri-clip | 100 | 5,890,104 B |
 | niri-clip-core | 83 | — |
-| niri-clip-gui | 204 | 11,003,040 B |
+| niri-clip-gui | 204 | 9,596,256 B |
 | workspace | 222 | — |
 
 ```sh
@@ -544,6 +591,8 @@ NIRI_CLIP_STRESS_DIR="$(mktemp -d)" cargo test --locked --release -p niri-clip-c
 **单实例与唤醒**。GUI 持有 `state/gui.lock` 的 flock，进程退出即释放。启用待机时，持锁者在私有的 `XDG_RUNTIME_DIR` 监听 Unix socket。地址由锁文件的设备号和 inode 决定，各测试库可独立使用。CLI 收到 GUI 事件循环的确认后返回。端点不可用时走常规启动，已有窗口可经 niri IPC 拉回焦点。
 
 **短时待机**。`gui_idle_timeout_secs` 大于零时，正常关闭会销毁窗口，放下历史列表、搜索状态和缩略图引用。窗口关闭事件启动一次性定时器。期限内再打开会重读配置、历史与当前项，创建新的 xdg 窗口。窗口 ID 隔离旧窗口的异步结果和超时事件。期限届满时退出 GUI 并释放端点。字体库和分配器可能在待机时保留内存。[待机实测](#gui-standby)
+
+**选择器配置**。CLI 和 GUI 每次打开都从完整配置提取菜单字段，沿用原有的类型校验和默认值。相同打开过程中的首批列表复用已读取的排序设置。之后重新聚焦仍会重读配置和历史。捕获过滤器留给入库与诊断路径编译。[分段复测](#selector-config)
 
 **浮窗位置**。正常关闭前通过 niri IPC 读取本进程浮窗的输出名和逻辑坐标，变更时原子替换 `state/window-position.json`。有上次记录时，短时线程在窗口登记后核对输出，并按窗口 ID 相对移动。坐标取自工作区视图，用差值移动可兼容面板留白与小数缩放。第一次打开、换输出、平铺窗口或禁用 `remember_window_position` 时使用合成器规则。
 

@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use iced::futures::{stream, SinkExt};
 use iced::{window, Element, Subscription, Task};
-use niri_clip_core::config::Config;
+use niri_clip_core::config::SelectorConfig;
 
 use super::{executor::GuiExecutor, instance, window_settings, App, Message};
 
@@ -27,7 +27,7 @@ struct Standby {
     exiting: bool,
 }
 
-pub(super) fn run(cfg: Config, listener: UnixListener) -> iced::Result {
+pub(super) fn run(cfg: SelectorConfig, listener: UnixListener) -> iced::Result {
     iced::daemon(
         move || {
             let mut state = Standby {
@@ -72,7 +72,7 @@ fn listen(listener: io::Result<UnixListener>) -> Task<Event> {
 }
 
 impl Standby {
-    fn open(&mut self, cfg: Config) -> Task<Event> {
+    fn open(&mut self, cfg: SelectorConfig) -> Task<Event> {
         self.last_closed = None;
         self.reopen = false;
         self.timeout = Duration::from_secs(cfg.gui_idle_timeout_secs);
@@ -111,7 +111,7 @@ impl Standby {
                             window::gain_focus(*id)
                         }
                     }
-                    None => self.open(Config::load()),
+                    None => self.open(SelectorConfig::load()),
                 };
                 // 主循环接受后确认。若超时退出已开始，丢弃连接让启动方重试。
                 let _ = peer.write_all(&[1]);
@@ -120,7 +120,7 @@ impl Standby {
             Event::Closed(id) if self.window.as_ref().is_some_and(|(w, _)| *w == id) => {
                 self.window = None;
                 if self.reopen {
-                    return self.open(Config::load());
+                    return self.open(SelectorConfig::load());
                 }
                 if self.timeout.is_zero() || !self.listening {
                     return self.exit();
@@ -177,7 +177,7 @@ mod tests {
     fn old_window_results_and_expiry_cannot_change_a_reopened_window() {
         let old = window::Id::unique();
         let new = window::Id::unique();
-        let app = App::with_history(Config::default(), Vec::new());
+        let app = App::with_history(niri_clip_core::config::Config::default().into(), Vec::new());
         let mut state = Standby {
             window: Some((new, app)),
             last_closed: None,

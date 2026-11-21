@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use niri_clip_core::config::Config;
+use niri_clip_core::config::{Config, SelectorConfig};
 use niri_clip_core::store;
 
 fn has_bin(name: &str) -> bool {
@@ -76,8 +76,8 @@ pub(crate) fn gui_binary() -> Option<std::path::PathBuf> {
 /// - "fuzzel"：dmenu 兜底（无 TTY 需求）
 /// - "auto"：native 可用优先；其次 fzf；最后 fuzzel（fzf 版本地板在
 ///   run() 里二次校验，此处只查存在性）
-pub(crate) fn backend(cfg: &Config) -> &'static str {
-    match cfg.tui_backend.as_str() {
+pub(crate) fn backend(configured: &str) -> &'static str {
+    match configured {
         "fuzzel" => "fuzzel",
         "fzf" => "fzf",
         "native" => "native",
@@ -95,8 +95,8 @@ pub(crate) fn backend(cfg: &Config) -> &'static str {
 
 /// v0.4：菜单取数统一入口——直查 min(max_items, MENU_LIMIT) 条，
 /// 不再区分缓存/非缓存分支（缓存层已移除）
-fn menu_clips(cfg: &Config) -> Result<Vec<store::Clip>> {
-    store::list(cfg.max_items.min(store::MENU_LIMIT))
+fn menu_clips(cfg: &SelectorConfig) -> Result<Vec<store::Clip>> {
+    store::list_with_pinning(cfg.max_items.min(store::MENU_LIMIT), cfg.pinned_on_top)
 }
 
 // ★ 条目删除确认的**状态机**已收敛到 `crate::confirm`（任务 2.6 / ADR-005）：
@@ -145,8 +145,8 @@ fn respawn_in_terminal(term: &str, prefix: &[&str], exe: &std::path::Path) -> Re
 }
 
 pub fn run() -> Result<()> {
-    let cfg = Config::load();
-    let mut be = backend(&cfg);
+    let cfg = SelectorConfig::load();
+    let mut be = backend(&cfg.tui_backend);
 
     // native：xdg 窗口无需 TTY，直接拉起独立 GUI 后返回。
     // 二进制缺失时降级：显式 "native" → fzf/fuzzel；auto 已在此前选择过。
@@ -208,7 +208,7 @@ pub fn run() -> Result<()> {
 }
 
 /// native 不可用时的降级执行：仍处于无 TTY 环境的决策辅助
-fn run_fallback(be: &'static str, cfg: &Config) -> Result<()> {
+fn run_fallback(be: &'static str, cfg: &SelectorConfig) -> Result<()> {
     match be {
         "fuzzel" => run_fuzzel(cfg),
         "fzf" => {
@@ -239,7 +239,7 @@ fn render_row(
     num: usize,
     cur: Option<&str>,
     c: &store::Clip,
-    cfg: &Config,
+    cfg: &SelectorConfig,
     marker: &str,
 ) -> String {
     let (cur_mark, star) = row_marks(cur, c);
@@ -277,7 +277,7 @@ const FZF_NTH: &str = "4..";
 /// `--track` 的条目身份字段（原始行下标 = id 列）
 const FZF_ID_NTH: &str = "4";
 
-fn run_fzf(cfg: &Config) -> Result<()> {
+fn run_fzf(cfg: &SelectorConfig) -> Result<()> {
     // 清理上次会话可能残留的挂起删除（进程退出不会自动清）
     niri_clip_core::confirm::clear();
     let clips = menu_clips(cfg)?;
@@ -427,7 +427,7 @@ fn run_fzf(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-fn run_fuzzel(cfg: &Config) -> Result<()> {
+fn run_fuzzel(cfg: &SelectorConfig) -> Result<()> {
     let clips = menu_clips(cfg)?;
     if clips.is_empty() {
         return Ok(());
@@ -475,7 +475,7 @@ fn run_fuzzel(cfg: &Config) -> Result<()> {
 /// fzf TUI 内嵌过滤保持 fzf 自身的模糊匹配（对加载的 300 行窗口），
 /// 全库 MATCH 走 native GUI 与本子命令（ADR-002 同步记录）
 pub fn search_raw(query: &str, limit: usize) -> Result<()> {
-    let cfg = Config::load();
+    let cfg = SelectorConfig::load();
     let clips = store::search(query, limit)?;
     let cur = store::current_hash();
     use std::io::{self, Write};
@@ -491,7 +491,7 @@ pub fn search_raw(query: &str, limit: usize) -> Result<()> {
 
 /// 子命令辅助：list-raw 供 fzf reload 调用（行格式须与 run_fzf 初始输入一致）
 pub fn list_raw() -> Result<()> {
-    let cfg = Config::load();
+    let cfg = SelectorConfig::load();
     let clips = menu_clips(&cfg)?;
     let cur = store::current_hash();
     let pending = niri_clip_core::confirm::pending_id();
@@ -524,7 +524,7 @@ pub fn preview_id(id: i64) -> Result<()> {
     let c = store::get(id)?;
     // v0.3: 图片预览分支
     if c.mime.starts_with("image/") {
-        let cfg = Config::load();
+        let cfg = SelectorConfig::load();
         if cfg.enable_image_preview {
             let rendered = niri_clip_core::preview::render_preview(&c);
             if !rendered.is_empty() {

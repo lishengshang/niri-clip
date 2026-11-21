@@ -33,7 +33,7 @@ use iced::widget::{
     container, image, mouse_area, operation, row, rule, scrollable, space, text, text_input,
 };
 use iced::{keyboard, mouse, Background, Border, Element, Font, Length, Subscription, Task};
-use niri_clip_core::{config, confirm, preview, store};
+use niri_clip_core::{config::SelectorConfig, confirm, preview, store};
 
 /// 主字体：JetBrainsMono Nerd Font（真机已装）。
 /// 不用 Font::MONOSPACE（fontconfig 解析到 Noto Sans Mono）：❯▶◆⏎ 等符号
@@ -268,9 +268,10 @@ struct App {
 }
 
 impl App {
-    fn boot(cfg: config::Config) -> (Self, Task<Message>) {
+    fn boot(cfg: SelectorConfig) -> (Self, Task<Message>) {
         let position = position::PositionMemory::open(cfg.remember_window_position);
-        let clips = store::list(Self::load_limit()).unwrap_or_default();
+        let clips =
+            store::list_with_pinning(Self::load_limit(), cfg.pinned_on_top).unwrap_or_default();
         let mut app = Self::with_history(cfg, clips);
         app.position = position;
         app.refresh_cur();
@@ -278,7 +279,7 @@ impl App {
         (app, decode)
     }
 
-    fn with_history(cfg: config::Config, clips: Vec<store::Clip>) -> Self {
+    fn with_history(cfg: SelectorConfig, clips: Vec<store::Clip>) -> Self {
         let first_id = clips.first().map(|c| c.id);
         Self {
             position: None,
@@ -490,7 +491,7 @@ fn main() -> iced::Result {
     let _ = std::thread::Builder::new().spawn(|| {
         let _ = iced::advanced::graphics::text::font_system();
     });
-    let cfg = config::Config::load();
+    let cfg = SelectorConfig::load();
     if cfg.gui_idle_timeout_secs > 0 {
         if let Some(guard) = &instance {
             match niri_clip_core::gui_activation::Endpoint::bind(guard) {
@@ -528,6 +529,7 @@ fn window_settings() -> iced::window::Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use niri_clip_core::config::Config;
 
     fn clip(id: i64, text: &str) -> store::Clip {
         store::Clip {
@@ -600,7 +602,7 @@ mod tests {
 
     #[test]
     fn completed_search_replaces_the_window_cache_and_updates_selection() {
-        let mut app = App::with_history(config::Config::default(), vec![clip(1, "recent")]);
+        let mut app = App::with_history(Config::default().into(), vec![clip(1, "recent")]);
         let _ = app.handle_message(Message::Query(" older ".into()));
         assert!(app.filtered().is_empty());
         let _ = app.handle_message(Message::SearchDone {
@@ -615,7 +617,7 @@ mod tests {
 
     #[test]
     fn rapid_input_only_dispatches_the_latest_waiting_query() {
-        let mut app = App::with_history(config::Config::default(), vec![]);
+        let mut app = App::with_history(Config::default().into(), vec![]);
         let _ = app.handle_message(Message::Query("a".into()));
         app.query = "ab".into();
         assert_eq!(app.request_search().units(), 0);
@@ -640,11 +642,11 @@ mod tests {
                 ..clip(id, "image")
             })
             .collect();
-        let cfg = config::Config {
+        let cfg = Config {
             enable_image_preview: true,
             ..Default::default()
         };
-        let mut app = App::with_history(cfg, clips);
+        let mut app = App::with_history(cfg.into(), clips);
         assert_eq!(app.ensure_image_decode().units(), 1);
         app.set_selection(1);
         assert_eq!(app.ensure_image_decode().units(), 0);
