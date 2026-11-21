@@ -196,10 +196,11 @@ impl App {
                 }
                 None => {
                     // 解码中/失败的占位：面板定高不变，不产生布局跳动
-                    let hint = if self.decoding.contains(&clip.id) {
-                        format!("[image {}] 解码中…", clip.mime)
+                    let hint = if self.decode_failed.contains(&clip.id) || clip.image_path.is_none()
+                    {
+                        "无法预览这张图片"
                     } else {
-                        format!("[image {}] 数据文件缺失或无法解码", clip.mime)
+                        "正在载入图片…"
                     };
                     col = col.push(
                         container(text(hint).size(12))

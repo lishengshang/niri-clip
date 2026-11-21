@@ -249,12 +249,12 @@ struct App {
     /// 当前项指针 TTL 缓存：(读取时刻, 值)。▶ 标记的文件读收敛到
     /// 至多 2 次/秒（TTL 内的滞后对 ▶ 展示无感知影响）
     cur_cache: RefCell<Option<(Instant, Option<String>)>>,
-    /// 图片 Handle LRU 缓存（clip id → Handle，已解码 RGBA）。
+    /// 按 clip id 缓存已解码的 RGBA 缩略图。
     /// Handle 来自后台线程预解码（ImageReady），view 只读缓存不碰 IO/解码；
     /// clip id 内容不可变，按 id 缓存安全。view(&self) 下用 RefCell。
     image_cache: RefCell<Vec<(i64, image::Handle)>>,
-    /// 正在后台解码的图片 id（防重复派发）
-    decoding: std::collections::HashSet<i64>,
+    /// 同时只解码一张，完成后按当前选中项继续。
+    decoding: bool,
     /// 解码失败（文件缺失/格式坏）：不再重试，预览固定显示缺失提示
     decode_failed: std::collections::HashSet<i64>,
 }
@@ -294,7 +294,7 @@ impl App {
             mouse_follow: false,
             cur_cache: RefCell::new(None),
             image_cache: RefCell::new(Vec::new()),
-            decoding: std::collections::HashSet::new(),
+            decoding: false,
             decode_failed: std::collections::HashSet::new(),
         }
     }
@@ -449,8 +449,7 @@ const ROW_HEIGHT: f32 = 27.0;
 const ROW_PITCH: f32 = ROW_HEIGHT + 1.0;
 /// 视口半高初始估算（675 - 头行/提示符/预览窗格），on_scroll 回填实测值
 const VIEWPORT_HALF: f32 = 240.0;
-/// 图片 Handle LRU 上限：缓存的是已解码 RGBA（1080p 截图 ≈8MB/张），
-/// 4 张约 32MB 上限——内存预算与回滚免解码体验的折中
+/// 保留最近解码的预览缩略图。
 const IMAGE_CACHE_CAP: usize = 4;
 /// 底部预览窗格定高（内部 scrollable，长文可滚）
 const PREVIEW_HEIGHT: f32 = 220.0;
@@ -597,6 +596,32 @@ mod tests {
         assert_eq!(next.units(), 1);
         assert!(app.search_hits.is_empty());
         assert!(app.search_in_flight);
+    }
+
+    #[test]
+    fn image_navigation_decodes_only_one_selection_at_a_time() {
+        let clips = (1..=3)
+            .map(|id| store::Clip {
+                mime: "image/png".into(),
+                image_path: Some(format!("{id}.bin")),
+                ..clip(id, "image")
+            })
+            .collect();
+        let cfg = config::Config {
+            enable_image_preview: true,
+            ..Default::default()
+        };
+        let mut app = App::with_history(cfg, clips);
+        assert_eq!(app.ensure_image_decode().units(), 1);
+        app.set_selection(1);
+        assert_eq!(app.ensure_image_decode().units(), 0);
+        app.set_selection(2);
+        let _ = app.handle_message(Message::ImageReady {
+            id: 1,
+            handle: None,
+        });
+        assert_eq!(app.ensure_image_decode().units(), 1);
+        assert_eq!(app.selected_id, Some(3));
     }
 
     #[test]

@@ -26,7 +26,7 @@ impl App {
     pub(super) fn handle_message(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ImageReady { id, handle } => {
-                self.decoding.remove(&id);
+                self.decoding = false;
                 match handle {
                     Some(h) => {
                         let mut cache = self.image_cache.borrow_mut();
