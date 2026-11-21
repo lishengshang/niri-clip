@@ -255,9 +255,7 @@ done
 
 ### 原生窗口启动
 
-嵌套 niri 中，缓存预热后各启动十次。从执行 `niri-clip tui` 到 niri IPC 首次列出窗口，空库中位数为 82.7 ms，有 300 个可见候选时为 108.0 ms。该测量包含 CLI、GUI 初始化和 IPC 采样。
-
-日常 niri 会话已复测。空库与满菜单均超过路线图的可交互目标。测量使用独立 XDG 测试库和 release 构建，由 Linux `uinput` 触发实际 `Mod+V` 绑定。从发送 `V` 按下前的单调时间计起，等 niri 聚焦窗口及 GUI 报出 `Refocus`，发送 `/` 进入搜索，再以 `NIRI_CLIP_DEBUG=1` 输出首个 `Query` 为终点。每种场景分别报告该批首次打开和重复打开的中位数，使用系统当时的页缓存。
+日常 niri 会话中，使用独立 XDG 测试库和 release 构建，由 Linux `uinput` 触发实际 `Mod+V` 绑定。从发送 `V` 按下前的单调时间计起，等 niri 聚焦被测 GUI 及该进程报出 `Refocus`，发送 `/` 进入搜索，再键入 `q`。计时止于测量器从 `NIRI_CLIP_DEBUG=1` 日志读到首个 `Query`，包括发键和观察日志的耗时。
 
 分段复测在临时源码的 CLI `main` 入口、启动 GUI 前、GUI `main` 入口和首批 `store::list` 前后记录 `CLOCK_MONOTONIC`。用 `WAYLAND_DEBUG=client` 找到主窗口首次挂载非空缓冲区后的 `wl_surface.commit`，将协议日志的 UTC 时间换算到同一单调时钟。搜索阶段沿用 `Refocus` 到首个 `Query` 的输入流程。两种构建交替运行，普通 release 用于对照总延迟。开始发键前等待 niri 发出新的 `ConfigLoaded` 事件，确认临时绑定已生效。
 
@@ -265,7 +263,65 @@ done
 
 进一步在临时构建中使用 iced 的布局计时点，并单独包住 tiny-skia 的 `renderer.draw`。满菜单提交首帧前，布局是耗时最大的阶段，布局内包含首次加载系统字体和列表文字排版。空库以同一原生启动器对照快捷键、niri IPC `Spawn` 和直接启动。快捷键与 IPC 到启动器的耗时接近，主要开销位于 niri 的共同启动链路，启动器进入 CLI 较快。niri 的 `Spawn` 使用子线程和双重 `fork`。[niri 26.04 启动实现](https://github.com/YaLTeR/niri/blob/v26.04/src/utils/spawning.rs)
 
-在同一 niri 会话中交替运行改前和按视口布局的 release，保持合成历史、启动器和发键口径一致。每组记录首次打开及重复十次的中位数。满菜单的首帧布局、端到端延迟和首字符时的 RSS 均下降。空库的端到端中位数在最终批次上升，两组仍高于目标。满菜单复测中的软件绘制时间上升，原因待定位。独立 Wayland 会话覆盖滚到末行、从深部视口搜索至单一结果，并逐字比对两次复制回读。
+在同一 niri 会话中交替运行改前和按视口布局的 release，保持合成历史、启动器和发键口径一致。满菜单的首帧布局、端到端延迟和首字符时的 RSS 均下降。独立 Wayland 会话覆盖滚到末行、从深部视口搜索至单一结果，并逐字比对两次复制回读。
+
+在 `iced_tiny_skia::Renderer::draw` 同时记录 `CLOCK_MONOTONIC` 和 `CLOCK_THREAD_CPUTIME_ID`，统计首帧的物理像素尺寸、绘制图元和文字，并用 `sched_getcpu` 采样渲染线程所在核心。通过 `lscpu -e=CPU,CORE,MAXMHZ` 区分本机两类核心，再分组设置 CPU 亲和性，相当于给临时构建加 `taskset -c 4-7` 或 `taskset -c 8-11` 前缀。两版首帧绘制规模相同，限制在同一类核心时耗时接近。自由调度时两版落到不同核心的比例不同，解释了先前软件绘制的大部分时差。实际快捷键复测使用未限制 CPU 的普通 release。
+
+空库交替对照的 GUI 入口至首轮软件绘制完成耗时未显示稳定退化。下表用同轮配对比较整段启动。
+
+原生窗口的普通历史行共用窗口底色，选中行使用实色圆角高亮，减少 tiny-skia 每帧重复填色和阴影合成。字体库由短生命周期线程提前触发 iced 的共享初始化，与 Wayland 连接、首批历史读取重叠。首次排版仍使用同一份字体库，保留系统字体回退。
+
+#### 真机快捷键到首个搜索字符（2026-11-21）
+
+在同一 niri 26.04 会话中，临时将 `Mod+V` 绑定到原生测量启动器。三个版本共用同一 CLI，经 `niri-clip tui` 启动对应 GUI。空库已建好表，满库文本为 `query sample NNN | niri clipboard 实机启动测试样本`（`000` 到 `299`）。每次重新启动 GUI，沿用系统页缓存和默认 CPU 调度。每库每版单列本批首次打开，再测 48 轮，每轮各版各开一次，六种顺序各用八轮。P90 取最近秩，RSS 取处理首字符时 GUI 进程 `VmRSS` 的中位数。
+
+| 历史 | GUI 版本 | 首次 (ms) | 重复中位数 (ms) | P90 (ms) | 重复中 ≤50 ms | GUI RSS (MiB) |
+|---:|---|---:|---:|---:|---:|---:|
+| 0 | 优化前 `fe84a4e` | 59.8 | 64.5 | 74.5 | 2/48 | 20.9 |
+| 0 | 按视口布局 `ad4494c` | 70.1 | 64.7 | 76.9 | 1/48 | 20.9 |
+| 0 | 再加字体预热与行绘制优化 | 65.3 | **59.3** | 66.2 | 1/48 | 21.3 |
+| 300 | 优化前 `fe84a4e` | 69.9 | 85.3 | 102.0 | 0/48 | 29.3 |
+| 300 | 按视口布局 `ad4494c` | 73.5 | 77.3 | 92.1 | 0/48 | 22.4 |
+| 300 | 再加字体预热与行绘制优化 | 71.8 | **66.9** | 77.4 | 0/48 | 22.6 |
+
+两种库的重复中位数均超出 50 ms。空库中，按视口布局相对优化前的同轮差值中位数为 −0.9 ms，配对 bootstrap 95% 区间为 [−3.3, +3.6] ms。上批观察到的变慢与波动相容，本批仍容许小幅退化。再加字体和行绘制优化后，相对视口版的配对差值在空库为 −6.0 ms [−9.1, −1.4]，在 300 条库为 −9.5 ms [−15.5, −3.9]。当前版本从按键到启动器入口的中位数分别为 25.5 和 24.9 ms，从启动器到首字符分别为 33.7 和 42.0 ms。
+
+从仓库根目录可用以下命令复算。逐次样本按采集顺序保存，`block=0` 表示该库该版本的首次打开，`tuned` 对应表中最后一版。时钟列均相对于同次 `V` 按下，单位为毫秒。[逐次样本](benchmarks/gui-startup-2026-11-21.csv)
+
+```sh
+python3 - <<'PY'
+import csv, math, random
+from collections import defaultdict
+from itertools import combinations
+from statistics import median
+
+groups = defaultdict(dict)
+with open('docs/benchmarks/gui-startup-2026-11-21.csv') as f:
+    for r in csv.DictReader(f):
+        groups[int(r['history_rows']), r['build']][int(r['block'])] = r
+builds = ('fe84a4e', 'ad4494c', 'tuned')
+for size in (0, 300):
+    for build in builds:
+        group = groups[size, build]
+        repeats = [r for k, r in group.items() if k]
+        q = sorted(float(r['query_ms']) for r in repeats)
+        rss = median(int(r['gui_rss_kib']) / 1024 for r in repeats)
+        launch = median(float(r['launcher_ms']) for r in repeats)
+        after = median(float(r['query_ms']) - float(r['launcher_ms']) for r in repeats)
+        print(size, build, group[0]['query_ms'], median(q), q[math.ceil(.9 * len(q)) - 1],
+              sum(t <= 50 for t in q), len(q), rss, launch, after)
+    for old, new in combinations(builds, 2):
+        a, b = groups[size, old], groups[size, new]
+        delta = [float(b[k]['query_ms']) - float(a[k]['query_ms']) for k in sorted(a) if k]
+        rng = random.Random(43)
+        boot = sorted(median(rng.choices(delta, k=len(delta))) for _ in range(8000))
+        print(size, new, 'minus', old, median(delta), boot[200], boot[7799])
+PY
+```
+
+#### 嵌套会话的窗口出现时间
+
+嵌套 niri 中，缓存预热后各启动十次。从执行 `niri-clip tui` 到 niri IPC 首次列出窗口，空库中位数为 82.7 ms，有 300 个可见候选时为 108.0 ms。该测量包含 CLI、GUI 初始化和 IPC 采样。
 
 在独立 niri 会话中，分别使用空库和有 300 条以上合成历史的 XDG 目录。确保 `target/release` 在 PATH 首位，并关闭已打开的选择器。以下命令报告热启动中位数。
 

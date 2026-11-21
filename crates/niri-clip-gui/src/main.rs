@@ -29,9 +29,7 @@ use theme::*;
 use iced::widget::{
     container, image, mouse_area, operation, row, rule, scrollable, space, text, text_input,
 };
-use iced::{
-    keyboard, mouse, Background, Border, Element, Font, Length, Shadow, Subscription, Task,
-};
+use iced::{keyboard, mouse, Background, Border, Element, Font, Length, Subscription, Task};
 use niri_clip_core::{config, confirm, preview, store};
 
 /// 主字体：JetBrainsMono Nerd Font（真机已装）。
@@ -461,6 +459,11 @@ fn theme_dark(_state: &App) -> iced::Theme {
 fn main() -> iced::Result {
     // 单实例守卫必须存活到进程结束（drop 即释放 flock）
     let _instance = ensure_single_instance();
+    // 提前初始化 iced 的共享字体库，与 Wayland 和历史初始化并行。
+    // 工作线程完成后退出；若未能启动，iced 会在首次排版时照常初始化。
+    let _ = std::thread::Builder::new().spawn(|| {
+        let _ = iced::advanced::graphics::text::font_system();
+    });
     // 常规 xdg 窗口：受 niri window-rule 约束（悬浮/位置/边框由用户
     // rule.kdl 约定，app-id = "niri-clip-gui"），winit 原生 IME
     iced::application(
