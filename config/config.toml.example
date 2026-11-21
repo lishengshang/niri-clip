@@ -1,32 +1,28 @@
 # niri-clip v0.7.0 配置（全部字段可选，缺省即用内置默认值）
-# 复制到 ~/.config/niri-clip/config.toml 后生效
-# 数据库位于 ~/.local/state/niri-clip/db.sqlite（v0.4 起自动从旧 cache 位置搬迁）
-# 本文件与 crates/niri-clip-core/src/config.rs 的默认值必须保持一致
+# 配置文件：~/.config/niri-clip/config.toml
 
+# 历史条数上限，固定条目受保护。
 max_items = 750
-preview_width = 100
 min_store_length = 1
-enable_image_preview = false  # 图片捕获/chafa 预览（默认关：开启后轮询兜底路径会尝试图片 MIME）
-# 3.1：默认敏感过滤。格式特征（1Password 秘密引用 op://、OTP 迁移 otpauth[-migration]://、
-# Bitwarden bitwarden://、KeePassXC 占位符 {REF:/{TOTP}/{TIMEOTP}）+ 关键词子串
-# （password|secret|token|otp|auth）。命中即不落盘、不通知、不动 ▶ 指针。
-# 注意用 TOML 单引号字面量：\b \w \{ 必须原样传给 regex，双引号会转义损坏
-ignore_regex = '(?i)(\b(?:op|otpauth|bitwarden)[\w-]*://|\{REF:|\{TOTP\}|\{TIMEOTP\})|password|secret|token|otp|auth'
 pinned_on_top = true
-tui_backend = "auto"      # auto | native | fzf | fuzzel
-                          # native: 原生 iced xdg 窗口（需 niri-clip-gui，见 ADR-001）
-                          # auto: gui 可用优先 native，其次 fzf，最后 fuzzel
-notify_enabled = true     # v0.5（P1-4）：桌面通知开关（mako 等），false 完全静默
+
+# 匹配的文本跳过捕获。使用 TOML 单引号，保留正则表达式中的反斜杠。
+ignore_regex = '(?i)(\b(?:op|otpauth|bitwarden)[\w-]*://|\{REF:|\{TOTP\}|\{TIMEOTP\})|password|secret|token|otp|auth'
+
+# auto 依次选择原生窗口、fzf、fuzzel；也可填 native、fzf 或 fuzzel。
+tui_backend = "auto"
+preview_width = 100
 enable_preview = true
-# v0.4.1：事件驱动捕获下每次子进程的超时秒数（防病态读挂起）
+# 捕获 PNG、JPEG、WebP。原生窗口显示缩略图，终端预览需要 chafa。
+enable_image_preview = false
+notify_enabled = true
+
+# 单次捕获的超时（秒）。启用 PRIMARY 后也记录鼠标划选的文本。
 capture_timeout_secs = 5
-# v0.5.2（1.1）：PRIMARY selection 选中即捕获（鼠标划选的文本也入库，
-# 中键粘贴语义）。与剪贴板同去重空间；默认关——划选噪声大
 capture_primary = false
-# v0.5：单条文本入库体积上限（字节）。超限拒绝入库并通知；防 DB 膨胀与全内存直通。
-# 图片载荷超此限不按此拒绝，转按 max_image_bytes 重新裁决
-max_clip_bytes = 1048576    # 1 MiB（文本）
-max_image_bytes = 10485760  # 10 MiB（图片，截图通常 1–3MB）
-# v0.5.1（1.3）：images/ 目录总量配额（字节），daemon 启动时超限按 LRU 淘汰
-# 最旧图片条目（星标/当前项受保护）；0 = 不限制
-max_image_total_bytes = 209715200  # 200 MiB
+
+# 单条文本和图片的大小上限（字节）。
+max_clip_bytes = 1048576
+max_image_bytes = 10485760
+# daemon 启动时按总配额淘汰最旧图片。固定条目和当前项受保护，0 表示不限。
+max_image_total_bytes = 209715200

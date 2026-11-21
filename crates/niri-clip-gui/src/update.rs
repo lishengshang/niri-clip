@@ -23,10 +23,10 @@ impl App {
         Task::batch([task, decode])
     }
 
-    fn handle_message(&mut self, message: Message) -> Task<Message> {
+    pub(super) fn handle_message(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ImageReady { id, handle } => {
-                self.decoding.remove(&id);
+                self.decoding = false;
                 match handle {
                     Some(h) => {
                         let mut cache = self.image_cache.borrow_mut();
@@ -49,9 +49,9 @@ impl App {
                     return Task::none();
                 }
                 self.query = q;
+                self.search_mode = true;
                 self.set_selection(0);
                 self.cancel_confirm();
-                // 重新过滤后回到顶部；同时请求全库 FTS 候选（≥3 字符）
                 return Task::batch([self.scroll_to_selected(), self.request_search()]);
             }
             Message::Key(key, modifiers) => return self.on_key(key, modifiers),
@@ -157,12 +157,17 @@ impl App {
             Message::DeleteReloaded(None) => {}
             Message::ListReloaded(None) => {}
             Message::SearchDone { query, gen, hits } => {
-                // 新鲜度检查：期间已继续输入或列表重载 → 丢弃过期结果
-                if query == self.query && gen == self.clips_gen {
-                    self.search_hits = hits;
-                    self.search_hits_query = query;
-                    self.search_hits_gen = gen;
+                self.search_in_flight = false;
+                if query != self.query || gen != self.clips_gen {
+                    return self.request_search();
                 }
+                self.search_hits = hits;
+                self.search_hits_query = query;
+                self.search_hits_gen = gen;
+                // 同一查询先显示窗口内的结果。全库结果可能来自另一组条目。
+                self.filtered_cache.get_mut().take();
+                self.relocate_selected();
+                return self.scroll_to_selected();
             }
             Message::Refocus => {
                 // 重新聚焦重拉：daemon 在窗口失焦期间捕获的新内容补进来。
@@ -271,7 +276,8 @@ impl App {
                 }
             }
             keyboard::Key::Character(c)
-                if self.query.is_empty()
+                if !self.search_mode
+                    && self.query.is_empty()
                     && !modifiers.control()
                     && !modifiers.alt()
                     && c.len() == 1

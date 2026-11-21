@@ -10,7 +10,7 @@ mod doctor;
 mod tui;
 
 #[derive(Parser)]
-#[command(name = "niri-clip", version, about = "高性能 niri 剪贴板历史")]
+#[command(name = "niri-clip", version, about = "niri / Wayland 剪贴板历史管理器")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -20,9 +20,9 @@ struct Cli {
 enum Commands {
     /// 启动后台守护进程 (wl-paste watcher -> SQLite)
     Daemon,
-    /// 打开 TUI (Mod+V) - 自动选 fzf/fuzzel，支持 --track 不跳顶
+    /// 打开剪贴板历史选择器（原生窗口、fzf 或 fuzzel）
     Tui,
-    /// 从 stdin 读取并入库 (v0.4.1 主捕获链路：wl-paste --watch 管道直灌)
+    /// 从标准输入捕获文本或图片
     Store,
     /// 安装 systemd user 单元到 ~/.config/systemd/user/（随后 enable --now 即可托管）
     InstallService,
@@ -171,12 +171,14 @@ fn fmt_date(ms: i64) -> String {
         .unwrap_or_else(|| ms.to_string())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     use std::io::Write as _;
     let cli = Cli::parse();
     match cli.command {
-        Some(Commands::Daemon) => daemon::run().await?,
+        Some(Commands::Daemon) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(daemon::run())?,
         Some(Commands::Tui) => tui::run()?,
         Some(Commands::Store) => daemon::store_from_stdin()?,
         Some(Commands::InstallService) => {

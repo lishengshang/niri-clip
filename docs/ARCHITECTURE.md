@@ -1,6 +1,6 @@
-# ARCHITECTURE - niri-clip 全新独立设计
+# niri-clip 架构
 
-> 目标：完全独立于 cliphist 的高性能 Wayland 剪贴板历史
+剪贴板采集、历史存储与选择器在独立进程中运行，共享 SQLite 数据库。
 
 ## 1. 总览
 
@@ -61,32 +61,20 @@ core**，UI 只做渲染与输入分发；原生 UI 的完整原理见 §10。
 `crates/niri-clip/src/tui.rs`（CLI 职责），原生 UI 不为这些代码买单。
 （任务 2.6 / D1 已把 `tui` 从 core 迁出，此前的分层债已还清。）
 
-## 2. Daemon - 事件驱动捕获
+## 2. 剪贴板采集
 
-- **主模式（v0.4.1 起，默认）**：
-  `wl-paste --watch sh -c 'exec timeout ${capture_timeout_secs}s niri-clip store'`
-  selection 变化时 wl-paste 把载荷直灌子进程 stdin——零空闲往返、无需进程内
-  Wayland 会话轮询。每次捕获被 `timeout` 划界（默认 5s，可配置），个别来源应用
-  的病态读挂起会被秒级回收。**该结构不存在"daemon 存活但捕获停滞"的形态**
-  （issue #2 复盘的根因即纯轮询中 read_to_end 无限阻塞且无错误输出）
-- **store 子命令（热点路径）**：stdin 非空 → 先按 magic 判定图片（png/jpeg/webp，
-  任务 4.1：管道不带 MIME，而 `wl-paste` 的 `--type` 只能给一个值、显式 text 会让
-  纯图片剪贴板根本触发不了 watcher，故走"不指定类型 + 内容嗅探"），命中即按
-  `max_image_bytes` 沿同一 stdin 续读入库；否则按 `max_clip_bytes` 裁决：UTF-8
-  直接走 `ignore_regex` 过滤 + 事务化 upsert，全程不触碰本进程 Wayland 连接；
-  未识别的二进制记日志后转入剪贴板 MIME 探测（图片按 png/jpeg/webp 显式 MIME
-  抓取）；stdin 为空（手动调用兼容）同样先 Text 探测再尝试图片
-- **回退模式（native 轮询）**：仅当系统缺失 `wl-paste` 二进制时启用。
-  单次 get_contents 探测通过（Ok 或 ClipboardEmpty/NoMimeType/NoSeats 三类良性错误）
-  后进入 500ms 轮询循环。已知取舍须文档明示：<500ms 连续复制的丢帧窗口、
-  空闲 Wayland 往返功耗、read_to_end 长阻塞风险——生产部署应安装 wl-clipboard
-- **反模式备忘**：禁止改回"两次调用 + 第二次 unwrap_err()"的探测写法——
-  剪贴板恰在两次之间变为可用会 panic，systemd Restart 下表现为周期崩启
-- **单实例**：启动即对 `state_dir/daemon.lock` 加 `flock(LOCK_EX|LOCK_NB)`，
-  双开报错退出；进程崩溃内核自动释放锁，无陈锁残留
-- **常驻托管**：推荐 `niri-clip install-service` 安装内置单元后
-  `systemctl --user enable --now niri-clip`；与 niri `spawn-at-startup` 同时配置也安全
-  （flock 兜底）。日志经 stderr 进入 journald：`journalctl --user -u niri-clip -f`
+daemon 持有单实例锁，使用单线程 Tokio 运行时等待 `wl-paste`。打开 PRIMARY 选区时另起一个监听进程。空闲时两个选区都等待 Wayland 事件。一次性 CLI 命令直接运行。[Tokio 运行时](https://docs.rs/tokio/1.53.1/tokio/attr.main.html)
+
+```text
+wl-paste --watch timeout <秒数>s <niri-clip 路径> store
+wl-paste --primary --watch timeout <秒数>s <niri-clip 路径> store
+```
+
+`--watch` 后面是命令及其参数。`wl-paste` 会根据 stdout 文件名推断 MIME，因此监听进程将 stdout 指向 `/dev/null`，诊断写入 stderr。超时值取自 `capture_timeout_secs`。[wl-paste 参数与 MIME 选择](https://github.com/bugaevc/wl-clipboard/blob/v2.3.0/src/wl-paste.c)
+
+`store` 从 stdin 读取载荷。启用图片时通过文件头识别 PNG、JPEG、WebP，沿同一输入流按图片限额读取。文本按文本限额和过滤规则处理。未知格式可能触发系统剪贴板回读。超限、过滤和去重均在入库路径处理。
+
+缺少 `wl-paste` 时，daemon 退回到每 500 ms 读取一次普通选区。该路径可能漏掉两次读取间的复制，开启图片时还会探测图片 MIME。正常部署使用 `wl-clipboard`。服务配置见[安装说明](../README.md)。
 
 ## 3. Store - SQLite WAL
 
@@ -122,7 +110,7 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
 - **菜单直查**：`list(min(max_items, MENU_LIMIT))`，MENU_LIMIT=300（2.6/D1 由
   `TUI_LIMIT` 更名：`tui` 移出 core 后该常量语义已是"菜单取数窗口"，与 UI 后端无关）。
   进程内缓存层已移除——fzf 每次 reload-sync spawn 全新 `list-raw` 进程，
-  OnceLock 缓存在该路径从未生效；实测 list 300 <11ms 无需缓存
+  每个进程拥有独立地址空间，列表查询直接使用 SQLite 索引
 - **全库搜索（2.1）**：`store::search` ≥3 字符走 `clips_fts MATCH` 短语查询
   + bm25 相关度（FTS5 的 MATCH 左侧必须是 fts 表名本身，别名会被当列名）；
   <3 字符退化为 LIKE 线性扫描（trigram 对短查询无增益，通配符已转义）。
@@ -130,13 +118,7 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
   fzf 风格评分重排保持 UX 一致；CLI 暴露 `search` 子命令；fzf TUI 内嵌
   过滤保持 fzf 自身模糊匹配。trigram 按字面索引标点：跨标点短语不命中
   （子串语义，非词边界），单测锁定
-- **基准设施（1.6）**：`criterion` 为 core 的 **dev-dependency**，只在 dev 闭包
-  中出现，不进 `-e normal` 口径（这也是"normal 闭包数"与"编译期依赖数"
-  两个概念的分界）。种子经公开入库 API 写入临时 XDG 环境（与真实捕获路径
-  同构，schema 演进不破坏基准）。实测基线（2026-08-31，本机 10k 条库）：
-  `list_300_of_10k` ≈0.95ms（含 Config::load + connect 全口径）、
-  `sqlite_select_300_of_10k` ≈0.47ms、`fts_search_300_of_10k` ≈0.16ms，
-  均远低于 ROADMAP 预算（11ms / 4ms / 50ms）。运行：`cargo bench -p niri-clip-core`
+- **基准**采用 Criterion，在独立 XDG 目录中用公开入库接口生成数据。基准在计时前断言行数和命中数。复现命令与实测结果见 §9。
 
 - **大库长稳设施（2.5）**：`crates/niri-clip-core/tests/large_db.rs`——100k 条
   规模下跑写入 / 查询 / 并发 / 维护 / 迁移五段，每段自带条目数与内容断言。
@@ -209,155 +191,187 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
 - **SQLite WAL**：单文件备份，`FTS5` 搜索，`WAL` 读写不锁
 - **fzf**：`--track` 是唯一“删除不跳顶”不闪的实现，`ratatui` 自绘后续可选
 
-## 9. 实测数值基线（依赖/构建开销 1.8 + 大库长稳 2.5）
+<a id="performance"></a>
 
-> **口径（唯一权威、可复现）**——由任务 2.6 修正：
->
-> ```
-> cargo tree -e normal -p <包名> --prefix none | sed 's/ (\*)$//' | sort -u | wc -l
-> ```
->
-> `cargo tree` 会给"在树中出现多次"的 crate 行加 `(*)` 后缀。**必须先剥除该
-> 后缀再 `sort -u`**：否则 `serde v1.0.229` 与 `serde v1.0.229 (*)` 被当成
-> 两条独立记录而虚高。本机伪影规模实测：CLI **37** 处 / core 29 处 / GUI 156 处。
-> 旧口径漏掉这一步，正是"同一轮审计出现两套数字（112 vs 108、250 vs 247）"
-> 的根因——旧口径复测值为 CLI 117 / core 96 / GUI 252 / ws 275，**均偏高**。
-> 编译时间：`cargo clean` 后全新 `cargo build --release --locked`，
-> profile `[lto=true, codegen-units=1, strip=true]`。
+## 9. 性能与开销
 
-**闭包基线（口径修正后，2026-09-10 实测）：**
+### 查询与进程开销
 
-| 包 | crate 数 | 说明 |
-|---|---|---|
-| niri-clip（CLI 主包） | 100 | 旧口径 117；审计前基线 171 |
-| niri-clip-core | 83 | 主包子集（旧口径 96）。`criterion` 属 dev-dependency，**不计入**（见 §3 基准设施） |
-| niri-clip-gui | 204 | 旧口径 252；审计前 363（image 收窄、notify-send 交换后） |
-| workspace 总计 | 222 | 旧口径 275；审计前 385 |
+2026-11-21，Arch Linux x86_64，16 个可用逻辑核，Rust 1.100.0，release 构建。以下数据来自合成历史，SQLite 位于 tmpfs。
 
-> 该表是**全项目唯一的依赖数真相源**：ROADMAP 开销预算表只记预算与达标状态，
-> 不重复记数（2.6 收敛，此前两处各记一套数字）。
+| 一万条记录，取 300 条 | 每次耗时 | 计时范围 |
+|---|---:|---|
+| `list_300_of_10k` | 0.992 ms | 配置、连接、当前项、排序与完整条目 |
+| `sqlite_select_300_of_10k` | 0.068 ms | 复用连接，按时间读取 300 行，Rust 端取 id |
+| `fts_search_300_of_10k` | 11.985 ms | 新连接，三字词「中英文」命中全库，按相关度和时间返回前 300 条 |
 
-**大头分解：**
-
-- `notify-rust`（决策项②，2026-09-01 已落地，**该依赖树已整体出图**）：原
-  zbus/zvariant D-Bus 栈为 CLI 主包最大单项（旧口径计 86 crate）。核实实际
-  API 面仅 summary/body（9 处调用），已换 `notify-send` 子进程
-  （`core::notify::send`：后台线程 spawn+wait 收尸，调用方零阻塞、daemon
-  长驻无僵尸；notify-send 缺失静默，与原 `let _ =` 语义一致；参数数组不经
-  shell 无注入面；经 coreutils timeout 5s 划界，对齐 ROADMAP 工程原则 1——
-  防 D-Bus 异常时 libnotify 默认 ~25s 超时导致线程/子进程无界堆积）。代价：
-  新增运行时依赖 `libnotify`（PKGBUILD* depends 已同步）。
-  **收益不再以"减少 N crate"表述**：旧文档在 ARCHITECTURE `-63`、`notify.rs`
-  `-81`、ROADMAP `86` 三处各写一个数，口径不明（含 `(*)` 伪影），
-  本轮统一为事实陈述"该依赖树已完全移除"，不再记差值。未来若需通知 action
-  回调需换回库方案
-- `wl-clipboard-rs` → 44（内含 wayland-client 22）：功能必需，无裁剪空间，与
-  ROADMAP 预估 ~40 一致
-- `blake3`（2.2，2026-09-01）：default 仅 std，纯 Rust + 运行时 SIMD 检测，
-  **新增 3 个 crate**（blake3/constant_time_eq/cpufeatures），零构建链新增。
-  bench 无回归（list_300_of_10k 1.02ms，预算 11ms；hash 在捕获热路径，
-  blake3 吞吐 GB/s 级）
-- `iced`：仅 GUI 包引用，不进主包闭包（收窄后 GUI 全包 204）
-- `image` → 收窄后小闭包（见下）；`chrono` default 的 oldtime/wasmbind 为
-  无操作特性（原生目标零成本），不动
-
-**feature 收窄：** iced `image` feature 实为
-`image-without-codecs` + `image/default`，会把 avif/exr/gif/tiff/hdr/qoi/pnm/
-dds/bmp/tga/ico 全套解码器 + rayon 拉进闭包；而 GUI 解码全部走直接依赖
-image 的后台预解码（`load_from_memory` → `Handle::from_rgba`，iced 渲染器
-零解码，机制见 v0.5.1 GUI 三轮修复条目）。改为 iced `image-without-codecs` + 直接依赖
-`image = default-features=false, features=["png","jpeg","webp"]`：28 个
-lockfile 包出图，Cargo.lock -576 行；非 png/jpeg/webp 格式解码失败走既有
-优雅降级提示。二进制体积：CLI 6.5 MiB / GUI 11.2 MiB（strip 后；
-notify-send 交换后降至 5.1 / 9.8 MiB；2.4 引入 serde_json 序列化面后
-CLI 5.5 MiB，增量 0.4 MiB 为 serde_json+base64 代码与元数据）。
-
-**编译时间基线（本机，2026-09-01 测量轮次）：** 主包 96s / GUI 增量 123s /
-全 workspace ≈219s。原 ROADMAP `<60s` 预算定于 Phase 0 早期依赖树远小
-于今日之时（bundled sqlite C 编译 + 全量 LTO 是主要耗时）。
-**已决策（2026-09-01）：** 预算重估为 `<120s`，当前达标；`lto = "thin"`
-备选搁置（体积/性能回退未测，无实际需求不引入变量）。CI bench 门禁
-不含编译时间，无回归报警风险。notify-send 交换后二测：主包 77s /
-GUI 增量 108s（原 96s / 123s），预算内余量进一步扩大。
-> 口径说明：编译时间为**单一测量轮次的历史记录**，不随依赖微调重测；
-> 若需刷新，须在同一机器、`cargo clean` 后整体重测并替换本段，
-> 不得只改动其中一个数字。
-
-**大库长稳基线（任务 2.5，2026-09-11 实测，N=100_000）：**
-
-```
-NIRI_CLIP_STRESS_DIR=/path/on/big/disk \
-  cargo test -p niri-clip-core --release --test large_db -- --ignored --nocapture
+```sh
+cargo bench --locked -p niri-clip-core --bench store -- --noplot --output-format bencher
 ```
 
-> CI 侧另有**手动触发**的 `stress` job（`workflow_dispatch`，不进 PR 门禁，
-> 也不改变分支保护要求的六道工序）：Actions → CI → Run workflow 选分支即可。
+旧基准在 `b01cad0` 仅保留 750 条，搜索词「基准中」没有命中。现按种子数设置容量，计时前断言库存和返回行数。两组数据无法用于计算提速比。
 
-| 项目（100k 条） | 实测 | 备注 |
-|---|---|---|
-| 批量写入（单事务） | 6.0s（0.06ms/条） | 库体积 56 MiB（db 56 + wal 0） |
-| `list(300)` | **4.3ms**（修复前 108ms，2.7 复测） | 见下"列表排序走索引" |
-| FTS 搜索（trigram，≥3 字符） | 6.7ms | ROADMAP 的 <50ms 预算定义在 10k 口径 |
-| LIKE 回退（<3 字符，全库扫描） | 90ms | 短查询拿不到 FTS 增益的固有代价 |
-| `stats` | 12.8ms | |
-| `prune` 101197 条 | dry-run 与实际**完全一致** | 星标与当前项受保护（存活数断言） |
-| `vacuum` | 55.9 → 25.7 MiB | |
-| v3→v4 blake3 迁移（101000 行 / 500 组重复） | 3.3s | 合并 500 组；峰值 RSS 57.7 MiB（基线 16.7） |
-| 重复 200 轮 list+search | RSS 12.0 → 12.0 MiB | "内存平稳"判据：增长 <32 MiB |
-| 并发写入 4 线程 × 250 条 | 2.0s，零失败 | 无锁死、无丢条 |
-| 逐条捕获（`insert_with`） | 12.1ms/条 | **见下方口径警告第 2 条，勿当代码基线** |
+| 相同 CLI 工作负载 | `b01cad0` | 本轮 |
+|---|---:|---:|
+| `store` 等待 stdin 时的线程数 | 17 | 1 |
+| 重复捕获同一条短文本 | 4.306 ms | 3.098 ms |
+| `list-raw` 输出单条历史 | 4.782 ms | 3.991 ms |
 
-**复现口径警告（三条，缺一都会把数读歪）：**
+每次启动独立进程，表中时间为预热后一百次的中位数，包含操作系统启动进程的开销。对照版本可在各自的源码目录运行以下命令。
 
-1. 上表全部来自 `tests/large_db.rs` 的自建沙盒（`XDG_*` 全隔离），不是真实用户库。
-2. **"逐条捕获 12.1ms"不是 niri-clip 的开销**。`insert_with` 每次调用都
-   `connect()` 一次（open + PRAGMA + 迁移检查 + drop），其绝对值由文件系统决定：
-   本机沙盒的文件创建/删除异常昂贵——实测 `create+write+unlink` 单次 **43ms**、
-   `sqlite open+insert+close` **10.1ms**，与此处的 12.1ms 吻合。因此该行只说明
-   "本机量不出代码开销"，**不得**当作性能基线引用。
-3. 沙盒位置必须可覆盖（`NIRI_CLIP_STRESS_DIR`）：100k 库含 FTS5 trigram 索引约
-   56 MiB，两个沙盒加迁移快照约 150 MiB。`/tmp` 为小容量 tmpfs 时若不改指，
-   会以 `SQLITE_FULL`（"database or disk is full"）死在写入或 prune 中途——
-   而磁盘明明还有几百 G，极难定位。测试内已把 `SQLITE_TMPDIR` 一并指向沙盒根，
-   避免"库在大盘、临时文件在 /tmp"这种错配（prune 的 `id IN (… ORDER BY ts)`
-   在 10 万行上必建临时索引）。
+```sh
+cargo build --release --locked -p niri-clip
+python3 - <<'PY'
+import os, pathlib, statistics, subprocess, tempfile, time
+with tempfile.TemporaryDirectory() as d:
+    env = dict(os.environ, XDG_STATE_HOME=d+'/state', XDG_CONFIG_HOME=d+'/config', XDG_CACHE_HOME=d+'/cache')
+    exe = 'target/release/niri-clip'
+    with subprocess.Popen([exe, 'store'], env=env, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL) as p:
+        time.sleep(0.2)
+        print(next(x for x in pathlib.Path(f'/proc/{p.pid}/status').read_text().splitlines() if x.startswith('Threads:')))
+        p.communicate(b'sample')
+    for cmd in ('store', 'list-raw'):
+        ms = []
+        for _ in range(101):
+            start = time.perf_counter_ns()
+            subprocess.run([exe, cmd], env=env, input=b'sample', stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            ms.append((time.perf_counter_ns() - start) / 1e6)
+        print(cmd, statistics.median(ms[1:]), 'ms')
+PY
+```
 
-**列表排序走索引（2.5 暴露的扩展性缺口，2.7 已修复）：**
+在嵌套 niri 26.04、wl-clipboard 2.3.0 中，空闲 daemon 的 RSS 约 8 MiB，每个 `wl-paste` 约 2.3 MiB。启用 PRIMARY 后共三个常驻进程，各一个线程，连续五秒内 CPU 计时均无增量。RSS 会重复计算共享页。可在运行 daemon 的测试会话中查看：
 
-`list()` 原以表达式 `(hash = ?2) DESC` 作排序首键（把 ▶ 当前项顶到第 1 行），
-SQLite 无法据此走索引有序扫描，退化为全表扫描 + 完整排序：10k 时 0.95ms、
-100k 时 108ms（114×，而非数据量增长的 10×）。修复（schema v4→v5）：
+```sh
+pid=$(pgrep -nx -f '.*niri-clip daemon')
+ps -o pid,ppid,rss,nlwp,comm -p "$pid" --ppid "$pid"
+for pass in 1 2; do
+  for p in "$pid" $(pgrep -P "$pid"); do awk '{print $1, $14+$15}' "/proc/$p/stat"; done
+  [ "$pass" = 2 ] || sleep 5
+done
+```
 
-1. 当前项单独点查 `WHERE hash = ?2`（走 idx_hash），不再进排序键；
-2. 其余条目按 `pinned DESC, ts DESC, id DESC`（pinned_on_top）或
-   `ts DESC, id DESC`（否则）取 N 条——前者走 idx_pinned_ts，后者走新增的
-   idx_ts（ts DESC, id DESC）。
+### 原生窗口启动
 
-100500 行库复测 `list(300)` **4.3ms**（原 108ms，25×）；10k 基准
-`list_300_of_10k` 1.01ms（预算 <11ms）。idx_ts 的轻量化代价：100k 行库体积
-56 → 59 MiB（+3 MiB，≈30 KiB/千条），写入侧多一次索引 B-tree 插入，在逐条
-捕获被文件系统 I/O 主导的量级下不可分辨。默认 `max_items = 750` 下库不可
-能达 100k，此修复对真实用户是防御性的（心智收益：排序复杂度不再随时限
-配置埋雷）。
+嵌套 niri 中，缓存预热后各启动十次。从执行 `niri-clip tui` 到 niri IPC 首次列出窗口，空库中位数为 82.7 ms，有 300 个可见候选时为 108.0 ms。该测量包含 CLI、GUI 初始化和 IPC 采样。路线图中的 50 ms 目标以物理桌面上的按键到可交互为准，待实机验收。
 
-## 10. 原生 UI - niri-clip-gui（Phase 5 已交付）
+在独立 niri 会话中，分别使用空库和有 300 条以上合成历史的 XDG 目录。确保 `target/release` 在 PATH 首位，并关闭已打开的选择器。以下命令报告热启动中位数。
 
-> 本节是原生 UI 的**唯一原理真相源**（原 `docs/NATIVE-UI.md` 立项详案已于
-> 任务 2.6 删除，内容全部收敛至此与 ADR-001）。
+```sh
+PATH="$PWD/target/release:$PATH" python3 - <<'PY'
+import json, statistics, subprocess, time
+def windows():
+    items = json.loads(subprocess.check_output(['niri','msg','-j','windows']))
+    return [w['id'] for w in items if w['app_id'] == 'niri-clip-gui']
+samples = []
+for _ in range(11):
+    start = time.monotonic()
+    subprocess.run(['niri-clip','tui'], check=True)
+    while not (shown := windows()):
+        if time.monotonic() - start > 5: raise TimeoutError('窗口未出现')
+        time.sleep(.002)
+    samples.append(1000 * (time.monotonic() - start))
+    time.sleep(.16)
+    subprocess.run(['niri','msg','action','close-window','--id',str(shown[0])], check=True)
+    while windows(): time.sleep(.05)
+print(statistics.median(samples[1:]), 'ms')
+PY
+```
 
-**定位**：消除终端冷启动瓶颈（ghostty 冷启 ~150ms+，fzf 依赖 TTY 无法绕开）。
-目标 Mod+V 到窗口可交互 ≤50ms、零终端依赖、交互语义与 fzf 版 100% 对齐。
+### 图片预览内存
 
-**技术栈与两次推翻（ADR-001 修订 1）**：初版选 layer-shell，真机反馈后改为
-**常规 xdg 窗口**（app-id `niri-clip-gui`）。两个动因：① layer-shell 无法被
-niri `window-rule` 约束（用户无法自定义悬浮/位置/边框）；② layer-shell 的
-daemon 式事件循环缺 IME 接线，中文搜索不可用。渲染器由 wgpu/GL 改为
-**tiny-skia 纯软件渲染**（NVIDIA 下 wgpu 冻结、EGL 初始化失败；列表 UI 无
-GPU 需求，二进制 -1/3，与显卡驱动彻底解耦）。winit 原生 IME 解锁中文输入；
-悬浮/位置/阴影由用户 `rule.kdl` 约定（示例见 `assets/niri-clip.kdl`）。
+在同一嵌套会话中，以文本为初始选中项，逐张浏览四张 3840 × 2160 的 RGB PNG。原尺寸缓存下窗口 RSS 从 20.9 升至 203.3 MiB；缩略图缓存下从 21.4 升至 53.2 MiB。数值为各次解码结束后的进程 RSS。四个缩略图的 RGBA 数据合计最多 6.875 MiB（`4 × 1024 × 440 × 4 / 1024²`）。源图解码、渲染器与分配器占用另计。
 
-**进程形态**：**按需进程**——`niri-clip tui` 探测到 `niri-clip-gui` 即 spawn
-后自身返回；窗口关闭即进程退出，常驻增量归零（不做常驻 UI 服务）。
+在独立 Wayland 测试会话运行以下命令。需要 ImageMagick 与 wtype。两次 `ps` 分别取初始与浏览后的 RSS，单位为 KiB。
+
+```bash
+cargo build --release --locked -p niri-clip -p niri-clip-gui
+(
+  d=$(mktemp -d)
+  export XDG_CONFIG_HOME="$d/config" XDG_STATE_HOME="$d/state" XDG_CACHE_HOME="$d/cache"
+  mkdir -p "$XDG_CONFIG_HOME/niri-clip"
+  printf '%s\n' 'enable_image_preview = true' 'notify_enabled = false' > "$XDG_CONFIG_HOME/niri-clip/config.toml"
+  for rgb in 3264a0 5564a0 7864a0 9b64a0; do
+    magick -size 3840x2160 "xc:#$rgb" PNG24:- | target/release/niri-clip store
+  done
+  printf sample | target/release/niri-clip store
+  target/release/niri-clip-gui & gui=$!
+  sleep 1
+  ps -o rss= -p "$gui"
+  wtype -s 600 -k Down -s 1000 -k Down -s 1000 -k Down -s 1000 -k Down -s 1000
+  ps -o rss= -p "$gui"
+  kill "$gui"
+)
+```
+
+### 构建环境
+
+使用 Rust 稳定版和仓库的 Cargo.lock。在 Linux x86_64 的锁定依赖中，CLI 经由 `home`、GUI 经由 `iced` 和 `image` 至少需要 Rust 1.88。本轮构建使用 1.100.0，最低可编译版本尚待独立验证。可用以下命令核对依赖声明。
+
+```sh
+rustc -V
+cargo metadata --locked --format-version 1 | jq -r '.packages[] | select(.name == "home" or .name == "iced" or .name == "image") | [.name, .version, .rust_version] | @tsv'
+```
+
+### 依赖与编译
+
+2026-11-21，使用当前 Cargo.lock，在 Linux x86_64 上统计普通依赖。按包名和版本去重，包含根包，排除开发依赖。GUI 单独构建，安装 CLI 无须引入 iced。
+
+| 范围 | 包数 | release 可执行文件大小 |
+|---|---:|---:|
+| niri-clip | 100 | 5,781,112 B |
+| niri-clip-core | 83 | — |
+| niri-clip-gui | 204 | 10,510,304 B |
+| workspace | 222 | — |
+
+```sh
+for pkg in niri-clip niri-clip-core niri-clip-gui; do
+  cargo tree --locked -e normal -p "$pkg" --prefix none | sed 's/ (\*)$//' | sort -u | wc -l
+done
+cargo tree --locked -e normal --workspace --prefix none | sed 's/ (\*)$//' | sort -u | wc -l
+cargo build --locked --release -p niri-clip
+cargo build --locked --release -p niri-clip-gui
+stat -c '%n %s' target/release/niri-clip target/release/niri-clip-gui
+```
+
+- CLI 通过 wl-clipboard 监听事件，缺少 `wl-paste` 时回退到 wl-clipboard-rs。通知调用系统的 `notify-send`，由 coreutils `timeout` 限时，后台线程回收子进程。
+- GUI 使用 iced 的 `tiny-skia`、`wayland` 和 `image-without-codecs`。图片读取、缩放和解码使用现有 image 库，只启用 PNG、JPEG、WebP。渲染器直接接收 RGBA 缩略图。
+- release 启用 LTO、单代码生成单元和符号剥离，SQLite 随 rusqlite 编译。历史测量（2026-09-01）为 CLI 冷构建 77 s，随后编译 GUI 另需 108 s。本轮复测了包数与可执行文件大小，冷构建耗时沿用该次记录。
+
+用独立目标目录复测冷构建，可保留日常开发缓存。
+
+```sh
+(
+  export CARGO_TARGET_DIR="$(mktemp -d)"
+  time cargo build --release --locked -p niri-clip
+  time cargo build --release --locked -p niri-clip-gui
+)
+```
+
+### 大库长稳复测
+
+2026-11-21，Linux x86_64、Rust 1.100.0，release 构建，SQLite 数据及临时文件位于 tmpfs。测试先插入十万条种子，再执行逐条捕获、查询、并发写入、内存稳态、维护与旧库迁移。写入耗时包含文件系统开销。
+
+```sh
+NIRI_CLIP_STRESS_DIR="$(mktemp -d)" cargo test --locked --release -p niri-clip-core \
+  --test large_db -- --ignored --nocapture
+```
+
+| 操作 | 实测 |
+|---|---|
+| 单事务写入十万条 | 4.1 s，库文件 59 MiB |
+| 逐条捕获 / 列表读取 300 条 | 0.86 ms/条 / 1.13 ms |
+| FTS 搜索 / 短词 LIKE | 5.72 ms / 0.43 ms，取决于词频和结果分布 |
+| 并发写入 | 4 个线程各写入 250 条，零丢失 |
+| 重复 200 轮列表和搜索 | RSS 约 12.1 MiB，报告的增量约 0.1 MiB |
+| 清理与压缩 | 预估与实际删除数一致，59.3 → 25.7 MiB |
+| v3 迁移 | 合并 500 组重复，耗时 1.9 s |
+
+`list()` 先按 `idx_hash` 点查当前项，再按固定状态和时间顺序读索引。v5 为按时间排列的分支增加了 `idx_ts`。短词 LIKE 的未命中查询可能遍历整库，表中的时间只适用于测试数据。
+
+## 10. 原生窗口
+
+原生选择器按需启动，窗口关闭时退出。它使用 iced、winit 的常规 xdg 窗口及 tiny-skia 软件渲染。niri 根据 app-id `niri-clip-gui` 应用浮动、位置和阴影规则。winit 负责输入法事件。[选型 ADR-001](ADR-001.md) · [窗口规则示例](../assets/niri-clip.kdl)
 
 **后端选择（`tui_backend`）**：`auto` 优先 native → fzf → fuzzel；
 `gui_binary()` 三级兜底定位二进制（`PATH` → 与 CLI 同目录 → `~/.cargo/bin`），
@@ -370,30 +384,15 @@ GPU 需求，二进制 -1/3，与显卡驱动彻底解耦）。winit 原生 IME 
 则经 niri IPC（`niri msg -j windows`，按 app_id `niri-clip-gui` 精确匹配）
 聚焦已开窗口后本进程退出。进程崩溃由内核释放锁，无 PID 文件与 `/proc` 复核。
 
-**渲染与图片链路**：行列表用 core 的 `preview::preview_text_columns`（按显示
-列宽截断，CJK/emoji 计 2，v0.7 起）；底部预览窗格用
-`preview::preview_multiline`（多行截断）。图片解码**全部在后台线程**完成
-（`load_from_memory` → `Handle::from_rgba`），view 只读 `image_cache`（LRU 上限
-4 张，防 RGBA 内存无界增长）；渲染器零解码。历史上有三个被修掉的坑均与
-"在渲染路径上做 IO"有关：`▶` 指针读文件造成与光标同节奏闪烁（现收敛到
-`refresh_cur` 的 500ms TTL 缓存 + 只在消息路径刷新）、UI 线程同步解码造成
-帧冻结、`Handle::from_path` 按 `.bin` 猜格式导致 tiny-skia 线程 panic。
+**渲染与预览**。列表使用单行预览，底部窗格显示多行文本或图片。iced 的线程池负责搜索、复制和图片解码。每次解码一张，完成后检查当前选中项。缩略图保留原比例，宽度上限为 1024 像素，高度上限为 440 像素，窗口缓存最近解码的四张。复制直接读取原图文件。单张源图解码仍需要与原始分辨率相应的临时内存。[image 缩略图接口](https://docs.rs/image/0.25.10/image/enum.DynamicImage.html#method.thumbnail)
 
-**搜索**：≥3 字符走 core 的 FTS（后台线程 + `(query, gen)` 双新鲜度缓存，
-过期丢弃不闪烁），再以 fzf 风格评分重排；<3 字符回落内存子序列过滤。
-`/` 或 Ctrl-F 进入搜索态，Esc 退出并轮换输入框 Id（丢弃焦点使光标熄灭 →
-窗口回到零重绘待机，这是最后一次闪烁修复）。
+**搜索**。点击输入框或按 `/`、`Ctrl+F` 开始搜索。输入时先显示当前窗口的子序列匹配，同时后台查询 SQLite。三字符起走 FTS5 trigram，短词走 LIKE。同一时间只运行一个数据库查询，输入变化后接续最新请求。结果返回时核对输入和历史列表版本，仅使用仍匹配的结果，并重新定位选中条目。空历史、查询中和无匹配各有对应提示。[GNOME 搜索交互规范](https://developer.gnome.org/hig/patterns/nav/search.html)
 
-**与 fzf 版的对齐差异（任务 2.6 已收敛）**：
+| 行为 | fzf | 原生窗口 |
+|---|---|---|
+| 初始列表 | 最近窗口，最多 300 条 | 最近窗口，最多 300 条 |
+| 搜索范围 | 载入的条目 | 全库候选，最多显示 300 条 |
+| 固定条目 | `★` | `◆` |
+| 删除确认 | 列表行尾提示 | 窗口横幅 |
 
-> 下表是 2.6 收敛前后的对照；**差异已全部消除**（星标符号除外，属有意的字形选择）。
-
-| 维度 | 收敛前 fzf TUI | 收敛前原生 UI | 收敛后（2.6 已落地） |
-|---|---|---|---|
-| ★ 删除确认 | 15s TTL + `state/pending_delete` 落盘 | 内存布尔，**无 TTL** | `core::confirm` 单一状态机，15s TTL（ADR-005） |
-| 载入窗口 | `min(max_items, 300)` | 全量 `max_items`（默认 750） | `store::MENU_LIMIT`=300，两后端一致 |
-| 多行预览 | `tui preview_id`（100 行 / 300 字符） | `view.rs` 自建（80 行 / 300 字符） | `preview::preview_multiline()` 唯一实现 |
-| 退出路径 | 进程自然结束 | `std::process::exit(0)` ×2 | 改 `iced::exit()`，走正常析构（D3） |
-| 实例互斥 | — | PID 文件 + `/proc` 复核 | `core::single_instance` flock（C4） |
-| 搜索范围 | fzf 内嵌过滤（300 行窗口） | 全量 + FTS/LIKE 全库 | 两后端都由 `store::search` 覆盖全库 |
-| 星标符号 | `★` | `◆`（字体字形覆盖考虑） | **有意保留差异**，README 已写明 |
+两个前端共用 `core::confirm` 的删除确认和 `preview::preview_multiline` 的文本截断规则。[交互决策 ADR-005](ADR-005.md)

@@ -17,7 +17,7 @@ pub const SERVICE_UNIT: &str = include_str!(concat!(
 // =====================================================================
 // 捕获架构（v0.4.1 起）
 //
-//   主模式  ：wl-paste --watch -> sh -c 'exec timeout <N>s niri-clip store'
+//   主模式  ：wl-paste --watch timeout <N>s niri-clip store
 //             —— 事件驱动，selection 变化才触发；零空闲往返；
 //                子进程级别 timeout 为任何病态读挂起划界（秒级回收），
 //                从机制上杜绝“daemon 进程存活但捕获停滞”的静默失联。
@@ -28,34 +28,24 @@ pub const SERVICE_UNIT: &str = include_str!(concat!(
 // 该故障形态不再可能发生。
 // =====================================================================
 
-/// 组装主模式的 shell 命令串。单列出来以便单元测试覆盖超时边界语义。
-fn watch_shell_command(exe: &std::path::Path, timeout_secs: u64) -> String {
-    format!("exec timeout {timeout_secs}s {} store", exe.display())
-}
-
-/// 一路 wl-paste --watch 的完整参数表。单列出来以便单元测试覆盖
-/// PRIMARY 监视的开关语义（任务 1.1）。
-fn wl_paste_watch_args(exe: &std::path::Path, timeout_secs: u64, primary: bool) -> Vec<String> {
-    let mut args = vec!["--watch".to_string()];
-    if primary {
-        // 主选区：鼠标划选即触发（中键粘贴语义）；与剪贴板 watcher 各自独立
-        args.push("--primary".to_string());
-    }
-    args.push("sh".to_string());
-    args.push("-c".to_string());
-    args.push(watch_shell_command(exe, timeout_secs));
-    args
-}
-
-fn spawn_watch(
+/// `--watch` 后的第一个参数是命令，其余参数原样交给该命令。
+fn watch_command(
     exe: &std::path::Path,
     timeout_secs: u64,
     primary: bool,
-) -> Result<tokio::process::Child> {
-    tokio::process::Command::new("wl-paste")
-        .args(wl_paste_watch_args(exe, timeout_secs, primary))
-        .spawn()
-        .context("spawn wl-paste --watch")
+) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new("wl-paste");
+    if primary {
+        command.arg("--primary");
+    }
+    command
+        .args(["--watch", "timeout"])
+        .arg(format!("{timeout_secs}s"))
+        .arg(exe)
+        .arg("store")
+        // wl-paste 会按 stdout 文件名推断 MIME。daemon 的日志路径与选区类型无关。
+        .stdout(std::process::Stdio::null());
+    command
 }
 
 /// 超限提示：stderr 恒写；桌面通知受 notify_enabled 门控（P1-4，无通知服务时静默）
@@ -129,12 +119,10 @@ pub fn store_from_stdin() -> Result<()> {
             Err(broken) => {
                 // 非 UTF-8 且不是受支持的图片 magic：不在文本语义里硬塞，
                 // 只记录并交给 stderr 排障（下方再按图片 MIME 探测一次）
-                let raw = broken.as_bytes();
-                let head = String::from_utf8_lossy(&raw[..raw.len().min(64)])
-                    .chars()
-                    .take(32)
-                    .collect::<String>();
-                eprintln!("[niri-clip store] non-utf8 payload ignored ({head:?}…)");
+                eprintln!(
+                    "[niri-clip store] non-utf8 payload ({} bytes)",
+                    broken.as_bytes().len()
+                );
             }
         }
     }
@@ -274,7 +262,7 @@ fn capture_image_if_enabled() -> Result<bool> {
 /// v0.4.1 主模式：事件驱动外部源。capture_primary 时额外拉起一路
 /// PRIMARY selection 监视（任务 1.1）——划选文本也入库。
 async fn run_watch(timeout_secs: u64, capture_primary: bool) -> Result<()> {
-    let exe = std::env::current_exe()?.to_string_lossy().to_string();
+    let exe = std::env::current_exe()?;
     println!(
         "[niri-clip daemon] event-driven source: wl-paste --watch (per-capture timeout {timeout_secs}s)"
     );
@@ -282,11 +270,16 @@ async fn run_watch(timeout_secs: u64, capture_primary: bool) -> Result<()> {
         crate::notify::send("守护进程已启动 (event)");
     }
 
-    let exe_path = std::path::Path::new(&exe);
-    let mut clip_watcher = spawn_watch(exe_path, timeout_secs, false)?;
+    let mut clip_watcher = watch_command(&exe, timeout_secs, false)
+        .spawn()
+        .context("spawn clipboard watcher")?;
     let mut primary_watcher = if capture_primary {
         println!("[niri-clip daemon] also watching PRIMARY selection (capture_primary=true)");
-        Some(spawn_watch(exe_path, timeout_secs, true)?)
+        Some(
+            watch_command(&exe, timeout_secs, true)
+                .spawn()
+                .context("spawn primary watcher")?,
+        )
     } else {
         None
     };
@@ -464,35 +457,35 @@ mod tests {
 
     #[test]
     fn watch_command_bounds_each_capture_with_timeout() {
-        use std::path::Path;
-        let cmd = watch_shell_command(Path::new("/usr/bin/niri-clip"), 7);
-        assert_eq!(cmd, "exec timeout 7s /usr/bin/niri-clip store");
-        assert!(
-            cmd.starts_with("exec timeout ") && cmd.contains("s /usr/bin"),
-            "每次捕获必须被 timeout 划界"
+        let exe = std::path::Path::new("/opt/my tools/niri-clip");
+        let cmd = watch_command(exe, 7, false);
+        assert_eq!(
+            cmd.as_std().get_args().collect::<Vec<_>>(),
+            [
+                "--watch",
+                "timeout",
+                "7s",
+                "/opt/my tools/niri-clip",
+                "store"
+            ]
         );
-        // 路径含空格时依赖 display 的字面量——shell 层由外层 sh -c 整体接收，
-        // 这里只锁定格式契约
-        let spaced = watch_shell_command(Path::new("/opt/my tools/niri-clip"), 2);
-        assert_eq!(spaced, "exec timeout 2s /opt/my tools/niri-clip store");
     }
 
     #[test]
-    fn primary_watch_adds_selection_flag() {
-        use std::path::Path;
-        let exe = Path::new("/usr/bin/niri-clip");
-        let plain = wl_paste_watch_args(exe, 5, false);
-        let primary = wl_paste_watch_args(exe, 5, true);
-        assert!(!plain.contains(&"--primary".to_string()));
-        assert!(primary.contains(&"--primary".to_string()));
-        // PRIMARY watcher 的每次捕获同样被 timeout 划界
-        assert!(primary.last().unwrap().contains("timeout 5s"));
-        // 除 --primary 外两路参数完全一致
-        let mut a = plain.clone();
-        let mut b = primary.clone();
-        a.retain(|x| x != "--primary");
-        b.retain(|x| x != "--primary");
-        assert_eq!(a, b);
+    fn primary_flag_precedes_the_watch_command() {
+        let exe = std::path::Path::new("/usr/bin/niri-clip");
+        let cmd = watch_command(exe, 5, true);
+        assert_eq!(
+            cmd.as_std().get_args().collect::<Vec<_>>(),
+            [
+                "--primary",
+                "--watch",
+                "timeout",
+                "5s",
+                "/usr/bin/niri-clip",
+                "store"
+            ]
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # niri-clip 长期开发路线图
 
-> 基准日期：2026-10-21 · 当前版本：v0.7.0
+> 更新日期：2026-11-21 · 工作区版本：v0.7.0
 > 时间估算假设：单人维护者，每周 8–12 有效工时；所有时间节点为**相对量**，按实际投入动态校准。
 > 实测数值（依赖闭包/编译时间/基准）的唯一真相源为 `ARCHITECTURE.md` §9，本文不重复记数。
 
@@ -8,37 +8,24 @@
 
 ## 一、项目定位与总目标
 
-**niri-clip** 是为 niri 合成器打造的全新、高性能、开箱即用的 Wayland 剪贴板历史管理器（独立实现，非 cliphist 包装）。
+niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和预览。采集采用事件驱动，选择器按需启动。CLI 可独立安装，原生窗口为可选组件。
 
-**产品原则（所有阶段任务的准入门槛）：**
+### 开销预算
 
-1. **高性能**：常驻 <40MB、10k 条搜索 <50ms，指标进基准门禁
-2. **低开销**：二进制小、编译快、依赖少——新增依赖必须过审计（用途唯一、无重传递依赖）
-3. **快速**：捕获零空闲、TUI 秒开、删除/固定光标不跳
-4. **简洁**：一个二进制、一个 SQLite 文件、一个 systemd 单元，无隐藏状态
-5. **功能够用**：以"剪贴板历史管理"为边界，宁缺毋滥；非目标见下
-
-**非目标（明确不做，防 scope creep）：**
-- 不做云同步/网络服务（v2.0 也仅限加密导出 + 文件同步）
-- 不做自建 GUI 框架前端（layer-shell 原生 UI 仅限调研立项）
-- 不做 cliphist 运行时兼容（仅 `migrate` 一次性导入）
-- 不做插件系统（`export --json` 输出即是扩展点）
-
-**开销预算（跟踪项，随 CI 基准更新）：**
-
-> 口径原则：**本表只记"预算与是否达标"，实测数值的唯一真相源是
-> ARCHITECTURE §9**。此前两处各自记数，导致同一轮审计出现两套数字
-> （112/108、250/247…），本轮收敛为单一出处。
-
-| 指标 | 预算 | 状态 |
+| 指标 | 目标 | 当前状态 |
 |---|---|---|
-| 常驻内存 | <40MB | 达标（~40MB） |
-| 10k 条 list | <11ms | 达标 |
-| 10k 条 FTS 搜索 | <50ms | 达标（实测 0.16ms，`fts_search_300_of_10k`，trigram；CI 预算断言已纳入） |
-| release 编译时间 | <120s（`--locked`；2026-09-01 重估，原 <60s 定于依赖树远小的早期） | 达标 |
-| 依赖闭包 | 新增依赖须过审计（用途唯一、无重传递依赖）；`cargo tree` 口径见 ARCHITECTURE §9 | 达标（CLI 100 / core 83 / GUI 204 / workspace 222） |
-| 后端载入窗口 | **两后端一致 300**（`store::MENU_LIMIT`；GUI 短查询走 LIKE 全库回退，故无功能损失） | 达标（2.6 已统一） |
+| 空闲常驻进程 | 合计 RSS <40 MB | 嵌套 niri 已复测，含 daemon 和监听进程 |
+| 一万条历史中取 300 条 | <11 ms | 达标 |
+| 一万条历史中 FTS 排序取 300 条 | <50 ms | 达标 |
+| CLI release 编译 | <120 s | 历史测量达标 |
+| 依赖 | 新增依赖审查用途与闭包 | 本轮沿用已有库 |
+| 菜单载入 | 最多 300 条 | 两种前端共用 `store::MENU_LIMIT` |
 
+复现命令及测量环境见[架构 §9](ARCHITECTURE.md#performance)。
+
+### 范围
+
+本地历史、备份与一次性 cliphist 导入属于项目范围。云同步、自建 GUI 框架及插件系统在当前版本的范围外。
 
 **最终交付形态（v1.0 定义）：**
 - `paru -S niri-clip` → `Mod+V` 开箱即用，零手工配置
@@ -52,11 +39,11 @@
 
 | 层 | 技术 | 状态 |
 |---|---|---|
-| 语言/运行时 | Rust 1.75+ / Tokio | ✅ 定型 |
+| 语言/运行时 | Rust stable / Tokio 单线程 daemon | ✅ 定型 |
 | Wayland | wl-paste --watch 事件驱动 + wl-clipboard-rs 兜底 | ✅ 定型 |
 | 存储 | rusqlite + SQLite WAL，`user_version` 版本化迁移 | ✅ 定型（FTS5 trigram 已启用，ADR-002） |
 | TUI | fzf ≥0.71 `--track --id-nth`，fuzzel 自动回退 | ✅ 定型 |
-| 预览 | chafa / kitty icat | ✅ 定型 |
+| 预览 | 原生图片控件 / 终端 chafa | ✅ 定型 |
 | 打包 | PKGBUILD + systemd user 单元 | ✅ 定型 |
 
 ---
@@ -114,9 +101,9 @@
 | 1.3 | ✅ 图片磁盘配额 GC | `store::gc_images`：`max_image_total_bytes`（默认 200 MiB，0 不限）超限按 ts LRU 整行淘汰（行删文件也删），星标/当前项受保护；daemon 启动随孤儿清扫执行；单测覆盖淘汰顺序与保护语义 | GC 后预览不串图（按 id 关联，v0.4 已保障） |
 | 1.4 | ✅ `notify_enabled` 开关 | 桌面通知可关——已核实 config/daemon/tui/gui 全链路门控（false 完全静默），`config.toml.example` 与 README 已同步 | 配置生效（已过） |
 | 1.5 | ✅ 星标删除二段确认（fzf 内嵌，去 fuzzel 依赖） | 两次 Ctrl-X：首次挂起（state/pending_delete，15s TTL 防分心误删），list-raw reload 打 "◆ 再按Ctrl-X确认删除" 行内标记，同行再按真删；`delete --fzf` 旗标承载，原 fuzzel 路径保留；二段确认全流程单测（GUI 内嵌确认见 5.3.3） | 删除误操作率归零（单测锁定挂起/确认/过期语义） |
-| 1.6 | ✅ criterion 基准进 CI | `crates/niri-clip-core/benches/store.rs`（list_300_of_10k ≈0.95ms / sqlite_select_300_of_10k ≈0.47ms，见 ARCHITECTURE）；CI 第 6 道 bench 工序：bencher 格式输出 + 绝对预算断言（11ms / 4ms），超限即红 | CI 输出耗时，回归 >20% 报警（绝对阈值先行） |
+| 1.6 | ✅ Criterion 查询基准 | 列表、复用 SQLite 连接的读取和全文排序共用一万条合成数据，CI 验证三个耗时上限 | CI 输出每项结果并按预算判定，命令见[架构 §9](ARCHITECTURE.md#performance) |
 | 1.7 | ✅ man page + shell 补全 | `niri-clip man` / `niri-clip completions <shell>`（clap_mangen/clap_complete，闭包 +3 crate）；PKGBUILD 由二进制自生成安装到 man1 与 bash/zsh/fish 补全路径 | PKGBUILD 安装路径正确（本地验证输出） |
-| 1.8 | ✅ 依赖与构建开销审计 | `cargo tree -e normal` 全量口径（ARCHITECTURE §9）：CLI 主包 171 / GUI 300 / workspace 322；大头 notify-rust→zbus 86（CLI 最大单项）、wl-clipboard-rs 44、iced 258（仅 GUI）；iced `image`→`image-without-codecs` + 直接依赖 image 收窄 png/jpeg/webp（28 包出闭包，GUI 363→300）；PKGBUILD 已确认 `--locked`；release 编译实测主包 96s / GUI 增量 123s，**超 <60s 预算**列入决策项 | 审计结论记入 ARCHITECTURE §9；编译时间进开销预算表（已同步） |
+| 1.8 | ✅ 依赖与构建开销审计 | CLI 与原生窗口分包，iced 仅启用所需后端，图片解码限制为 PNG、JPEG、WebP。发布构建锁定 Cargo.lock | 已记录依赖统计方法、二进制大小和冷构建基线，见[架构 §9](ARCHITECTURE.md#performance) |
 
 **技术要点：** fzf `--expect` 组合键；criterion + CI artifact 对比。
 **时间节点：** 约 2–3 周；里程碑 **M1 = v0.5.0 tag + AUR 更新**。
@@ -131,13 +118,13 @@
 
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
-| 2.1 | ✅ FTS5 全文搜索 | `user_version` v2→3：clips_fts 外部内容表 + 三触发器同步 + 存量回填；tokenizer 选型 **trigram**（中文子串可用，推翻 unicode61 起步计划，见 ADR-002）；`store::search`（MATCH + bm25，<3 字符 LIKE 回退）；GUI 全库搜索接 MATCH（后台线程 + (query,gen) 新鲜度缓存）、CLI `search` 子命令；fzf TUI 内嵌过滤保持 fzf 自身模糊匹配（300 行窗口） | 10k 条中英文搜索 <50ms（实测 0.16ms）；旧库升级无损（单测锁定） |
+| 2.1 | ✅ FTS5 全文搜索 | `user_version` v2→3：clips_fts 外部内容表 + 三触发器同步 + 存量回填；tokenizer 选型 **trigram**（中文子串可用，推翻 unicode61 起步计划，见 ADR-002）；`store::search`（MATCH + bm25，<3 字符 LIKE 回退）；GUI 全库搜索接 MATCH（后台线程 + (query,gen) 新鲜度缓存）、CLI `search` 子命令；fzf TUI 内嵌过滤保持 fzf 自身模糊匹配（300 行窗口） | 10k 条中英文搜索 <50ms（见 ARCHITECTURE §9）；旧库升级无损（单测锁定） |
 | 2.2 | ✅ 文本 hash 统一为 blake3 | DefaultHasher 跨编译器/进程不稳定，**v1.0 硬前置**（ADR-003）：`user_version` v3→4 全表重算 blake3，迁移事务（BEGIN IMMEDIATE + 事务内重读版本防双进程竞态）内合并重复（幸存行 = ts 最大，pinned 取 OR，image_path 继承）；迁移前 `VACUUM INTO` 快照（`state/db.sqlite.pre-blake3`，快照失败即放弃迁移），迁移后重映射 ▶ 指针；图片 `img:` FNV 指纹不动 | 迁移前后条目数只减不增（单测锁定，含幂等/FTS 同步/指针重映射）；跨重启/跨机器去重稳定；blake3 闭包 +3 crate 过开销审计（ARCHITECTURE §9） |
 | 2.3 | ✅ 数据统计与维护命令 | `niri-clip stats`（条数/体积/图片占比；库 = db+wal、图片 = images/ 磁盘实测双口径，-shm 瞬态内存不计）、`vacuum`（VACUUM + WAL 截断，返回前后体积）、`prune --before <YYYY-MM-DD>`（本地日历日零点切分；星标/当前项受保护同 1.3；--dry-run 预览；BEGIN IMMEDIATE 防并发失真） | 用户可自助管理磁盘占用（5 个单测 + 真机冒烟） |
 | 2.4 | ✅ 历史导出/备份 | `export <file\|->` 全量导出 NDJSON（首行 header + 每行一条目，图片内嵌 base64 自包含，ts ASC 稳定排序可 diff，文件 0600）；`--sqlite` 附 `VACUUM INTO` 物理快照（已存在拒绝覆盖）；`import [--dry-run]` 回灌：hash 幂等（已存在跳过不刷 ts/▶ 指针）、逐条重算 hash 完整性校验（损坏跳过警告）、单事务原子提交、保留原 ts/pinned、结束 enforce_max_items。格式为 Phase 5 插件化扩展点，选型见 ADR-004 | 备份可回灌（7 个单测锁定往返/幂等/ts/损坏拦截/裁剪/schema/快照 + 真机冒烟） |
 | 2.5 | ✅ 大库长稳测试 | `crates/niri-clip-core/tests/large_db.rs`：100k 条规模下写入 / 查询 / 并发 / 维护 / 迁移五段自动化，每段自带条目数与内容断言；迁移段照 `migrate.rs` 的 v1/v2/v3 步骤**自建 v3 旧库**（含重复行与星标继承），覆盖外壳脚本做不到的那部分。默认 `#[ignore]`，规模可由 `NIRI_CLIP_STRESS_N` 覆盖。实测数值见 ARCHITECTURE §9 | 无锁死、无数据丢失、内存平稳 —— 三项均已断言并本机 100k 实测通过 |
 | 2.6 | ✅ 工程收敛（v0.6 前置） | 全项目体检：结构冗余 / 文档失真 / 标准性三类共 38 项（含执行中新发现的 2 个 P0 代码缺陷），**零遗留**收尾——对外契约断链修复（AUR 服务单元路径、`cargo publish` 依赖 version）、删除确认三套实现收敛为 core 单一 15s TTL 状态机、`tui` 模块移出 core 恢复自定分层、依赖计数口径修正、文档失效机制写入 AGENTS.md | 38 项逐项有落地结果（修复 / 删除 / 明确驳回三者之一）；文档与代码零冲突；`docs/` 内无指向已删文档的引用；同语义只剩一处实现（`confirm` / `single_instance` / `render_row` / `preview_multiline` / `upsert_clip`）；门禁 fmt + clippy(`-D warnings`) + 71 测试全过 |
-| 2.7 | ✅ 列表排序走索引（2.5 暴露） | `list()` 原以表达式 `(hash = ?2) DESC` 作排序首键（把 ▶ 当前项顶到第 1 行），SQLite 据此无法按索引有序扫描——100500 行库 `EXPLAIN QUERY PLAN` 实测 `SCAN clips + USE TEMP B-TREE FOR ORDER BY`，10k→100k 耗时 0.95ms→108ms（114×，远超数据量增长的 10×）。修法：当前项单独点查（`WHERE hash = ?2`，走 idx_hash）后与"其余按 pinned/ts 排序取 N 条"拼接；并新增 idx_ts（ts DESC, id DESC，schema v4→v5）使 `pinned_on_top=false` 分支同样有序扫描。**默认 `max_items = 750` 下库不可能这么大，真实用户本不触发**，属防御性修复 | 100k 下 `list(300)` 回到与 10k 同阶（不再随规模超线性增长）；实测数值记入 ARCHITECTURE §9 |
+| 2.7 | ✅ 列表排序走索引（2.5 暴露） | `list()` 原以表达式 `(hash = ?2) DESC` 作排序首键（把 ▶ 当前项顶到第 1 行），SQLite 据此无法按索引有序扫描——100500 行库 `EXPLAIN QUERY PLAN` 实测 `SCAN clips + USE TEMP B-TREE FOR ORDER BY`。修法：当前项单独点查（`WHERE hash = ?2`，走 idx_hash）后与"其余按 pinned/ts 排序取 N 条"拼接；并新增 idx_ts（ts DESC, id DESC，schema v4→v5）使 `pinned_on_top=false` 分支同样有序扫描。**默认 `max_items = 750` 下库不可能这么大，真实用户本不触发**，属防御性修复 | 100k 下 `list(300)` 回到与 10k 同阶（不再随规模超线性增长）；实测数值记入 ARCHITECTURE §9 |
 
 **技术要点：** tokenizer 选型已由 ADR-002 定为 **trigram**（原"unicode61 起步"计划已推翻——它对中文子串不可用）；迁移脚本幂等可回滚。
 **时间节点：** 里程碑 **M2 = v0.6.0** ✅（2026-09-12 发布，含 2.5 长稳与 2.6 工程收敛，一并收尾）。
@@ -157,10 +144,10 @@
 | 3.2 | ✅ 通知脱敏 | 审计确认全部 `notify::send` 调用点（daemon 超限提示 / GUI 失败提示 / TUI 环境提示）均只发状态文案、配置数字与条目 ID，**无一处携带条目明文**。交付为结构不变式：`notify.rs` 文档声明 body 只允许非内容信息 + `tests/notify_redaction.rs` 端到端锁定（假 notify-send 捕获真实通知：超限分支只报限额数字不回显载荷，正常捕获零通知）。**被否方案**：引入"粘贴成功 + 截断预览"式通知——纯通知噪音，与轻量化诉求相悖 | 通知不泄露明文（端到端测试锁定，新增调用点若格式化条目内容即红） |
 | 3.3 | ✅ 敏感条目快速清除 | `wipe --sensitive`：清除命中 `ignore_regex` 的存量条目（"敏感"与捕获过滤同一把尺子——命中者本不该落盘，库存即泄漏；**含星标**，否则密码类条目被星标后留存时长无法清零；正则编译失败报错而非静默删 0；`--dry-run` 预览）。`delete-current` 子命令 + fzf TUI `Ctrl-D`：一把删除 ▶ 当前项（最后复制的内容），无需定位选中行；确认语义走 `core::confirm`（星标二段确认，ADR-005） | 审计：密码类条目留存时长可人为清零（端到端测试：弱规则期入库 → 强化规则 → 清除） |
 | 3.4 | ✅ 加密存储 PoC（调研） | 实测三路线：**按条目 AEAD**（chacha20poly1305+argon2，闭包 +6，2.5µs/条，密文 +16B）、age（闭包 +109@i18n 栈，慢 24×，拒）、SQLCipher（+69s openssl 构建链、与 bundled 互斥、拒）。核心矛盾：FTS 索引是明文投影，加密必须同时回答搜索——按条目方案加密条目排除 FTS、线性解密扫描（750 条 ≈1.7ms）。**结论（ADR-006）：v2.0 落地，方案=按条目 AEAD，opt-in 默认关**；密钥两档（state/secret.key 0600 / passphrase argon2id 22ms）；本轮不写实现 | PoC 结论文档化（ADR-006），决定 v2.0 落地方案 ✅ |
-| 3.5 | ✅ 安全审计自查 | 审计全过：文件权限（db/图片/export/迁移快照全覆盖 0600/0700；flock 与 pending_delete 两非敏感文件走默认权限，父目录 0700 已阻断）+ 日志脱敏（55 处调用点零条目明文，与 3.2 守卫互证）。systemd 沙箱：service 新增 22 项指令，离线评分 9.4 UNSAFE → **1.9 OK**、真机运行中单元 **1.6 OK**（drop-in 实测沙箱内捕获链路正常）；`StateDirectory=`（自动建目录 + 跟随自定义 XDG_STATE_HOME，要求 systemd ≥248）；`IPAddressDeny` 经真机实测 user manager 下不生效已弃用（网络防线 = seccomp 层 AF_UNIX 白名单）；`PrivateUsers`/`MemoryDenyWriteExecute` 留强化档不开（wayland SO_PEERCRED uid 校验风险）。清单归档 `docs/SECURITY-AUDIT.md` | `systemd-analyze security` 评分改善 ✅（9.4→1.9/实机 1.6）；检查项清单归档 ✅ |
+| 3.5 | ✅ 安全审计自查 | 审计全过：文件权限（db/图片/export/迁移快照全覆盖 0600/0700；flock 与 pending_delete 两非敏感文件走默认权限，父目录 0700 已阻断）+ 日志脱敏（复核结论与回归测试见 SECURITY-AUDIT §②）。systemd 沙箱：service 新增 22 项指令，离线评分 9.4 UNSAFE → **1.9 OK**、真机运行中单元 **1.6 OK**（drop-in 实测沙箱内捕获链路正常）；`StateDirectory=`（自动建目录 + 跟随自定义 XDG_STATE_HOME，要求 systemd ≥248）；`IPAddressDeny` 经真机实测 user manager 下不生效已弃用（网络防线 = seccomp 层 AF_UNIX 白名单）；`PrivateUsers`/`MemoryDenyWriteExecute` 留强化档不开（wayland SO_PEERCRED uid 校验风险）。清单归档 `docs/SECURITY-AUDIT.md` | `systemd-analyze security` 评分改善 ✅（9.4→1.9/实机 1.6）；检查项清单归档 ✅ |
 
 **技术要点：** age 加密对 SQLite 的透明层代价高，优先评估按条目加密（敏感类单独加密表）；systemd 沙箱指令零成本优先落地。
-**时间节点：** 里程碑 **M3 = v0.7.0 安全版本** ✅（2026-10-06 发布）。
+**时间节点：** 里程碑 **M3 = v0.7.0 安全版本** ✅（2026-10-06 版本定版）。
 
 ---
 
@@ -172,11 +159,11 @@
 
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
-| 4.1 | 🟡 图片剪贴板完整支持 | `store` 改为按 magic 判定 png/jpeg/webp 并从 stdin 单次读取入库（`wl-paste` 的 `--type` 是单值，显式 text 会让纯图片剪贴板不触发 watcher；不指定类型时上游按"任意类型"兜底，故管道里可能是图片字节）；超文本限额的截图沿同一 stdin 续读到 `max_image_bytes`，不再丢弃后二次读剪贴板。预览/重粘贴路径复用既有实现 | 自动：`tests/image_pipeline.rs` 6 项端到端全过（三格式字节往返、>1 MiB 不截断、超限拒绝、去重、缺 chafa 提示、开关可关）。**手动：真机 niri 会话内截图 → Mod+V 预览 → 重粘贴 待复验** |
+| 4.1 | 🟡 图片剪贴板 | PNG、JPEG、WebP 从 stdin 识别并入库，GUI 预览，复制原始字节 | 集成测试覆盖三格式、去重与限额。嵌套 niri 已验证图片捕获、GUI 预览及复制回读，另验证 PRIMARY 文本。待用户在日常 niri 会话验收截图和重粘贴 |
 | 4.2 | AUR 三包齐备 | `niri-clip`（release）、`niri-clip-git`、`niri-clip-bin`（预编译）。**决策（2026-08-28）：AUR 首次发布随 epic（原生 UI）合并后的首个版本一起**；主包构建 `-p niri-clip`（不含 gui 依赖链，makedepends 不需要 libxkbcommon），`niri-clip-gui` 待 M5.4 单独分包；`sqlite` 非运行依赖（rusqlite bundled）已移除 | 三包 CI 自动 bump + 安装冒烟 |
 | 4.3 | crates.io 发布 | `cargo publish`，检查 package metadata 完整 | `cargo install niri-clip` 可用 |
 | 4.4 | waybar 模块 | JSON 输出（历史条数/最新条目/daemon 状态），`niri-clip waybar` | waybar wiki 配置示例可用 |
-| 4.5 | 文档完善 | man page 终稿、README 截图/GIF、ARCHITECTURE 同步、CHANGELOG 规范化（Keep a Changelog） | 外部用户仅凭文档可完成安装到使用 |
+| 4.5 | 🟡 文档完善 | README 已整理安装、快捷键、数据位置并附合成数据实图。架构文档已更新性能口径，Unreleased 已按变更类型整理 | 待校对 man 页，并由新用户从源码安装到首次复制 |
 | 4.6 | CI 深化 | 增加：release 自动打包（GitHub Releases + SHA256）、AUR 机器人、benchmark 趋势 | tag 即全渠道发布，人工只做审核 |
 | 4.7 | 兼容性矩阵验证 | fzf 版本门控（<0.71 回退 fuzzel）、主流终端（foot/alacritty/kitty）、niri 最新 stable | 矩阵清单归档并勾验 |
 | 4.8 | 版本语义承诺 | 发布 v1.0.0，宣布 SemVer + 配置格式向后兼容承诺 | CHANGELOG 声明 |
@@ -192,7 +179,7 @@
 
 | 候选项 | 说明 | 前置 |
 |---|---|---|
-| **原生 UI 后续（核心已交付，收尾项见下）** | 消除终端冷启动瓶颈的彻底解。**已交付**：M5.1 选型 ADR-001（含修订 1：layer-shell → 常规 xdg 窗口 + tiny-skia 软渲染）→ M5.2 MVP → M5.3 语义对齐 → M5.4.1 后端选择接入，`crates/niri-clip-gui` 随 v0.5.x 发布。**剩余收尾**：① 窗口启动延迟真机实测（目标 ≤50ms，记入开销预算表）② 兼容矩阵（niri stable / sway）③ 随 minor 的文档与 CHANGELOG 补齐。原立项详案 `docs/NATIVE-UI.md` 已于本轮删除（内容已全部收敛至此表与 ADR-001） | 无（`niri-clip-core` 下沉早于 Phase 1 完成） |
+| **原生 UI 后续** | 已交付原生窗口、操作语义和后端选择，选型见 [ADR-001](ADR-001.md)。下一项为日常桌面按键到窗口可交互的延迟，目标 ≤50 ms。嵌套 niri 的窗口映射基线见[架构 §9](ARCHITECTURE.md#performance)。其余验收包括 niri stable / sway 兼容性和各次 minor 发布的文档核对 | 依赖的 `niri-clip-core` 已交付 |
 | OSC52 远程剪贴板 | SSH/终端场景同步历史 | 1.1（selection 抽象） |
 | 历史内容动作插件化 | 自定义 action（URL 直接打开等） | 2.4 导出格式稳定 |
 | 多选批量删除（TUI/GUI） | fzf `--multi` + GUI 多选；同类均有（clipse 多选、cliphist 2025 已支持多行 delete），批量清理大历史的刚需 | 无 |
@@ -269,7 +256,7 @@
 | 风险 | 等级 | 应对 |
 |---|---|---|
 | fzf 上游破坏 `--track --id-nth` 行为 | 高 | 版本门控 + 兼容矩阵测试（4.7）；fuzzel 回退路径保持可用 |
-| FTS5 中文搜索效果不佳 | 低（已闭环） | 已由 ADR-002 定 **trigram**（中英文子串均命中，实测 0.16ms）；若未来需按词命中，换 tokenizer 须走 `user_version` 新迁移重建索引 |
+| FTS5 中文搜索效果不佳 | 低（已闭环） | 已由 ADR-002 定 **trigram**（中英文子串搜索，基准见 ARCHITECTURE §9）；若未来需按词命中，换 tokenizer 须走 `user_version` 新迁移重建索引 |
 | wl-clipboard-rs API 变更/停维护 | 中 | 锁定 Cargo.lock；事件驱动主路径已不依赖其轮询 |
 | blake3 全表重算迁移出错致数据翻倍/丢失 | 中 | 迁移事务内合并 + 条目数只减不增断言（2.2）；100k 长稳测试（2.5）；迁移前 VACUUM INTO 快照 |
 | 依赖蔓生拖慢编译、增大二进制 | 中 | 新增依赖过开销审计（1.8 ✅，基线见 ARCHITECTURE §9）；编译时间/依赖数进开销预算表跟踪（预算已重估为 <120s，当前达标） |

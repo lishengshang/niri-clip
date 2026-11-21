@@ -11,6 +11,7 @@ use niri_clip_core::{config::Config, store};
 use rusqlite::Connection;
 
 const SEED_ROWS: usize = 10_000;
+const FTS_QUERY: &str = "中英文";
 
 /// 每进程一次性搭建：临时 XDG 环境 + 10k 条种子数据。种子经公开入库 API
 /// 写入（与真实捕获路径同构，不复制 schema 内部细节，schema 演进不破坏基准）；
@@ -28,12 +29,16 @@ fn bench_env() -> &'static PathBuf {
 
         // 幂等：进程重启复用同名目录（pid 回绕）时跳过重播种
         if row_count() < SEED_ROWS as i64 {
-            let cfg = Config::load();
+            let cfg = Config {
+                max_items: SEED_ROWS,
+                ..Config::default()
+            };
             for i in 0..SEED_ROWS {
                 let text = format!("bench-entry-{i:05} 这是一段用于基准的中英文混合 payload text");
                 store::insert_with(text, None, &cfg).expect("seed insert");
             }
         }
+        assert_eq!(row_count(), SEED_ROWS as i64, "benchmark database size");
         root
     })
 }
@@ -48,12 +53,12 @@ fn row_count() -> i64 {
 /// 与 TUI/GUI 每次取数的真实开销同口径，对应预算表「10k 条 list」。
 fn bench_list(c: &mut Criterion) {
     bench_env();
-    store::list(300).expect("warmup");
+    assert_eq!(store::list(300).expect("warmup").len(), 300);
     c.bench_function("list_300_of_10k", |b| b.iter(|| store::list(300).unwrap()));
 }
 
 /// 裸 sqlite 查询：连接常开，隔离出纯查询+取行成本，对应预算表
-/// 「sqlite 查询」。SELECT * 对列集演进免疫（数值含全部列物化，偏保守）。
+/// 「sqlite 查询」。SQL 返回整行，Rust 端仅读取 id。
 fn bench_sqlite(c: &mut Criterion) {
     bench_env();
     let conn = Connection::open(Config::db_path()).unwrap();
@@ -74,9 +79,9 @@ fn bench_sqlite(c: &mut Criterion) {
 /// 「10k 条 FTS 搜索」< 50ms
 fn bench_fts_search(c: &mut Criterion) {
     bench_env();
-    store::search("基准中", 300).expect("warmup");
+    assert_eq!(store::search(FTS_QUERY, 300).expect("warmup").len(), 300);
     c.bench_function("fts_search_300_of_10k", |b| {
-        b.iter(|| store::search("基准中", 300).unwrap())
+        b.iter(|| store::search(FTS_QUERY, 300).unwrap())
     });
 }
 
