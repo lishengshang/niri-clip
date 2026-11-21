@@ -1,49 +1,26 @@
-//! 桌面通知 helper：notify-send 子进程（任务 1.8 决策项②，替换 notify-rust/zbus）。
-//!
-//! 取舍（详见 ARCHITECTURE §9）：实际 API 面仅需 summary/body，换子进程后
-//! CLI 主包闭包 -81 crate（zbus/zvariant D-Bus 栈出图）；代价是运行时依赖
-//! `notify-send`（libnotify 包），缺失时静默失败——与原 `let _ =` 吞错误
-//! 语义一致，且全部调用方均有 `notify_enabled` 门控。
-//!
-//! 后台线程 spawn + wait 收尸：调用方零阻塞（GUI 侧无 UI 冻结面）、
-//! daemon 长驻进程不留僵尸；通知为低频路径（超限/失败反馈等），
-//! 每条一线程成本可忽略。参数走数组不经 shell，无注入面；
-//! 经 coreutils timeout 5s 划界（见 send 文档）。
+//! 桌面通知使用 libnotify 的 `notify-send`，仅在调用方启用通知时执行。
 
 use std::process::Command;
 
-/// 发送桌面通知，summary 固定为 `niri-clip`。不阻塞、不报错：
-/// 无通知服务 / notify-send 缺失时静默。
+/// 发送状态、数量、大小或条目 ID。正文可能出现在锁屏上，调用方须省略剪贴板内容。
 ///
-/// **脱敏不变式（任务 3.2）**：body 只允许状态文案/数量/尺寸/条目 ID 等
-/// 非内容信息，**不得携带条目明文**——桌面通知会显示在锁屏与录屏里，
-/// 是比数据库更外泄的通道。该不变式由 `tests/notify_redaction.rs` 端到端
-/// 锁定（假 notify-send 捕获真实通知内容）；新增调用点时同样遵守。
-///
-/// 超时边界（ROADMAP 工程原则 1）：notify-send 经 coreutils `timeout 5s`
-/// 划界（与 capture_timeout_secs 默认一致）——D-Bus 会话总线异常时
-/// libnotify 默认超时可达 ~25s，不设界则最坏情况 daemon 内阻塞线程/
-/// 子进程无界堆积。
-///
-/// 后台线程 spawn + wait 收尸：调用方零阻塞（GUI 侧无 UI 冻结面）、
-/// daemon 长驻进程不留僵尸；通知为低频路径（超限/失败反馈等），
-/// 每条一线程成本可忽略。参数走数组不经 shell，无注入面。
-///
-/// notify-send 的 stderr 继承父进程：无通知服务时终端/journal 可见其
-/// 报错（可诊断性优于原 notify-rust 的完全静默），成功路径无输出。
+/// 返回前启动通知子进程，使短命 CLI 退出后仍可投递。后台线程负责回收，
+/// coreutils `timeout` 将等待限制在五秒内。通知程序继承 stderr 以便诊断。
 pub fn send(body: &str) {
-    let body = body.to_owned();
-    std::thread::spawn(move || {
-        let _ = Command::new("timeout")
-            .args([
-                "5",
-                "notify-send",
-                "--app-name=niri-clip",
-                "niri-clip",
-                &body,
-            ])
-            .status();
-    });
+    if let Ok(mut child) = Command::new("timeout")
+        .args([
+            "5",
+            "notify-send",
+            "--app-name=niri-clip",
+            "niri-clip",
+            body,
+        ])
+        .spawn()
+    {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 #[cfg(test)]

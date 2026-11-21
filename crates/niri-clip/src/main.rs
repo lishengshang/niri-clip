@@ -171,12 +171,14 @@ fn fmt_date(ms: i64) -> String {
         .unwrap_or_else(|| ms.to_string())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     use std::io::Write as _;
     let cli = Cli::parse();
     match cli.command {
-        Some(Commands::Daemon) => daemon::run().await?,
+        Some(Commands::Daemon) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?
+            .block_on(daemon::run())?,
         Some(Commands::Tui) => tui::run()?,
         Some(Commands::Store) => daemon::store_from_stdin()?,
         Some(Commands::InstallService) => {
