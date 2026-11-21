@@ -22,6 +22,9 @@ pub struct Config {
     pub tui_backend: String,
     #[serde(default = "default_true")]
     pub enable_preview: bool,
+    /// 关闭原生浮窗时保存位置，在同一 niri 输出上恢复。
+    #[serde(default = "default_true")]
+    pub remember_window_position: bool,
     /// v0.4.1：事件模式下每次捕获子进程的超时秒数（防止病态读挂起长期占用）
     #[serde(default = "default_capture_timeout")]
     pub capture_timeout_secs: u64,
@@ -125,6 +128,7 @@ impl Default for Config {
             pinned_on_top: defaults::PINNED_ON_TOP,
             tui_backend: defaults::TUI_BACKEND.to_string(),
             enable_preview: defaults::ENABLE_PREVIEW,
+            remember_window_position: true,
             capture_timeout_secs: defaults::CAPTURE_TIMEOUT_SECS,
             max_clip_bytes: defaults::MAX_CLIP_BYTES,
             max_image_bytes: defaults::MAX_IMAGE_BYTES,
@@ -448,6 +452,10 @@ mod tests {
         assert_eq!(from_serde.pinned_on_top, d.pinned_on_top);
         assert_eq!(from_serde.tui_backend, d.tui_backend);
         assert_eq!(from_serde.enable_preview, d.enable_preview);
+        assert_eq!(
+            from_serde.remember_window_position,
+            d.remember_window_position
+        );
         assert_eq!(from_serde.capture_timeout_secs, d.capture_timeout_secs);
         assert_eq!(from_serde.max_clip_bytes, d.max_clip_bytes);
         assert_eq!(from_serde.max_image_bytes, d.max_image_bytes);

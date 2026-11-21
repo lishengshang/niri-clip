@@ -35,6 +35,8 @@ cargo install --locked --path crates/niri-clip-gui   # 可选，原生窗口
 
 3. 复制一段文字，按 `Mod+V` 打开历史，用方向键选择，按 `Enter` 复制，再回到目标应用粘贴。遇到空列表或快捷键无响应时，运行 `niri-clip doctor` 检查守护进程、绑定和依赖。
 
+在 niri 中，把原生浮窗拖到顺手的位置后关闭。下次在同一显示器上打开时会恢复该位置，首次打开或换显示器时使用 niri 的窗口规则。设置 `remember_window_position = false` 可始终使用规则指定的位置。
+
 ## 搜索与预览
 
 ![原生窗口显示合成的中英文历史、固定条目和选中内容预览](assets/history-window.png)

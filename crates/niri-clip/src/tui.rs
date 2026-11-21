@@ -71,7 +71,7 @@ pub(crate) fn gui_binary() -> Option<std::path::PathBuf> {
 }
 
 /// 选择后端：
-/// - "native"：原生 layer-shell 窗口（niri-clip-gui 二进制），无终端依赖
+/// - "native"：原生 xdg 窗口（niri-clip-gui 二进制），无终端依赖
 /// - "fzf"：fzf 承载于终端（--track 不跳顶唯一现成解）
 /// - "fuzzel"：dmenu 兜底（无 TTY 需求）
 /// - "auto"：native 可用优先；其次 fzf；最后 fuzzel（fzf 版本地板在
@@ -148,7 +148,7 @@ pub fn run() -> Result<()> {
     let cfg = Config::load();
     let mut be = backend(&cfg);
 
-    // native：layer-shell 进程无需 TTY，直接拉起独立 GUI 后返回。
+    // native：xdg 窗口无需 TTY，直接拉起独立 GUI 后返回。
     // 二进制缺失时降级：显式 "native" → fzf/fuzzel；auto 已在此前选择过。
     if be == "native" {
         return match gui_binary() {

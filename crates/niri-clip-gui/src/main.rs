@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 mod image_cache;
 mod instance;
+mod position;
 mod search;
 mod theme;
 mod update;
@@ -51,9 +52,14 @@ enum Message {
     /// 全局键盘路由：仅处理导航/动作键，普通字符交给 widget
     Key(keyboard::Key, keyboard::Modifiers),
     /// 复制当前选中条目；Enter 复制后关闭窗口，Ctrl-Y 连续复制不退出
-    Copy { exit: bool },
+    Copy {
+        exit: bool,
+    },
     /// 后台复制完成
-    CopyFinished { exit: bool, ok: bool },
+    CopyFinished {
+        exit: bool,
+        ok: bool,
+    },
     /// 后台 pin/delete 完成，带回重拉后的列表（None = worker 异常，放弃）
     ListReloaded(Option<Vec<store::Clip>>),
     /// 删除/外部变更后的重载：与 ListReloaded 不同——不主动滚动（选中按
@@ -62,6 +68,7 @@ enum Message {
     /// 窗口重新聚焦：打开期间 daemon 可能捕获了新内容，重拉列表
     /// （走 DeleteReloaded 路径：不滚动，选中按 id 重定位）
     Refocus,
+    CloseRequested,
     /// 鼠标悬停行：跟随选中（高亮预览）
     Hover(usize),
     /// 鼠标真实移动（物理事件，仅订阅层派发）：恢复悬停跟随。
@@ -97,6 +104,7 @@ impl std::fmt::Debug for Message {
             Self::ListReloaded(_) => "ListReloaded",
             Self::DeleteReloaded(_) => "DeleteReloaded",
             Self::Refocus => "Refocus",
+            Self::CloseRequested => "CloseRequested",
             Self::Hover(_) => "Hover",
             Self::MouseMove => "MouseMove",
             Self::Pick(_) => "Pick",
@@ -198,6 +206,7 @@ fn compute_filtered(
 }
 
 struct App {
+    position: Option<position::PositionMemory>,
     search_id: iced::widget::Id,
     /// 行列表 scrollable 的 Id：键盘导航时 scroll_to 跟随选中
     list_id: iced::widget::Id,
@@ -258,13 +267,17 @@ struct App {
 impl App {
     fn new() -> Self {
         let cfg = config::Config::load();
+        let position = position::PositionMemory::open(cfg.remember_window_position);
         let clips = store::list(Self::load_limit()).unwrap_or_default();
-        Self::with_history(cfg, clips)
+        let mut app = Self::with_history(cfg, clips);
+        app.position = position;
+        app
     }
 
     fn with_history(cfg: config::Config, clips: Vec<store::Clip>) -> Self {
         let first_id = clips.first().map(|c| c.id);
         Self {
+            position: None,
             search_id: iced::widget::Id::unique(),
             list_id: iced::widget::Id::unique(),
             // 搜索默认关（fzf 语义：/ 才进入）：启动时不聚焦输入框，光标
@@ -433,6 +446,9 @@ impl App {
             // 重新聚焦即重拉列表：窗口开着的时候 daemon 照常捕获，
             // 不刷新则列表陈旧（看不到新条目、▶ 指针滞后）
             iced::Event::Window(iced::window::Event::Focused) => Some(Message::Refocus),
+            iced::Event::Window(iced::window::Event::CloseRequested) => {
+                Some(Message::CloseRequested)
+            }
             _ => None,
         })
     }
@@ -485,6 +501,7 @@ fn main() -> iced::Result {
     .window(iced::window::Settings {
         size: iced::Size::new(500.0, 675.0),
         resizable: true,
+        exit_on_close_request: false,
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: String::from("niri-clip-gui"),
             ..Default::default()

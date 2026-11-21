@@ -4,6 +4,7 @@
 
 ### Added
 
+- 原生浮窗在同一 niri 显示器上恢复上次关闭时的位置，可用 `remember_window_position` 关闭。
 - `niri-clip doctor` 检查配置、数据库、守护进程、niri 绑定和运行依赖。发现失败项时返回非零退出码。
 
 ### Changed
