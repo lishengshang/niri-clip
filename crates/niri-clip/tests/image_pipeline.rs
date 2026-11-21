@@ -128,6 +128,26 @@ impl Drop for Sandbox {
     }
 }
 
+#[test]
+fn watcher_mime_selection_is_independent_of_daemon_stdout() {
+    let sb = Sandbox::new("watch-output", "capture_primary = true");
+    write_exe(
+        &sb.root.join("fakebin/wl-paste"),
+        r#"#!/bin/sh
+selection=clipboard
+if [ "$1" = --primary ]; then selection=primary; fi
+if [ /dev/stdout -ef /dev/null ]; then
+    printf ok > "$FAKE_CAPTURE/$selection"
+fi
+"#,
+    );
+    let out = sb.run(&["daemon"], None);
+    assert!(out.status.success());
+    for selection in ["clipboard", "primary"] {
+        assert_eq!(fs::read(sb.capture.join(selection)).unwrap(), b"ok");
+    }
+}
+
 /// 构造带指定 magic 的图片载荷，尾部标记用于验证字节完整性
 fn payload(magic: &[u8], marker: &[u8], len: usize) -> Vec<u8> {
     let mut v = magic.to_vec();

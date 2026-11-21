@@ -133,3 +133,23 @@ fn text_stdin_still_captures_normally() {
 
     cleanup(&dir);
 }
+
+#[test]
+fn non_utf8_diagnostic_contains_only_the_size() {
+    let dir = sandbox("binary-log");
+    let marker = "sample-clipboard-marker";
+    let mut payload = marker.as_bytes().to_vec();
+    payload.push(0xff);
+    let mut child = store_cmd(&dir)
+        .env("WAYLAND_DISPLAY", dir.join("no-display"))
+        .env_remove("WAYLAND_SOCKET")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&payload).unwrap();
+    let stderr = String::from_utf8(child.wait_with_output().unwrap().stderr).unwrap();
+    assert!(stderr.contains(&format!("non-utf8 payload ({} bytes)", payload.len())));
+    assert!(!stderr.contains(marker));
+    cleanup(&dir);
+}
