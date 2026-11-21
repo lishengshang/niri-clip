@@ -15,6 +15,7 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::time::{Duration, Instant};
 
+mod executor;
 mod image_cache;
 mod instance;
 mod position;
@@ -121,8 +122,7 @@ fn vspace(h: f32) -> space::Space {
     space::Space::new().height(Length::Fixed(h))
 }
 
-/// 把阻塞任务丢到后台线程执行（iced 默认执行器为 thread-pool，
-/// Task::perform 的 future 里阻塞仅占一个 worker，UI 线程不受影响）。
+/// SQLite、复制和图片解码使用按需创建的阻塞线程，键盘事件订阅始终可运行。
 /// worker panic 时回传 `on_panic`——由调用方指定兜底消息，保证语义正确
 /// （Copy 任务 panic 必须走 CopyFinished{ok:false} 触发失败通知，而非被
 /// ListReloaded(None) 静默吞掉）。
@@ -133,10 +133,10 @@ fn run_bg<T, F>(
 ) -> Task<Message>
 where
     T: Send + 'static,
-    F: FnOnce() -> T + Send + std::panic::UnwindSafe + 'static,
+    F: FnOnce() -> T + Send + 'static,
 {
     Task::perform(
-        async move { std::panic::catch_unwind(f) },
+        async move { tokio::task::spawn_blocking(f).await },
         move |result| match result {
             Ok(v) => wrap(v),
             Err(_) => on_panic,
@@ -493,6 +493,7 @@ fn main() -> iced::Result {
         App::update,
         App::view,
     )
+    .executor::<executor::GuiExecutor>()
     .title("niri-clip")
     // 深色主题（光标/默认控件色）+ JetBrainsMono NF：符号字形齐全无 tofu
     .theme(theme_dark)
