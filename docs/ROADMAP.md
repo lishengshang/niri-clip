@@ -159,7 +159,7 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
-| 4.1 | 🟡 图片剪贴板 | PNG、JPEG、WebP 从 stdin 识别并入库，GUI 预览，复制原始字节 | 集成测试覆盖三格式、去重与限额。嵌套 niri 已验证图片捕获、GUI 预览及复制回读，另验证 PRIMARY 文本。待用户在日常 niri 会话验收截图和重粘贴 |
+| 4.1 | ✅ 图片剪贴板 | PNG、JPEG、WebP 从 stdin 识别并入库，GUI 预览，复制原始字节 | 集成测试覆盖三格式、去重与限额。日常 niri 会话已验证截图捕获、预览和重粘贴，复制前后 PNG 的 SHA-256 一致。嵌套 niri 另验证了 PRIMARY 文本 |
 | 4.2 | AUR 三包齐备 | `niri-clip`（release）、`niri-clip-git`、`niri-clip-bin`（预编译）。**决策（2026-08-28）：AUR 首次发布随 epic（原生 UI）合并后的首个版本一起**；主包构建 `-p niri-clip`（不含 gui 依赖链，makedepends 不需要 libxkbcommon），`niri-clip-gui` 待 M5.4 单独分包；`sqlite` 非运行依赖（rusqlite bundled）已移除 | 三包 CI 自动 bump + 安装冒烟 |
 | 4.3 | crates.io 发布 | `cargo publish`，检查 package metadata 完整 | `cargo install niri-clip` 可用 |
 | 4.4 | waybar 模块 | JSON 输出（历史条数/最新条目/daemon 状态），`niri-clip waybar` | waybar wiki 配置示例可用 |
@@ -179,7 +179,7 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 
 | 候选项 | 说明 | 前置 |
 |---|---|---|
-| **原生 UI 后续** | 已交付原生窗口、操作语义和后端选择，选型见 [ADR-001](ADR-001.md)。下一项为日常桌面按键到窗口可交互的延迟，目标 ≤50 ms。嵌套 niri 的窗口映射基线见[架构 §9](ARCHITECTURE.md#performance)。其余验收包括 niri stable / sway 兼容性和各次 minor 发布的文档核对 | 依赖的 `niri-clip-core` 已交付 |
+| **原生 UI 后续** | 已交付原生窗口、操作语义和后端选择，选型见 [ADR-001](ADR-001.md)。日常 niri 会话中，空库与满菜单的按键到搜索可输入延迟均超过 50 ms。下一步分段测量 CLI 启动、历史读取和原生窗口初始化。测量口径见[架构 §9](ARCHITECTURE.md#performance)。其余验收包括 niri stable / sway 兼容性和各次 minor 发布的文档核对 | 依赖的 `niri-clip-core` 已交付 |
 | OSC52 远程剪贴板 | SSH/终端场景同步历史 | 1.1（selection 抽象） |
 | 历史内容动作插件化 | 自定义 action（URL 直接打开等） | 2.4 导出格式稳定 |
 | 多选批量删除（TUI/GUI） | fzf `--multi` + GUI 多选；同类均有（clipse 多选、cliphist 2025 已支持多行 delete），批量清理大历史的刚需 | 无 |
