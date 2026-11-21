@@ -335,22 +335,25 @@ fn delete_rows_image_paths(
 /// 上限裁剪（文本/图片共用）。pub(crate)：import（backup.rs）结束后按当前
 /// 配置执行一次，与捕获路径同一上限语义。
 ///
-/// **对当前项的保护是隐式的**：这里只排除 `pinned`，不显式排除 `current` 指针
-/// 指向的行（写法与 `gc_images`/`prune_before` 不同）。这不是遗漏——当前项指针
-/// 只在捕获成功时刷新，而捕获同时会刷新该行 `ts`（新入库 INSERT，或去重时
-/// UPDATE ts），故当前项恒为最新 ts，不满足"按 ts 最旧优先淘汰"的前提。
-/// 该不变式由 `max_items_eviction_never_drops_the_current_item` 单测锁定；
-/// 若将来把"指针刷新"与"ts 更新"解耦，必须先把这里改成显式排除当前项。
+/// 取消固定会刷新排序时间，当前项因此可能比普通历史更旧。仅在需要裁剪时
+/// 读取当前项指针，避免按时间裁剪掉仍在剪贴板中的条目。
 pub(crate) fn enforce_max_items(conn: &Connection, max_items: usize) -> Result<()> {
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
     if count > max_items as i64 {
         let to_del = count - max_items as i64;
         // RETURNING 带出被淘汰条目的数据文件路径，行删文件也删（否则
         // images/ 只进不出，截图类负载下 state 目录会无限膨胀）
+        let cur = if max_items == 0 {
+            String::new()
+        } else {
+            current_hash().unwrap_or_default()
+        };
         let paths = delete_rows_image_paths(
             conn,
-            "DELETE FROM clips WHERE id IN (SELECT id FROM clips WHERE pinned=0 ORDER BY ts ASC LIMIT ?1) RETURNING image_path",
-            &[&to_del],
+            "DELETE FROM clips WHERE id IN (
+                 SELECT id FROM clips WHERE pinned=0 AND hash IS NOT ?2 ORDER BY ts ASC LIMIT ?1
+             ) RETURNING image_path",
+            &[&to_del, &cur],
         )?;
         for p in paths {
             let _ = std::fs::remove_file(p);
@@ -824,12 +827,26 @@ pub fn wipe_sensitive(dry_run: bool) -> Result<WipeOutcome> {
 
 pub fn toggle_pin(id: i64) -> Result<bool> {
     let conn = connect()?;
-    let cur: i64 = conn.query_row("SELECT pinned FROM clips WHERE id=?1", params![id], |r| {
-        r.get(0)
-    })?;
-    let new = if cur == 0 { 1 } else { 0 };
-    conn.execute("UPDATE clips SET pinned=?1 WHERE id=?2", params![new, id])?;
-    Ok(new == 1)
+    // 同一条 UPDATE 翻转状态并更新排序，避免并发时先读后写丢失一次切换。
+    // idx_pinned_ts 可直接取普通历史最新时间。同毫秒操作也要排到它前面。
+    let mut stmt = conn.prepare(
+        "UPDATE clips SET
+            ts = CASE WHEN pinned <> 0 THEN MAX(?2, NULLIF(COALESCE((
+                SELECT MAX(ts) FROM clips WHERE pinned = 0
+            ), 0), ?3) + 1) ELSE ts END,
+            pinned = (pinned = 0)
+         WHERE id = ?1
+         RETURNING pinned",
+    )?;
+    // NULLIF 让无法递增的时间戳触发 NOT NULL 约束，避免 SQLite 溢出时存入浮点数。
+    let mut rows = stmt.query(params![id, Utc::now().timestamp_millis(), i64::MAX])?;
+    let pinned = rows
+        .next()?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+        .get(0)?;
+    // 推进到 SQLITE_DONE，让隐式事务提交失败通过 Result 返回。
+    let _ = rows.next()?;
+    Ok(pinned)
 }
 
 pub fn is_pinned(id: i64) -> Result<bool> {

@@ -105,8 +105,10 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
 - **插入原子性**：SELECT 去重检查 + INSERT 包在 `BEGIN IMMEDIATE` 事务里。
   否则多进程并发（典型：fzf 选中旧条目 → wl-copy 写回 → daemon 同时捕获）
   双双通过检查后一方撞 UNIQUE 报错被静默吞掉
-- **上限裁剪**：超出 `max_items` 时删除最旧的非 pinned 条目（抽成
-  `enforce_max_items`，文本/图片共用）
+- **排序时间**：捕获和取消固定都会刷新 `ts`。取消固定使用 `idx_pinned_ts`
+  取得普通历史最新时间，在同一条 SQL 中翻转标记并写入更晚的时间。日期清理也按 `ts` 计算。
+- **上限裁剪**：超过正数容量上限时，`enforce_max_items` 保护固定条目与当前项，
+  其余条目按 `ts` 从旧到新删除。文本和图片共用该入口。
 - **菜单直查**：`list(min(max_items, MENU_LIMIT))`，MENU_LIMIT=300（2.6/D1 由
   `TUI_LIMIT` 更名：`tui` 移出 core 后该常量语义已是"菜单取数窗口"，与 UI 后端无关）。
   进程内缓存层已移除——fzf 每次 reload-sync spawn 全新 `list-raw` 进程，

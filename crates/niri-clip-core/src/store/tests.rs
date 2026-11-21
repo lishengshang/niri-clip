@@ -360,6 +360,45 @@ fn pin_orders_first_and_list_respects_limit() {
 }
 
 #[test]
+fn unpin_promotes_the_clip_to_the_front_of_ordinary_history() {
+    with_env(|_| {
+        for text in ["old item", "kept pin", "recent item", "current item"] {
+            insert(text.into(), None).unwrap();
+        }
+        let id_for = |text| find_id_by_hash(&hash_text(text)).unwrap().unwrap();
+        let (current, recent, kept_pin, old) = (
+            id_for("current item"),
+            id_for("recent item"),
+            id_for("kept pin"),
+            id_for("old item"),
+        );
+        let conn = connect().unwrap();
+        let newest_ts = Utc::now().timestamp_millis() + 60_000;
+        conn.execute("UPDATE clips SET ts = ?1", [newest_ts])
+            .unwrap();
+        conn.execute("UPDATE clips SET ts = 1 WHERE id = ?1", [old])
+            .unwrap();
+
+        assert!(toggle_pin(old).unwrap());
+        assert!(toggle_pin(kept_pin).unwrap());
+        let pinned_ts: i64 = conn
+            .query_row("SELECT ts FROM clips WHERE id = ?1", [old], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(pinned_ts, 1, "固定只改变固定状态");
+
+        assert!(!toggle_pin(old).unwrap());
+        let after = list(4).unwrap();
+        let ids: Vec<_> = after.iter().map(|clip| clip.id).collect();
+        assert_eq!(ids, [current, kept_pin, old, recent]);
+        assert!(!after[2].pinned);
+        assert_eq!(current_hash(), Some(hash_text("current item")));
+        assert!(toggle_pin(i64::MAX).is_err());
+    });
+}
+
+#[test]
 fn delete_and_wipe_remove_image_files() {
     with_env(|_| {
         clear_db();
@@ -1123,10 +1162,7 @@ fn export_sqlite_snapshot_roundtrip_and_no_overwrite() {
     });
 }
 
-/// D4：上限裁剪对当前项的保护是**隐式**的（只排除 pinned，不显式排除 current）。
-/// 它依赖不变式"当前项 ts 恒为最新"：指针只在捕获成功时刷新，而捕获同时刷新
-/// 该行 ts（新入库 INSERT / 去重 UPDATE）。本测试逐次插入并断言当前项始终存活
-/// ——若将来把指针刷新与 ts 更新解耦、或改动淘汰方向，这里会立刻变红。
+/// 降低容量时，当前项即使比刚取消固定的普通条目更旧也受保护。
 #[test]
 fn max_items_eviction_never_drops_the_current_item() {
     with_env(|_g| {
@@ -1155,5 +1191,15 @@ fn max_items_eviction_never_drops_the_current_item() {
                 .unwrap();
             assert!(total <= 3, "裁剪后条数不得超过 max_items：{total}");
         }
+
+        for clip in list(3).unwrap().into_iter().skip(1) {
+            assert!(toggle_pin(clip.id).unwrap());
+            assert!(!toggle_pin(clip.id).unwrap());
+        }
+        let current = current_hash().unwrap();
+        enforce_max_items(&connect().unwrap(), 2).unwrap();
+        let remaining = list(3).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].hash, current);
     });
 }
