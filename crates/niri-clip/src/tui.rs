@@ -153,6 +153,9 @@ pub fn run() -> Result<()> {
     if be == "native" {
         return match gui_binary() {
             Some(gui) => {
+                if niri_clip_core::gui_activation::show_existing() {
+                    return Ok(());
+                }
                 Command::new(&gui)
                     .spawn()
                     .with_context(|| format!("spawn {}", gui.display()))?;

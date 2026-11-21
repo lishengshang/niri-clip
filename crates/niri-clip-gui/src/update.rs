@@ -4,13 +4,17 @@
 use super::*;
 
 impl App {
-    fn close(&self) -> Task<Message> {
+    fn close(&mut self) -> Task<Message> {
         if let Some(memory) = &self.position {
             if let Err(e) = memory.save() {
                 eprintln!("[niri-clip gui] save window position: {e}");
             }
         }
-        iced::exit()
+        self.closing = true;
+        match self.warm_window {
+            Some(id) => iced::window::close(id),
+            None => iced::exit(),
+        }
     }
 
     pub(super) fn update(&mut self, message: Message) -> Task<Message> {
@@ -23,6 +27,9 @@ impl App {
         // 主体消息处理 + 选中图片的后台预解码派发（每条消息后检查一次：
         // 选中变了/解码完成都可能产生新的待解码目标，命中缓存则零开销）
         let task = self.handle_message(message);
+        if self.closing {
+            return task;
+        }
         // ▶ 指针刷新只能在消息路径做：view 会被光标闪烁拉动重绘（~2Hz），
         // 渲染路径上的同步 fs IO 造成与光标同节奏的周期性闪烁（真机实锤）
         self.refresh_cur();

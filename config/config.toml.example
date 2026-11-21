@@ -14,6 +14,8 @@ ignore_regex = '(?i)(\b(?:op|otpauth|bitwarden)[\w-]*://|\{REF:|\{TOTP\}|\{TIMEO
 tui_backend = "auto"
 # niri 原生浮窗在上次使用的显示器恢复关闭时的位置，false 始终采用窗口规则。
 remember_window_position = true
+# 原生窗口关闭后保留进程的秒数。0 立即退出，设为 30 可在短时间内快速重开。
+gui_idle_timeout_secs = 0
 preview_width = 100
 enable_preview = true
 # 捕获 PNG、JPEG、WebP。原生窗口显示缩略图，终端预览需要 chafa。
