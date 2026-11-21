@@ -4,6 +4,15 @@
 use super::*;
 
 impl App {
+    fn close(&self) -> Task<Message> {
+        if let Some(memory) = &self.position {
+            if let Err(e) = memory.save() {
+                eprintln!("[niri-clip gui] save window position: {e}");
+            }
+        }
+        iced::exit()
+    }
+
     pub(super) fn update(&mut self, message: Message) -> Task<Message> {
         if std::env::var_os("NIRI_CLIP_DEBUG").is_some() {
             eprintln!(
@@ -119,7 +128,7 @@ impl App {
                     // 后台复制已完成，wl-copy 守护进程持有数据，退出安全。
                     // 用 iced::exit() 而非 process::exit()：走正常析构，
                     // 释放 sqlite 连接 / 图片 Handle / iced 运行时（任务 2.6 / D3）
-                    return iced::exit();
+                    return self.close();
                 }
                 // Ctrl-Y 连续复制：重拉列表，▶ 已随 copy 刷新到刚复制的条目。
                 // selected_id 先记到旧列表第 1 行（复制目标），重载后由
@@ -169,6 +178,7 @@ impl App {
                 self.relocate_selected();
                 return self.scroll_to_selected();
             }
+            Message::CloseRequested => return self.close(),
             Message::Refocus => {
                 // 重新聚焦重拉：daemon 在窗口失焦期间捕获的新内容补进来。
                 // 不滚动、按 id 重定位——打开期间的浏览位置不受影响
@@ -220,7 +230,7 @@ impl App {
                     self.cancel_confirm();
                 } else {
                     // 同 CopyFinished：走正常析构（任务 2.6 / D3）
-                    return iced::exit();
+                    return self.close();
                 }
             }
             keyboard::Key::Named(keyboard::key::Named::Enter) => {
