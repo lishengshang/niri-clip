@@ -109,15 +109,11 @@ impl App {
                 .height(Length::Fixed(ROW_HEIGHT))
                 .padding([4, 10])
                 .style(move |_| container::Style {
-                    background: Some(Background::Color(if selected { SEL_BG } else { BG })),
+                    // 普通行共用窗口底色；实色高亮足够标出选中行，省去软件阴影。
+                    background: selected.then_some(Background::Color(SEL_BG)),
                     border: Border {
                         radius: RADIUS_ROW,
                         ..Default::default()
-                    },
-                    shadow: if selected {
-                        SHADOW_ROW
-                    } else {
-                        Shadow::default()
                     },
                     ..Default::default()
                 }),
