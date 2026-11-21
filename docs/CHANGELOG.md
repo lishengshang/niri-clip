@@ -3,32 +3,15 @@
 ## Unreleased
 
 ### Added
-- **`niri-clip doctor` 环境自检（任务 4.9）**：一次检查配置与数据库、daemon
-  flock、systemd 单元/自启/沙箱指令、niri `spawn-at-startup` 与快捷键绑定
-  （含一层 include 展开）、TUI 后端与 wl-clipboard/fzf/chafa/notify-send
-  依赖。逐项输出 `[ok]` / `[info]` / `[warn]` / `[fail]` 与修复提示，失败项
-  退出码非零，供安装脚本/CI 消费；用于 v1.0“全新环境 5 分钟接入”验收。
-  `Config::load_checked` 同步暴露配置解析错误（`load` 仍保持静默回退默认值），
-  避免 doctor 把损坏配置误报为“使用默认值”。
+
+- `niri-clip doctor` 检查配置、数据库、守护进程、niri 绑定和运行依赖。发现失败项时返回非零退出码。
 
 ### Changed
-- **图片捕获改为按 magic 从 stdin 直接入库（任务 4.1）**：`wl-paste` 的
-  `--type` 只能给一个值（上游 `wl-paste.c` 中 `case 't'` 直接覆盖
-  `explicit_type`），显式 `--type text` 会让"剪贴板只有图片"时 watcher 根本
-  不触发；不给 `--type` 时上游按 text → 任意 text → **任意类型**兜底，图片
-  于是以原始字节直灌 `store` 的 stdin，但**管道不带 MIME**。旧实现把非
-  UTF-8 载荷丢弃后回头再读一次剪贴板，第二次读到的未必是触发时那份内容，
-  且来源应用已退出即失败。现改为按文件头判定 png/jpeg/webp：先按
-  `max_clip_bytes` 读够判定所需的头，命中后沿同一 stdin 续读到
-  `max_image_bytes` 上限（内存上限仍是该分支自己的限额 +1），单次读取直接
-  入库；未识别格式仍走旧的剪贴板 MIME 探测。附带统一了图片入库的超限文案
-  与日志（`ingest_image` 是 stdin 与剪贴板两条入口的唯一落点）。
-  新增 `tests/image_pipeline.rs`（6 项端到端：三种格式的 store→copy 字节
-  往返、> 1 MiB 截图不被截断、超图片限额拒绝、去重、无 chafa 时预览提示、
-  关闭开关后不入库）；真机剪贴板路径仍需在 niri 会话内人工复验一次
+
+- `store` 直接识别 stdin 中的 PNG、JPEG、WebP，按图片限额读取。
 - 同步 CLI 命令直接执行，daemon 使用单线程 Tokio 运行时。
 - 原生窗口简化搜索栏和按键提示，区分空历史、查询中与无匹配。图片预览缓存等比缩略图，快速切换时一次解码一张。
-- 查询基准在计时前校验实际库存和返回行数。
+- 查询基准在计时前校验实际库存和返回行数。修正后的数据见[架构 §9](ARCHITECTURE.md#performance)。
 
 ### Fixed
 
@@ -57,9 +40,7 @@
   seccomp 错误（复现：`systemd-analyze security --offline=true
   assets/niri-clip.service`）。剩余扣分为结构性地板（wayland 必需 AF_UNIX、
   state 必须在 home 下）与强化档留白（`PrivateUsers` 有 wayland
-  SO_PEERCRED uid 校验风险，默认不开）。文件权限与日志脱敏审计全过（55
-  处日志调用点零条目明文，与 3.2 通知守卫互证），检查项清单归档
-  `docs/SECURITY-AUDIT.md`。**真机部署**：重装单元后 `daemon-reload` +
+  SO_PEERCRED uid 校验风险，默认不开）。文件权限与日志复核结果见 `docs/SECURITY-AUDIT.md`。**真机部署**：重装单元后 `daemon-reload` +
   restart 确认捕获/粘贴/通知链路正常
 
 ### Fixed
@@ -101,14 +82,7 @@
   端到端测试覆盖弱规则期入库 → 规则强化 → 清除的 3.3 目标场景
 
 ### Fixed
-- **大库 `list()` 查询退化（2.7，2.5 长稳暴露）**：排序首键原是表达式
-  `(hash = ?2) DESC`（把 ▶ 当前项顶到第 1 行），SQLite 无法按索引有序扫描，
-  100500 行库实测全表 SCAN + 完整排序，10k→100k 耗时 0.95ms→108ms（114×，
-  远超数据量增长）。修复：当前项单独点查（走 idx_hash）后与其余条目按
-  pinned/ts 排序拼接；新增 `idx_ts`（ts DESC, id DESC，schema v4→v5 迁移，
-  纯增索引无损升级）使 `pinned_on_top=false` 分支同样走索引有序扫描。
-  默认 `max_items = 750` 下真实用户本不触发，属防御性修复。10k 基准
-  `list(300)` 1.01ms（预算 <11ms），100k 数值见 ARCHITECTURE §9
+- 大库 `list()` 按索引读取当前项和其余条目，schema v5 增加时间索引。列表查询基准见[架构 §9](ARCHITECTURE.md#performance)。
 
 ### Changed
 - **默认 `ignore_regex` 强化（3.1）**：新增密码管理器输出格式的精确匹配——
@@ -202,8 +176,7 @@
   `defaults` 模块常量，并加单测断言"空 TOML 的反序列化结果 == `Default`"
 - **`store` 测试改为目录布局（任务 2.6 D11）**：`src/store/{mod.rs,tests.rs}`，
   去掉 `#[path = "store_tests.rs"]` 的非惯用写法
-- **MSRV 显式声明（任务 2.6 D7）**：`[workspace.package] rust-version = "1.75"`
-  （与 README 承诺一致），让 cargo 给出明确报错而非编译期乱码
+- workspace 模板曾记录 Rust 1.75；各成员包未继承该字段。
 - **`migrate` 去掉一层 shell（任务 2.6 D8）**：`cliphist decode` 的 id 改走 stdin
   管道，不再用 `sh -c "echo {id} | cliphist decode"` 做字符串拼接
 - **`chafa` 渲染尺寸提为常量（任务 2.6 D10）**：与 `preview_width` 语义不同
@@ -263,7 +236,7 @@
   单测锁定往返/幂等/ts 保留/损坏拦截/max_items 裁剪/格式 schema/物理快照；
   依赖闭包：serde_json（GUI 原有直接依赖，CLI 经 core 引入 +4）+ base64
   （零传递依赖 +1），ARCHITECTURE §9 已同步
-- **FTS5 全库搜索（2.1）**：schema v2→3 建 `clips_fts` 外部内容表 + 三触发器同步 + 存量回填（旧库升级无损，单测锁定）；tokenizer 选型 **trigram**（中英文任意子串均命中，推翻 ROADMAP 原定的 unicode61 起步，被拒备选与代价边界见 ADR-002）。`store::search`：≥3 字符走 MATCH 短语 + bm25 相关度，<3 字符退化为 LIKE 线性扫描（通配符转义、MATCH 查询引号翻倍转义）；GUI 搜索接入全库 MATCH——后台线程取候选（(query, gen) 双新鲜度缓存，过期丢弃不闪烁）+ fzf 风格评分重排保持 UX 一致；CLI 新增 `search <query> [--limit N]` 子命令（输出同 list-raw 5 列格式）；fzf TUI 内嵌过滤保持 fzf 自身模糊匹配。基准 `fts_search_300_of_10k` 实测 ≈0.16ms（预算 <50ms 的 1/300），bench 已入本地基准设施（进 CI 门禁待另行批准）
+- **FTS5 全库搜索（2.1）**：schema v2→3 建 `clips_fts` 外部内容表 + 三触发器同步 + 存量回填（旧库升级无损，单测锁定）；tokenizer 选型 **trigram**（中英文任意子串均命中，推翻 ROADMAP 原定的 unicode61 起步，被拒备选与代价边界见 ADR-002）。`store::search`：≥3 字符走 MATCH 短语 + bm25 相关度，<3 字符退化为 LIKE 线性扫描（通配符转义、MATCH 查询引号翻倍转义）；GUI 搜索接入全库 MATCH——后台线程取候选（(query, gen) 双新鲜度缓存，过期丢弃不闪烁）+ fzf 风格评分重排保持 UX 一致；CLI 新增 `search <query> [--limit N]` 子命令（输出同 list-raw 5 列格式）；fzf TUI 内嵌过滤保持 fzf 自身模糊匹配。新增 FTS 基准，校准后的测量见[架构 §9](ARCHITECTURE.md#performance)。
 - **文本 hash 统一为 blake3（2.2）**：schema v3→4 一次性全表重算——
   DefaultHasher 跨编译器/进程不稳定（rustc 升级即变），存量库已存在
   "同文本不同 hash"的翻倍形态隐患，v1.0 数据可携（任务 2.4 导出/回灌）
@@ -327,8 +300,7 @@
 - **criterion 基准设施（1.6）**：新增 `crates/niri-clip-core/benches/store.rs`，
   覆盖 `list_300_of_10k`（端到端含 Config::load/connect）与
   `sqlite_select_300_of_10k`（裸查询）两组基准；种子经公开入库 API 写入
-  临时 XDG 环境，不触碰真实历史库。实测 ≈0.95ms / ≈0.47ms，远低于
-  ROADMAP 预算（11ms / 4ms）；criterion 仅 dev 依赖且裁掉 plotters/rayon
+  临时 XDG 环境。当前基准见[架构 §9](ARCHITECTURE.md#performance)。Criterion 仅 dev 依赖且裁掉 plotters/rayon
   特性（依赖闭包 +11 crate，审计结论见 ARCHITECTURE）；CI 第 6 道 bench
   工序（绝对预算断言）已接入
 - **GUI 搜索改 fzf 语义（/ 进入搜索）**：`/` 或 Ctrl-F 才进入搜索态

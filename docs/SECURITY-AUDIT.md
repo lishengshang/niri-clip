@@ -1,9 +1,6 @@
 # 安全审计检查项清单（Phase 3 / 任务 3.5）
 
-> **归档文档**：3.5 交付物。清单项已全部闭环；沙箱指令与评分的细节以本文
-> §③ 为准（`assets/niri-clip.service` 注释与 ROADMAP 3.5 均引用此处），
-> ARCHITECTURE §6 只保留摘要与指针。
-> 审计日期：2026-09-26。审计范围：v0.7 前夕 main（`5b413cd`）。
+> 文件权限和 systemd 沙箱审计基于 2026-09-26 的 `5b413cd`。捕获与原生窗口日志于 2026-11-21 复核。
 
 ## ① 文件权限核查
 
@@ -28,24 +25,15 @@ daemon 路径由 §③ `UMask=0077` 一并收为 0600；非 daemon 的一次性 
 
 ## ② 日志脱敏审计
 
-口径：与 3.2 通知不变式一致——日志/通知只允许状态文案、数量、尺寸、路径、
-条目 ID，不得携带条目明文。全仓库 55 处 `println!`/`eprintln!`（含 GUI，
-不含测试）逐条归类：
+日志和桌面通知只记录事件名、状态、尺寸、路径或条目 ID。CLI 查询、预览及导出命令按调用者请求输出内容。
 
-- **状态/计数/配置数字**（daemon 启动横幅、清理计数、超限提示）✅
-- **路径**（db 路径、图片路径、迁移源/目标）✅ 路径非条目明文
-- **条目 ID / 下标**（`copied {id}`、GUI `[dbg] sel=/sid=`）✅ ID 允许
-- **错误链 `{e:#}`**（io/sqlite 错误，含路径，不含载荷）✅
-- **功能输出**（`print` 子命令的 `println!("{}", c.text)`，tui.rs:533）✅
-  用户主动查看条目是该命令的目的，非日志泄露
-- ⚠️ **观察项 O3**：`store` 命令非 UTF-8 载荷分支把载荷头部 64 字节 lossy
-  转后前 32 字符 debug 打印到 stderr（daemon.rs:118）。该分支只承接二进制
-  （文本走 UTF-8 分支），泄的是图片字节头（PNG magic 等）而非文本明文；
-  stderr 进 user journal 仅用户自身/root 可读。**低风险，不修**；若未来
-  收紧，改打 `{len} bytes` 即可
+| 路径 | 复核结果 | 回归测试 |
+|---|---|---|
+| `store` 的未知二进制输入 | 旧实现会把可读前缀写入 stderr，现仅记录字节数 | `non_utf8_diagnostic_contains_only_the_size` |
+| GUI 的 `NIRI_CLIP_DEBUG` | 旧实现会展开按键、查询字符串和整批提交给 GUI 的条目，现仅记录消息名及选中项标识 | `debug_events_omit_keys_queries_and_history` |
+| 捕获通知 | 正常入库保持静默，超限通知只报限额 | `crates/niri-clip/tests/notify_redaction.rs` |
 
-**结论：全部调用点零条目明文**，与 3.2 的 `tests/notify_redaction.rs`
-端到端守卫互为印证。新增调用点回归口径：先过 3.2 的通知守卫思路再进日志。
+复核命令为 `cargo test --locked`。这些用例使用合成数据。
 
 ## ③ systemd user 单元沙箱加固
 

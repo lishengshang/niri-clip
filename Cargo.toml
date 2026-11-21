@@ -9,8 +9,6 @@ members = [
 [workspace.package]
 version = "0.7.0"
 edition = "2021"
-# MSRV：README 承诺 1.75+，显式声明让 cargo 给出明确报错而非编译乱码（任务 2.6 D7）
-rust-version = "1.75"
 license = "MIT"
 authors = ["lishengshang"]
 repository = "https://github.com/lishengshang/niri-clip"
