@@ -356,6 +356,15 @@ fn pin_orders_first_and_list_respects_limit() {
         assert!(after[0].pinned);
         let few = list(3).unwrap();
         assert_eq!(few.len(), 3);
+        let oldest = all.last().unwrap().id;
+        toggle_pin(oldest).unwrap();
+        let pinned = list_with_pinning(2, true).unwrap();
+        let chronological = list_with_pinning(2, false).unwrap();
+        assert_eq!([pinned[0].id, pinned[1].id], [head_id, oldest]);
+        assert_eq!(
+            [chronological[0].id, chronological[1].id],
+            [head_id, all[1].id]
+        );
     });
 }
 

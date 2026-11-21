@@ -56,6 +56,42 @@ pub struct Config {
     pub ignore_re: Option<Regex>,
 }
 
+/// 菜单需要的配置。沿用完整 TOML 的校验和默认值，打开窗口时无需编译捕获过滤器。
+#[derive(Debug, Clone)]
+pub struct SelectorConfig {
+    pub tui_backend: String,
+    pub max_items: usize,
+    pub pinned_on_top: bool,
+    pub preview_width: usize,
+    pub enable_preview: bool,
+    pub enable_image_preview: bool,
+    pub notify_enabled: bool,
+    pub remember_window_position: bool,
+    pub gui_idle_timeout_secs: u64,
+}
+
+impl SelectorConfig {
+    pub fn load() -> Self {
+        Config::load_fields().into()
+    }
+}
+
+impl From<Config> for SelectorConfig {
+    fn from(cfg: Config) -> Self {
+        Self {
+            tui_backend: cfg.tui_backend,
+            max_items: cfg.max_items,
+            pinned_on_top: cfg.pinned_on_top,
+            preview_width: cfg.preview_width,
+            enable_preview: cfg.enable_preview,
+            enable_image_preview: cfg.enable_image_preview,
+            notify_enabled: cfg.notify_enabled,
+            remember_window_position: cfg.remember_window_position,
+            gui_idle_timeout_secs: cfg.gui_idle_timeout_secs,
+        }
+    }
+}
+
 /// 内置默认值——**唯一来源**：serde 的各 `default_*` 与 `Default::default()`
 /// 都从这里取值。此前两处各自硬编码同一批字面量，改一处忘另一处即造成默认值
 /// 漂移（任务 2.6 / D5）。一致性由 `serde_defaults_match_default_impl` 单测锁定。
@@ -120,14 +156,19 @@ fn default_max_image_total_bytes() -> usize {
 
 impl Default for Config {
     fn default() -> Self {
-        let ignore_regex = defaults::IGNORE_REGEX.to_string();
+        Self::default_fields().compile_filter()
+    }
+}
+
+impl Config {
+    fn default_fields() -> Self {
         Self {
             max_items: defaults::MAX_ITEMS,
             preview_width: defaults::PREVIEW_WIDTH,
             min_store_length: defaults::MIN_STORE_LENGTH,
             enable_image_preview: defaults::ENABLE_IMAGE_PREVIEW,
-            ignore_re: Regex::new(&ignore_regex).ok(),
-            ignore_regex,
+            ignore_re: None,
+            ignore_regex: default_regex(),
             pinned_on_top: defaults::PINNED_ON_TOP,
             tui_backend: defaults::TUI_BACKEND.to_string(),
             enable_preview: defaults::ENABLE_PREVIEW,
@@ -141,15 +182,17 @@ impl Default for Config {
             notify_enabled: defaults::NOTIFY_ENABLED,
         }
     }
-}
 
-impl Config {
     pub fn load() -> Self {
-        match Self::load_checked() {
+        Self::load_fields().compile_filter()
+    }
+
+    fn load_fields() -> Self {
+        match Self::read_fields() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[niri-clip] config load error: {e:#}, using default");
-                Self::default()
+                Self::default_fields()
             }
         }
     }
@@ -157,16 +200,22 @@ impl Config {
     /// 与 [`Config::load`] 同源，但把读取/解析错误上抛，供 `doctor` 区分
     /// “没有配置文件”和“配置损坏后静默回退默认值”。
     pub fn load_checked() -> Result<Self> {
+        Self::read_fields().map(Self::compile_filter)
+    }
+
+    fn compile_filter(mut self) -> Self {
+        self.ignore_re = Regex::new(&self.ignore_regex).ok();
+        self
+    }
+
+    fn read_fields() -> Result<Self> {
         let path = Self::path();
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(Self::default_fields());
         }
         let s =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let mut c: Config =
-            toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
-        c.ignore_re = Regex::new(&c.ignore_regex).ok();
-        Ok(c)
+        toml::from_str(&s).with_context(|| format!("parse {}", path.display()))
     }
 
     pub fn path() -> PathBuf {
@@ -313,19 +362,26 @@ mod tests {
         std::fs::create_dir_all(cfg_dir.join("niri-clip")).unwrap();
         std::fs::write(
             cfg_dir.join("niri-clip/config.toml"),
-            "max_items = 42\nignore_regex = \"topsecret\"\n",
+            "max_items = 42\nignore_regex = \"topsecret\"\ntui_backend = \"fzf\"\n\
+             pinned_on_top = false\ngui_idle_timeout_secs = 12\n",
         )
         .unwrap();
         std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
         let checked = Config::load_checked().expect("合法 TOML 应可解析");
         let cfg = Config::load();
+        let menu = SelectorConfig::load();
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(checked.max_items, 42);
         assert_eq!(cfg.max_items, 42);
+        assert_eq!(menu.max_items, 42);
+        assert_eq!(menu.tui_backend, "fzf");
+        assert_eq!(menu.gui_idle_timeout_secs, 12);
+        assert!(!menu.pinned_on_top);
         // 未写的字段回落默认值
         assert_eq!(cfg.preview_width, 100);
+        assert_eq!(menu.preview_width, cfg.preview_width);
         // 自定义正则已编译且生效
         assert!(cfg.ignore_re.is_some());
         assert!(cfg.ignore_re.as_ref().unwrap().is_match("topsecret-data"));
@@ -388,10 +444,18 @@ mod tests {
             "doctor 必须能区分“配置损坏”与“没有配置”"
         );
         let cfg = Config::load();
+        // 捕获字段类型错误也要沿用整份配置回退的语义。
+        std::fs::write(
+            Config::path(),
+            "tui_backend = 'native'\nmax_clip_bytes = 'bad'",
+        )
+        .unwrap();
+        let menu = SelectorConfig::load();
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(cfg.max_items, 750, "解析失败应回退默认值");
+        assert_eq!(menu.tui_backend, defaults::TUI_BACKEND);
     }
 
     #[test]

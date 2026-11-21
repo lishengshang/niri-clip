@@ -634,7 +634,11 @@ fn row_to_clip(r: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
 }
 
 pub fn list(limit: usize) -> Result<Vec<Clip>> {
-    let cfg = Config::load();
+    list_with_pinning(limit, crate::config::SelectorConfig::load().pinned_on_top)
+}
+
+/// 已加载菜单配置的调用方可直接使用同一次读取的排序设置。
+pub fn list_with_pinning(limit: usize, pinned_on_top: bool) -> Result<Vec<Clip>> {
     let conn = connect()?;
     // 当前项永远第 1 行（星标之上）：第 1 行 = Ctrl+V 会粘出的内容。
     // 无指针时绑空串（hash 列不存在空值），过滤退化为不过滤。
@@ -658,7 +662,7 @@ pub fn list(limit: usize) -> Result<Vec<Clip>> {
     // 其余条目按 pinned/ts 排序取 N 条：排序键为纯列名，pinned_on_top 走
     // idx_pinned_ts、否则走 idx_ts（v5），两分支均为索引有序扫描。
     // hash UNIQUE，!= 过滤恰好剔除当前项
-    let order = if cfg.pinned_on_top {
+    let order = if pinned_on_top {
         "pinned DESC, ts DESC, id DESC"
     } else {
         "ts DESC, id DESC"

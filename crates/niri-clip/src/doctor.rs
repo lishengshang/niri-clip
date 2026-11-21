@@ -691,7 +691,7 @@ fn fzf_version() -> Option<String> {
 }
 
 fn check_backend(report: &mut Report, cfg: &Config) {
-    let backend = tui::backend(cfg);
+    let backend = tui::backend(&cfg.tui_backend);
     let fzf = which::which("fzf").ok();
     let fuzzel = which::which("fuzzel").ok();
     let gui = tui::gui_binary();
