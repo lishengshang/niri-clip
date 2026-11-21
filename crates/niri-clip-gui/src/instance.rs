@@ -11,18 +11,30 @@ use niri_clip_core::single_instance::InstanceGuard;
 /// 若已有实例在跑：经 niri IPC 聚焦它的窗口后本进程退出（不返回）——
 /// Mod+V 连按应"拉回已开窗口"而非开新的。
 pub fn ensure_single_instance() -> Option<InstanceGuard> {
-    match InstanceGuard::try_acquire("gui") {
-        Ok(Some(guard)) => Some(guard),
-        Ok(None) => {
-            let _ = focus_existing_window();
-            // 此处尚未创建 iced 运行时与 sqlite 连接，没有可析构的资源，
-            // 故用 process::exit 直接退出；app 启动后的退出点（update.rs）
-            // 已改为 iced::exit() 以走正常析构（任务 2.6 / D3）
-            std::process::exit(0);
-        }
-        Err(e) => {
-            eprintln!("[niri-clip gui] single instance lock failed: {e:#}");
-            None
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_millis(600);
+    let mut first = true;
+    loop {
+        match InstanceGuard::try_acquire("gui") {
+            Ok(Some(guard)) => return Some(guard),
+            Ok(None) => {
+                if niri_clip_core::gui_activation::show_existing()
+                    || (first && focus_existing_window(None))
+                {
+                    std::process::exit(0);
+                }
+                // 正处在待机超时退出或首个窗口尚未登记，等旧进程释放锁或就绪。
+                if Instant::now() >= deadline {
+                    let _ = focus_existing_window(None);
+                    std::process::exit(0);
+                }
+                first = false;
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            Err(e) => {
+                eprintln!("[niri-clip gui] single instance lock failed: {e:#}");
+                return None;
+            }
         }
     }
 }
@@ -34,9 +46,10 @@ pub fn ensure_single_instance() -> Option<InstanceGuard> {
 struct NiriWindow {
     id: u64,
     app_id: Option<String>,
+    pid: Option<u32>,
 }
 
-fn focus_existing_window() -> bool {
+pub(super) fn focus_existing_window(pid: Option<u32>) -> bool {
     let Ok(out) = std::process::Command::new("niri")
         .args(["msg", "-j", "windows"])
         .output()
@@ -53,10 +66,9 @@ fn focus_existing_window() -> bool {
             return false;
         }
     };
-    let Some(w) = windows
-        .iter()
-        .find(|w| w.app_id.as_deref() == Some("niri-clip-gui"))
-    else {
+    let Some(w) = windows.iter().find(|w| {
+        w.app_id.as_deref() == Some("niri-clip-gui") && pid.is_none_or(|p| w.pid == Some(p))
+    }) else {
         return false;
     };
     std::process::Command::new("niri")

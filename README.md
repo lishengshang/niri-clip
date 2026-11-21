@@ -37,6 +37,8 @@ cargo install --locked --path crates/niri-clip-gui   # 可选，原生窗口
 
 在 niri 中，把原生浮窗拖到顺手的位置后关闭。下次在同一显示器上打开时会恢复该位置，首次打开或换显示器时使用 niri 的窗口规则。设置 `remember_window_position = false` 可始终使用规则指定的位置。
 
+默认关闭浮窗后 GUI 进程立即退出。如果经常连续打开历史，可在 `~/.config/niri-clip/config.toml` 中设置 `gui_idle_timeout_secs = 30`。关闭时会销毁窗口，进程在接下来的 30 秒内保留字体等资源。期间再按 `Mod+V` 会从最新历史打开一个新窗口。超时后进程自动退出，设回 `0` 可恢复默认行为。
+
 ## 搜索与预览
 
 ![原生窗口显示合成的中英文历史、固定条目和选中内容预览](assets/history-window.png)

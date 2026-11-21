@@ -25,6 +25,9 @@ pub struct Config {
     /// 关闭原生浮窗时保存位置，在同一 niri 输出上恢复。
     #[serde(default = "default_true")]
     pub remember_window_position: bool,
+    /// 原生窗口关闭后的无窗口待机秒数，0 表示立即退出。
+    #[serde(default)]
+    pub gui_idle_timeout_secs: u64,
     /// v0.4.1：事件模式下每次捕获子进程的超时秒数（防止病态读挂起长期占用）
     #[serde(default = "default_capture_timeout")]
     pub capture_timeout_secs: u64,
@@ -129,6 +132,7 @@ impl Default for Config {
             tui_backend: defaults::TUI_BACKEND.to_string(),
             enable_preview: defaults::ENABLE_PREVIEW,
             remember_window_position: true,
+            gui_idle_timeout_secs: 0,
             capture_timeout_secs: defaults::CAPTURE_TIMEOUT_SECS,
             max_clip_bytes: defaults::MAX_CLIP_BYTES,
             max_image_bytes: defaults::MAX_IMAGE_BYTES,
@@ -350,6 +354,7 @@ mod tests {
         assert_eq!(parsed.min_store_length, d.min_store_length);
         assert_eq!(parsed.enable_image_preview, d.enable_image_preview);
         assert_eq!(parsed.ignore_regex, d.ignore_regex);
+        assert_eq!(parsed.gui_idle_timeout_secs, d.gui_idle_timeout_secs);
         assert_eq!(parsed.pinned_on_top, d.pinned_on_top);
         assert_eq!(parsed.tui_backend, d.tui_backend);
         assert_eq!(parsed.notify_enabled, d.notify_enabled);
@@ -456,6 +461,7 @@ mod tests {
             from_serde.remember_window_position,
             d.remember_window_position
         );
+        assert_eq!(from_serde.gui_idle_timeout_secs, d.gui_idle_timeout_secs);
         assert_eq!(from_serde.capture_timeout_secs, d.capture_timeout_secs);
         assert_eq!(from_serde.max_clip_bytes, d.max_clip_bytes);
         assert_eq!(from_serde.max_image_bytes, d.max_image_bytes);

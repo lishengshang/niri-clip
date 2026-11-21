@@ -341,6 +341,59 @@ for path in sorted(Path('docs/benchmarks').glob('gui-startup-*.csv')):
 PY
 ```
 
+<a id="gui-standby"></a>
+
+#### 可选短时待机的冷热验收
+
+真机使用同一 release，将独立配置的 `gui_idle_timeout_secs` 设为 30。每库测 49 对，先开新 GUI 进程，再在待机期间重开。每对核对 PID 相同、窗口 ID 不同，每次发搜索键前核对焦点。进程冷启动允许系统页缓存已预热。为在同一时段交替取得两种样本，前 48 对完成后结束该测试库已无窗口的 GUI。最后一对让它自然退出后再按一次快捷键。三种情况均从发送 `Mod+V` 中的 `V` 按下算到 GUI 处理首个搜索字符。[198 次逐次样本](benchmarks/gui-standby-2026-11-21.csv)
+
+| 历史 | 打开方式 | 本批首个样本 (ms) | 其余 48 次中位数 (ms) | P90 (ms) | ≤50 ms |
+|---:|---|---:|---:|---:|---:|
+| 0 | 新进程 | 69.10 | 68.16 | 75.60 | 0/48 |
+| 0 | 待机内重开 | 46.23 | 50.65 | 62.62 | 18/48 |
+| 300 | 新进程 | 64.71 | 72.43 | 82.52 | 0/48 |
+| 300 | 待机内重开 | 55.77 | 53.46 | 67.15 | 15/48 |
+
+同轮逐对计算，空库待机重开快 16.82 ms，bootstrap 95% 区间为 12.63–20.23 ms。300 条库快 19.55 ms，区间为 14.64–22.49 ms。两组的待机重开中位数和 P90 仍超过 50 ms。待机重开时，按键至启动器入口的中位数分别为 33.44、30.36 ms，启动器入口至首字符为 16.55、23.49 ms。自然超时后打开各只有一次，空库 64.31 ms，300 条库 83.84 ms。
+
+关闭窗口后约一秒读取无窗口 GUI 的 `VmRSS`，空库 17.46 MiB，300 条库 18.98 MiB，各有 3 个线程。随后五秒内，两者的进程用户态与内核态 CPU 时间合计均增加 0 个时钟滴答，本机每滴答 10 ms。确认窗口消失并等待约 0.13 秒后开始监测退出，两库分别再过 29.85、29.86 秒退出，唤醒端点随即消失。[待机原始读数](benchmarks/gui-standby-idle-2026-11-21.csv)
+
+独立 Wayland 会话验证了待机期间写入的合成历史可在重开时选中并逐字节复制。上次查询已清空，原浮窗位置可恢复。多个启动请求同时到达时只出现一个窗口。
+
+从仓库根目录可复算上表与分段耗时。每组的 `block=0` 单列，P90 取最近秩。
+
+```sh
+python3 - <<'PY'
+import csv, math, random
+from pathlib import Path
+from statistics import median
+
+root = Path('docs/benchmarks')
+with (root / 'gui-standby-2026-11-21.csv').open() as f:
+    rows = list(csv.DictReader(f))
+for size in ('0', '300'):
+    group = {(r['opening'], int(r['block'])): r for r in rows if r['history_rows'] == size}
+    for kind in ('cold', 'warm'):
+        sample = [group[kind, i] for i in range(1, 49)]
+        times = sorted(float(r['query_ms']) for r in sample)
+        launch = [float(r['launcher_ms']) for r in sample]
+        after = [float(r['query_ms']) - t for r, t in zip(sample, launch)]
+        print(size, kind, group[kind, 0]['query_ms'], median(times),
+              times[math.ceil(.9 * len(times)) - 1], sum(t <= 50 for t in times),
+              median(launch), median(after))
+    gain = [float(group['cold', i]['query_ms']) - float(group['warm', i]['query_ms'])
+            for i in range(1, 49)]
+    rng = random.Random(43)
+    boot = sorted(median(rng.choices(gain, k=len(gain))) for _ in range(8000))
+    print(size, 'paired gain', median(gain), boot[200], boot[7799],
+          'post-expiry', group['expired', 0]['query_ms'])
+with (root / 'gui-standby-idle-2026-11-21.csv').open() as f:
+    for r in csv.DictReader(f):
+        print(r['history_rows'], int(r['gui_rss_kib']) / 1024, r['gui_threads'],
+              r['cpu_ticks'], r['clock_hz'], r['sample_seconds'], r['exit_after_check_seconds'])
+PY
+```
+
 #### niri 派生进程的单独测量
 
 在同一日常会话中，交替由一个 Python 进程直接启动原生打点程序，或通过 niri IPC 的 `Spawn` 动作启动它。该程序在 `main` 入口读取单调时钟，只向本次测量的 FIFO 写入时间戳。IPC 计时从发送已编码的请求前开始，两种路径均使用程序内的时间戳作为终点。单列首次后，各重复 48 次。直接启动的中位数为 1.1 ms，P90 为 1.3 ms。经 niri 的中位数为 34.3 ms，P90 为 39.5 ms。这一批独立于快捷键采样，涵盖 IPC 处理、调度与创建进程。各环节的占比尚待定位。[逐次样本](benchmarks/niri-spawn-2026-11-21.csv)
@@ -425,13 +478,13 @@ cargo metadata --locked --format-version 1 | jq -r '.packages[] | select(.name =
 
 ### 依赖与编译
 
-2026-11-21，使用当前 Cargo.lock，在 Linux x86_64 上统计普通依赖。按包名和版本去重，包含根包，排除开发依赖。GUI 单独构建，安装 CLI 无须引入 iced。
+2026-11-21，使用当前 Cargo.lock，在 Linux x86_64 上统计普通依赖。按包名和版本去重，包含根包，排除开发依赖。可执行文件大小取本轮冷热测试使用的联合 release 构建。CLI 也可单独安装。
 
 | 范围 | 包数 | release 可执行文件大小 |
 |---|---:|---:|
-| niri-clip | 100 | 5,781,112 B |
+| niri-clip | 100 | 5,892,536 B |
 | niri-clip-core | 83 | — |
-| niri-clip-gui | 204 | 10,510,304 B |
+| niri-clip-gui | 204 | 11,003,040 B |
 | workspace | 222 | — |
 
 ```sh
@@ -439,8 +492,7 @@ for pkg in niri-clip niri-clip-core niri-clip-gui; do
   cargo tree --locked -e normal -p "$pkg" --prefix none | sed 's/ (\*)$//' | sort -u | wc -l
 done
 cargo tree --locked -e normal --workspace --prefix none | sed 's/ (\*)$//' | sort -u | wc -l
-cargo build --locked --release -p niri-clip
-cargo build --locked --release -p niri-clip-gui
+cargo build --locked --release -p niri-clip -p niri-clip-gui
 stat -c '%n %s' target/release/niri-clip target/release/niri-clip-gui
 ```
 
@@ -481,7 +533,7 @@ NIRI_CLIP_STRESS_DIR="$(mktemp -d)" cargo test --locked --release -p niri-clip-c
 
 ## 10. 原生窗口
 
-原生选择器按需启动，窗口关闭时退出。它使用 iced、winit 的常规 xdg 窗口及 tiny-skia 软件渲染。niri 根据 app-id `niri-clip-gui` 应用浮动、位置和阴影规则。winit 负责输入法事件。[选型 ADR-001](ADR-001.md) · [窗口规则示例](../assets/niri-clip.kdl)
+原生选择器按需启动，默认关闭即退出。它使用 iced、winit 的常规 xdg 窗口及 tiny-skia 软件渲染。niri 根据 app-id `niri-clip-gui` 应用浮动、位置和阴影规则。winit 负责输入法事件。[选型 ADR-001](ADR-001.md) · [窗口规则示例](../assets/niri-clip.kdl)
 
 **后端选择（`tui_backend`）**：`auto` 优先 native → fzf → fuzzel；
 `gui_binary()` 三级兜底定位二进制（`PATH` → 与 CLI 同目录 → `~/.cargo/bin`），
@@ -489,14 +541,13 @@ NIRI_CLIP_STRESS_DIR="$(mktemp -d)" cargo test --locked --release -p niri-clip-c
 显式 `"native"` 但二进制缺失时降级 fzf/fuzzel。fzf 版本地板 0.71
 （`--id-nth`）在 `run()` 内二次校验。
 
-**单实例与聚焦**：经 `core::single_instance::InstanceGuard::try_acquire("gui")`
-对 `state/gui.lock` 加 flock（与 daemon 同一机制，2.6/C4 已收敛）；锁被占用
-则经 niri IPC（`niri msg -j windows`，按 app_id `niri-clip-gui` 精确匹配）
-聚焦已开窗口后本进程退出。进程崩溃由内核释放锁，无 PID 文件与 `/proc` 复核。
+**单实例与唤醒**。GUI 持有 `state/gui.lock` 的 flock，进程退出即释放。启用待机时，持锁者在私有的 `XDG_RUNTIME_DIR` 监听 Unix socket。地址由锁文件的设备号和 inode 决定，各测试库可独立使用。CLI 收到 GUI 事件循环的确认后返回。端点不可用时走常规启动，已有窗口可经 niri IPC 拉回焦点。
+
+**短时待机**。`gui_idle_timeout_secs` 大于零时，正常关闭会销毁窗口，放下历史列表、搜索状态和缩略图引用。窗口关闭事件启动一次性定时器。期限内再打开会重读配置、历史与当前项，创建新的 xdg 窗口。窗口 ID 隔离旧窗口的异步结果和超时事件。期限届满时退出 GUI 并释放端点。字体库和分配器可能在待机时保留内存。[待机实测](#gui-standby)
 
 **浮窗位置**。正常关闭前通过 niri IPC 读取本进程浮窗的输出名和逻辑坐标，变更时原子替换 `state/window-position.json`。有上次记录时，短时线程在窗口登记后核对输出，并按窗口 ID 相对移动。坐标取自工作区视图，用差值移动可兼容面板留白与小数缩放。第一次打开、换输出、平铺窗口或禁用 `remember_window_position` 时使用合成器规则。
 
-**渲染与预览**。列表使用单行预览，底部窗格显示多行文本或图片。GUI 使用一个 Tokio 工作线程调度 iced 事件订阅，SQLite、复制和图片解码由按需创建的阻塞线程执行，最多同时运行四项。关闭窗口后退出该进程。每次解码一张，完成后检查当前选中项。缩略图保留原比例，宽度上限为 1024 像素，高度上限为 440 像素，窗口缓存最近解码的四张。复制直接读取原图文件。单张源图解码仍需要与原始分辨率相应的临时内存。[image 缩略图接口](https://docs.rs/image/0.25.10/image/enum.DynamicImage.html#method.thumbnail)
+**渲染与预览**。列表使用单行预览，底部窗格显示多行文本或图片。GUI 使用一个 Tokio 工作线程调度 iced 事件订阅，SQLite、复制和图片解码由按需创建的阻塞线程执行，最多同时运行四项。每次解码一张，完成后检查当前选中项。缩略图保留原比例，宽度上限为 1024 像素，高度上限为 440 像素，窗口缓存最近解码的四张。复制直接读取原图文件。单张源图解码仍需要与原始分辨率相应的临时内存。[image 缩略图接口](https://docs.rs/image/0.25.10/image/enum.DynamicImage.html#method.thumbnail)
 
 历史行等高。原生窗口用滚动偏移与视口高度计算需要布局的行，并在上下用等高占位保留滚动范围。普通列按控件类型更新行与占位的状态，跳过视口外的绘制。行事件携带完整结果中的索引，悬停按当前坐标计算。首屏直接派发选中图片的解码任务，文本和空库无需启动消息来触发重新布局。
 

@@ -23,6 +23,7 @@ mod search;
 mod theme;
 mod update;
 mod view;
+mod warm;
 
 use instance::ensure_single_instance;
 use search::{fuzzy_flags, fuzzy_score};
@@ -207,6 +208,8 @@ fn compute_filtered(
 
 struct App {
     position: Option<position::PositionMemory>,
+    warm_window: Option<iced::window::Id>,
+    closing: bool,
     search_id: iced::widget::Id,
     /// 行列表 scrollable 的 Id：键盘导航时 scroll_to 跟随选中
     list_id: iced::widget::Id,
@@ -265,19 +268,22 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
-        let cfg = config::Config::load();
+    fn boot(cfg: config::Config) -> (Self, Task<Message>) {
         let position = position::PositionMemory::open(cfg.remember_window_position);
         let clips = store::list(Self::load_limit()).unwrap_or_default();
         let mut app = Self::with_history(cfg, clips);
         app.position = position;
-        app
+        app.refresh_cur();
+        let decode = app.ensure_image_decode();
+        (app, decode)
     }
 
     fn with_history(cfg: config::Config, clips: Vec<store::Clip>) -> Self {
         let first_id = clips.first().map(|c| c.id);
         Self {
             position: None,
+            warm_window: None,
+            closing: false,
             search_id: iced::widget::Id::unique(),
             list_id: iced::widget::Id::unique(),
             // 搜索默认关（fzf 语义：/ 才进入）：启动时不聚焦输入框，光标
@@ -437,7 +443,11 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        iced::event::listen_with(|event, _status, _id| match event {
+        iced::event::listen_with(|event, _, _| Self::input_event(event))
+    }
+
+    fn input_event(event: iced::Event) -> Option<Message> {
+        match event {
             iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                 Some(Message::Key(key, modifiers))
             }
@@ -450,7 +460,7 @@ impl App {
                 Some(Message::CloseRequested)
             }
             _ => None,
-        })
+        }
     }
 }
 
@@ -474,32 +484,36 @@ fn theme_dark(_state: &App) -> iced::Theme {
 
 fn main() -> iced::Result {
     // 单实例守卫必须存活到进程结束（drop 即释放 flock）
-    let _instance = ensure_single_instance();
+    let instance = ensure_single_instance();
     // 提前初始化 iced 的共享字体库，与 Wayland 和历史初始化并行。
     // 工作线程完成后退出；若未能启动，iced 会在首次排版时照常初始化。
     let _ = std::thread::Builder::new().spawn(|| {
         let _ = iced::advanced::graphics::text::font_system();
     });
+    let cfg = config::Config::load();
+    if cfg.gui_idle_timeout_secs > 0 {
+        if let Some(guard) = &instance {
+            match niri_clip_core::gui_activation::Endpoint::bind(guard) {
+                Ok((_endpoint, listener)) => return warm::run(cfg, listener),
+                Err(e) => eprintln!("[niri-clip gui] standby unavailable: {e}"),
+            }
+        }
+    }
     // 常规 xdg 窗口：受 niri window-rule 约束（悬浮/位置/边框由用户
     // rule.kdl 约定，app-id = "niri-clip-gui"），winit 原生 IME
-    iced::application(
-        || {
-            let mut app = App::new();
-            app.refresh_cur();
-            // 首屏直接派发需要的图片解码，避免文本和空库为一次启动消息重做布局。
-            let decode = app.ensure_image_decode();
-            (app, decode)
-        },
-        App::update,
-        App::view,
-    )
-    .executor::<executor::GuiExecutor>()
-    .title("niri-clip")
-    // 深色主题（光标/默认控件色）+ JetBrainsMono NF：符号字形齐全无 tofu
-    .theme(theme_dark)
-    .default_font(UI_FONT)
-    .subscription(App::subscription)
-    .window(iced::window::Settings {
+    iced::application(move || App::boot(cfg.clone()), App::update, App::view)
+        .executor::<executor::GuiExecutor>()
+        .title("niri-clip")
+        // 深色主题（光标/默认控件色）+ JetBrainsMono NF：符号字形齐全无 tofu
+        .theme(theme_dark)
+        .default_font(UI_FONT)
+        .subscription(App::subscription)
+        .window(window_settings())
+        .run()
+}
+
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
         size: iced::Size::new(500.0, 675.0),
         resizable: true,
         exit_on_close_request: false,
@@ -508,8 +522,7 @@ fn main() -> iced::Result {
             ..Default::default()
         },
         ..Default::default()
-    })
-    .run()
+    }
 }
 
 #[cfg(test)]
