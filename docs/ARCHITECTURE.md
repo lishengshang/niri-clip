@@ -284,38 +284,80 @@ done
 | 300 | 按视口布局 `ad4494c` | 73.5 | 77.3 | 92.1 | 0/48 | 22.4 |
 | 300 | 再加字体预热与行绘制优化 | 71.8 | **66.9** | 77.4 | 0/48 | 22.6 |
 
-两种库的重复中位数均超出 50 ms。空库中，按视口布局相对优化前的同轮差值中位数为 −0.9 ms，配对 bootstrap 95% 区间为 [−3.3, +3.6] ms。上批观察到的变慢与波动相容，本批仍容许小幅退化。再加字体和行绘制优化后，相对视口版的配对差值在空库为 −6.0 ms [−9.1, −1.4]，在 300 条库为 −9.5 ms [−15.5, −3.9]。当前版本从按键到启动器入口的中位数分别为 25.5 和 24.9 ms，从启动器到首字符分别为 33.7 和 42.0 ms。
+两种库的重复中位数均超出 50 ms。空库中，按视口布局相对优化前的同轮差值中位数为 −0.9 ms，配对 bootstrap 95% 区间为 [−3.3, +3.6] ms。上批观察到的变慢与波动相容，本批仍容许小幅退化。再加字体和行绘制优化后，相对视口版的配对差值在空库为 −6.0 ms [−9.1, −1.4]，在 300 条库为 −9.5 ms [−15.5, −3.9]。该批首帧优化版从按键到启动器入口的中位数分别为 25.5 和 24.9 ms，从启动器到首字符分别为 33.7 和 42.0 ms。
 
-从仓库根目录可用以下命令复算。逐次样本按采集顺序保存，`block=0` 表示该库该版本的首次打开，`tuned` 对应表中最后一版。时钟列均相对于同次 `V` 按下，单位为毫秒。[逐次样本](benchmarks/gui-startup-2026-11-21.csv)
+#### 位置记忆和 GUI 线程数的配对复测
+
+两批测试都沿用上面的按键、焦点、首字符和独立数据库口径。每格单列批次内首次打开，余下 48 轮按顺序轮换版本。第一批比较已提交的首帧优化、位置记忆和一个只在命中搜索时排版彩色文字的候选。第二批以位置记忆版为对照，仅调整 GUI 的工作线程。两版均按需启动新进程并加载完整的系统字体。
+
+| 批次与版本 | 空库首次 / 中位数 / P90（ms） | 300 条首次 / 中位数 / P90（ms） |
+|---|---:|---:|
+| 第一批 · 首帧优化 `532995e` | 73.3 / 65.8 / 74.6 | 62.7 / 74.6 / 83.6 |
+| 第一批 · 位置记忆 `acfd56f` | 77.3 / 65.2 / 69.9 | 67.5 / 72.6 / 82.4 |
+| 第一批 · 单色历史行候选 | 74.8 / 65.9 / 71.7 | 72.7 / 74.9 / 85.7 |
+| 第二批 · 位置记忆 `acfd56f` | 77.2 / 64.5 / 73.2 | 67.6 / 72.8 / 82.6 |
+| 第二批 · 按需创建阻塞线程 | 66.9 / 65.6 / 72.1 | 77.2 / 72.1 / 83.8 |
+
+两批中每格的 48 次重复都超过了 50 ms。空库没有复现稳定变慢。单色历史行候选相对位置记忆版的配对差值的 95% 区间在两种库中均跨过零，已撤下。[第一批逐次样本](benchmarks/gui-startup-position-2026-11-21.csv)
+
+第二批在首字符时同时读取 GUI 进程的 `Threads` 和 `VmRSS`。线程数中位数在两种库中都由 18 降至 4。空库两版 RSS 分别为 21.38 和 21.42 MiB，300 条分别为 22.65 和 22.67 MiB。按需线程版相对对照的同轮延迟差值中位数为空库 +0.4 ms，300 条 +2.7 ms，两组的配对 bootstrap 95% 区间分别为 [−2.3, +3.4] 和 [−3.5, +6.5] ms。按键至启动器入口的中位数是 32.8 和 31.8 ms，启动器至首字符是 31.6 和 40.9 ms。两个分段各自取中位数。[第二批逐次样本](benchmarks/gui-startup-workers-2026-11-21.csv)
+
+从仓库根目录可用以下命令分别复算三个批次。CSV 按采集顺序保存，`block=0` 是各库各版在该批的首次打开，时钟均相对同次 `V` 按下。最早批次中的 `tuned` 对应首帧优化版。[首帧优化批次样本](benchmarks/gui-startup-2026-11-21.csv)
 
 ```sh
 python3 - <<'PY'
 import csv, math, random
 from collections import defaultdict
 from itertools import combinations
+from pathlib import Path
 from statistics import median
 
-groups = defaultdict(dict)
-with open('docs/benchmarks/gui-startup-2026-11-21.csv') as f:
-    for r in csv.DictReader(f):
-        groups[int(r['history_rows']), r['build']][int(r['block'])] = r
-builds = ('fe84a4e', 'ad4494c', 'tuned')
-for size in (0, 300):
-    for build in builds:
-        group = groups[size, build]
-        repeats = [r for k, r in group.items() if k]
-        q = sorted(float(r['query_ms']) for r in repeats)
-        rss = median(int(r['gui_rss_kib']) / 1024 for r in repeats)
-        launch = median(float(r['launcher_ms']) for r in repeats)
-        after = median(float(r['query_ms']) - float(r['launcher_ms']) for r in repeats)
-        print(size, build, group[0]['query_ms'], median(q), q[math.ceil(.9 * len(q)) - 1],
-              sum(t <= 50 for t in q), len(q), rss, launch, after)
-    for old, new in combinations(builds, 2):
-        a, b = groups[size, old], groups[size, new]
-        delta = [float(b[k]['query_ms']) - float(a[k]['query_ms']) for k in sorted(a) if k]
-        rng = random.Random(43)
-        boot = sorted(median(rng.choices(delta, k=len(delta))) for _ in range(8000))
-        print(size, new, 'minus', old, median(delta), boot[200], boot[7799])
+for path in sorted(Path('docs/benchmarks').glob('gui-startup-*.csv')):
+    with path.open() as f:
+        rows = list(csv.DictReader(f))
+    groups = defaultdict(dict)
+    for row in rows:
+        groups[int(row['history_rows']), row['build']][int(row['block'])] = row
+    builds = list(dict.fromkeys(row['build'] for row in rows))
+    print(path.name)
+    for size in (0, 300):
+        for build in builds:
+            group = groups[size, build]
+            repeats = [group[k] for k in range(1, 49)]
+            q = sorted(float(r['query_ms']) for r in repeats)
+            launch = [float(r['launcher_ms']) for r in repeats]
+            after = [float(r['query_ms']) - t for r, t in zip(repeats, launch)]
+            rss = median(int(r['gui_rss_kib']) / 1024 for r in repeats)
+            threads = [int(r['gui_threads']) for r in repeats if r.get('gui_threads')]
+            print(size, build, group[0]['query_ms'], median(q), q[math.ceil(.9*len(q))-1],
+                  sum(t <= 50 for t in q), len(q), rss, median(launch), median(after),
+                  median(threads) if threads else '')
+        for old, new in combinations(builds, 2):
+            a, b = groups[size, old], groups[size, new]
+            delta = [float(b[k]['query_ms']) - float(a[k]['query_ms']) for k in range(1, 49)]
+            rng = random.Random(43)
+            boot = sorted(median(rng.choices(delta, k=len(delta))) for _ in range(8000))
+            print(size, new, 'minus', old, median(delta), boot[200], boot[7799])
+PY
+```
+
+#### niri 派生进程的单独测量
+
+在同一日常会话中，交替由一个 Python 进程直接启动原生打点程序，或通过 niri IPC 的 `Spawn` 动作启动它。该程序在 `main` 入口读取单调时钟，只向本次测量的 FIFO 写入时间戳。IPC 计时从发送已编码的请求前开始，两种路径均使用程序内的时间戳作为终点。单列首次后，各重复 48 次。直接启动的中位数为 1.1 ms，P90 为 1.3 ms。经 niri 的中位数为 34.3 ms，P90 为 39.5 ms。这一批独立于快捷键采样，涵盖 IPC 处理、调度与创建进程。各环节的占比尚待定位。[逐次样本](benchmarks/niri-spawn-2026-11-21.csv)
+
+在 niri 会话中从仓库根目录运行以下命令可重新采集，无需窗口或键盘输入。将读取路径改为 `docs/benchmarks/niri-spawn-2026-11-21.csv` 可复算上面的记录。
+
+```sh
+report=$(mktemp)
+python3 docs/benchmarks/niri-spawn.py > "$report"
+python3 - "$report" <<'PY'
+import csv, sys
+from statistics import median
+with open(sys.argv[1]) as f:
+    rows = list(csv.DictReader(f))
+for route in ('direct', 'ipc'):
+    times = sorted(float(r['entry_ms']) for r in rows if r['route'] == route and int(r['block']))
+    print(route, len(times), median(times), times[43])
 PY
 ```
 
@@ -454,7 +496,7 @@ NIRI_CLIP_STRESS_DIR="$(mktemp -d)" cargo test --locked --release -p niri-clip-c
 
 **浮窗位置**。正常关闭前通过 niri IPC 读取本进程浮窗的输出名和逻辑坐标，变更时原子替换 `state/window-position.json`。有上次记录时，短时线程在窗口登记后核对输出，并按窗口 ID 相对移动。坐标取自工作区视图，用差值移动可兼容面板留白与小数缩放。第一次打开、换输出、平铺窗口或禁用 `remember_window_position` 时使用合成器规则。
 
-**渲染与预览**。列表使用单行预览，底部窗格显示多行文本或图片。iced 的线程池负责搜索、复制和图片解码。每次解码一张，完成后检查当前选中项。缩略图保留原比例，宽度上限为 1024 像素，高度上限为 440 像素，窗口缓存最近解码的四张。复制直接读取原图文件。单张源图解码仍需要与原始分辨率相应的临时内存。[image 缩略图接口](https://docs.rs/image/0.25.10/image/enum.DynamicImage.html#method.thumbnail)
+**渲染与预览**。列表使用单行预览，底部窗格显示多行文本或图片。GUI 使用一个 Tokio 工作线程调度 iced 事件订阅，SQLite、复制和图片解码由按需创建的阻塞线程执行，最多同时运行四项。关闭窗口后退出该进程。每次解码一张，完成后检查当前选中项。缩略图保留原比例，宽度上限为 1024 像素，高度上限为 440 像素，窗口缓存最近解码的四张。复制直接读取原图文件。单张源图解码仍需要与原始分辨率相应的临时内存。[image 缩略图接口](https://docs.rs/image/0.25.10/image/enum.DynamicImage.html#method.thumbnail)
 
 历史行等高。原生窗口用滚动偏移与视口高度计算需要布局的行，并在上下用等高占位保留滚动范围。普通列按控件类型更新行与占位的状态，跳过视口外的绘制。行事件携带完整结果中的索引，悬停按当前坐标计算。首屏直接派发选中图片的解码任务，文本和空库无需启动消息来触发重新布局。
 
