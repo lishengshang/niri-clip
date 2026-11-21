@@ -39,7 +39,7 @@ use niri_clip_core::{config, confirm, preview, store};
 /// 字形缺失且 cosmic-text fallback 不稳 → 显示方框（tofu）。
 const UI_FONT: Font = Font::with_name("JetBrainsMono Nerd Font");
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum Message {
     /// 搜索框内容变化（widget 持焦点自管键入，winit 原生 IME）
     Query(String),
@@ -89,6 +89,29 @@ enum Message {
     Tick,
 }
 
+// 键入、搜索结果和列表重载都可能携带剪贴板正文。调试日志只记录事件名。
+impl std::fmt::Debug for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Query(_) => "Query",
+            Self::SearchDone { .. } => "SearchDone",
+            Self::Key(..) => "Key",
+            Self::Copy { .. } => "Copy",
+            Self::CopyFinished { .. } => "CopyFinished",
+            Self::ListReloaded(_) => "ListReloaded",
+            Self::DeleteReloaded(_) => "DeleteReloaded",
+            Self::Refocus => "Refocus",
+            Self::Hover(_) => "Hover",
+            Self::MouseMove => "MouseMove",
+            Self::Pick(_) => "Pick",
+            Self::PickStay(_) => "PickStay",
+            Self::Scrolled(_) => "Scrolled",
+            Self::ImageReady { .. } => "ImageReady",
+            Self::Tick => "Tick",
+        })
+    }
+}
+
 /// 列内固定高度垂直间隙（iced 0.14 的 space::vertical() 是 Fill 语义，
 /// 需要定高间隙时用它手动构造）
 fn vspace(h: f32) -> space::Space {
@@ -107,19 +130,13 @@ fn run_bg<T, F>(
 ) -> Task<Message>
 where
     T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
+    F: FnOnce() -> T + Send + std::panic::UnwindSafe + 'static,
 {
     Task::perform(
-        async move {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(f());
-            });
-            rx.recv().ok()
-        },
-        move |t| match t {
-            Some(v) => wrap(v),
-            None => on_panic,
+        async move { std::panic::catch_unwind(f) },
+        move |result| match result {
+            Ok(v) => wrap(v),
+            Err(_) => on_panic,
         },
     )
 }
@@ -157,13 +174,13 @@ fn compute_filtered(
     search_hits_gen: u64,
     clips_gen: u64,
 ) -> (bool, Vec<usize>) {
-    if query.is_empty() {
+    if query.trim().is_empty() {
         return (false, (0..clips.len()).collect());
     }
+    let q = query.trim().to_lowercase();
     // 候选是子串命中，fuzzy 子序列必命中；极端大小写折叠差异导致全不匹配时
     // 回落搜索自身序（不展示空列表）
     if search_hits_query == query && search_hits_gen == clips_gen && !search_hits.is_empty() {
-        let q = query.to_lowercase();
         let mut scored: Vec<(i32, usize)> = search_hits
             .iter()
             .enumerate()
@@ -176,7 +193,6 @@ fn compute_filtered(
         scored.sort_by_key(|s| Reverse(s.0));
         return (true, scored.into_iter().map(|(_, i)| i).collect());
     }
-    let q = query.to_lowercase();
     let mut scored: Vec<(i32, usize)> = clips
         .iter()
         .enumerate()
@@ -203,6 +219,8 @@ struct App {
     search_hits: Vec<store::Clip>,
     search_hits_query: String,
     search_hits_gen: u64,
+    /// 一次只查一个词。查询结束后再读取输入框的最新内容。
+    search_in_flight: bool,
     query: String,
     /// 过滤结果缓存。悬停/选中/复制等高频事件都会调 filtered()，全量评分排序
     /// O(n·m) 不能每事件重算；来源与下标必须成对缓存，见 `FilteredCache`
@@ -245,6 +263,10 @@ impl App {
     fn new() -> Self {
         let cfg = config::Config::load();
         let clips = store::list(Self::load_limit()).unwrap_or_default();
+        Self::with_history(cfg, clips)
+    }
+
+    fn with_history(cfg: config::Config, clips: Vec<store::Clip>) -> Self {
         let first_id = clips.first().map(|c| c.id);
         Self {
             search_id: iced::widget::Id::unique(),
@@ -257,6 +279,7 @@ impl App {
             search_hits: Vec::new(),
             search_hits_query: String::new(),
             search_hits_gen: 0,
+            search_in_flight: false,
             query: String::new(),
             filtered_cache: RefCell::new(None),
             selected: 0,
@@ -283,21 +306,16 @@ impl App {
         store::MENU_LIMIT
     }
 
-    /// 全库搜索请求（任务 2.1；门槛调整见任务 2.6）：**任何非空查询**都走
-    /// `store::search`——≥3 字符用 FTS trigram MATCH，<3 字符由 store 内部回落
-    /// LIKE 全库扫描。门槛从 3 降到 1 的原因：列表窗口已统一为 `MENU_LIMIT`，
-    /// 若短查询只做内存过滤，超出窗口的旧条目将永远搜不到。发出即清空旧结果
-    /// （回落内存过滤，不展示过期候选）；worker 异常静默空集
+    /// 短查询也查全库。保留原始输入作请求标识，空白由 store::search 统一裁剪。
     fn request_search(&mut self) -> Task<Message> {
-        if self.query.trim().is_empty() {
-            self.search_hits_query.clear();
+        if self.search_in_flight
+            || self.query.trim().is_empty()
+            || (self.search_hits_query == self.query && self.search_hits_gen == self.clips_gen)
+        {
             return Task::none();
         }
-        if self.search_hits_query == self.query && self.search_hits_gen == self.clips_gen {
-            return Task::none();
-        }
-        self.search_hits_query.clear();
-        let q_bg = self.query.trim().to_owned();
+        self.search_in_flight = true;
+        let q_bg = self.query.clone();
         let gen = self.clips_gen;
         // query/gen 打包进 T 侧返回值：run_bg 的 wrap 是 Fn，不能捕获移动
         // 外部变量（iced Task::perform 的包装闭包可能被多次调用）
@@ -308,8 +326,8 @@ impl App {
             },
             |(query, gen, hits)| Message::SearchDone { query, gen, hits },
             Message::SearchDone {
-                query: String::new(),
-                gen: 0,
+                query: self.query.clone(),
+                gen,
                 hits: Vec::new(),
             },
         )
@@ -546,5 +564,60 @@ mod tests {
         let (from_search, idxs) = compute_filtered("", &clips, &[], "", 0, 0);
         assert!(!from_search);
         assert_eq!(pick(&clips, &idxs), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn completed_search_replaces_the_window_cache_and_updates_selection() {
+        let mut app = App::with_history(config::Config::default(), vec![clip(1, "recent")]);
+        let _ = app.handle_message(Message::Query(" older ".into()));
+        assert!(app.filtered().is_empty());
+        let _ = app.handle_message(Message::SearchDone {
+            query: " older ".into(),
+            gen: 0,
+            hits: vec![clip(2, "older entry")],
+        });
+        assert_eq!(app.filtered()[app.selected].id, 2);
+        assert_eq!(app.selected_id, Some(2));
+        assert!(!app.search_in_flight);
+    }
+
+    #[test]
+    fn rapid_input_only_dispatches_the_latest_waiting_query() {
+        let mut app = App::with_history(config::Config::default(), vec![]);
+        let _ = app.handle_message(Message::Query("a".into()));
+        app.query = "ab".into();
+        assert_eq!(app.request_search().units(), 0);
+        app.query = "abc".into();
+        assert_eq!(app.request_search().units(), 0);
+        let next = app.handle_message(Message::SearchDone {
+            query: "a".into(),
+            gen: 0,
+            hits: vec![clip(1, "a")],
+        });
+        assert_eq!(next.units(), 1);
+        assert!(app.search_hits.is_empty());
+        assert!(app.search_in_flight);
+    }
+
+    #[test]
+    fn debug_events_omit_keys_queries_and_history() {
+        let marker = "synthetic-private-text";
+        let hits = vec![clip(1, marker)];
+        for event in [
+            Message::Key(
+                keyboard::Key::Character(marker.into()),
+                keyboard::Modifiers::empty(),
+            ),
+            Message::Query(marker.into()),
+            Message::SearchDone {
+                query: marker.into(),
+                gen: 0,
+                hits: hits.clone(),
+            },
+            Message::ListReloaded(Some(hits.clone())),
+            Message::DeleteReloaded(Some(hits)),
+        ] {
+            assert!(!format!("{event:?}").contains(marker));
+        }
     }
 }

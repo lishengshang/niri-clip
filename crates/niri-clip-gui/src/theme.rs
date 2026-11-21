@@ -96,14 +96,17 @@ pub const SHADOW_ROW: Shadow = Shadow {
     blur_radius: 5.0,
 };
 
-pub fn prompt_style(_theme: &iced::Theme, _status: text_input::Status) -> text_input::Style {
+pub fn prompt_style(_theme: &iced::Theme, status: text_input::Status) -> text_input::Style {
     text_input::Style {
-        // 无边框无底色，融入提示符行（fzf 的输入就是一段裸文本）
-        background: Background::Color(BG),
+        background: Background::Color(PANEL),
         border: Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: border::Radius::default(),
+            color: if matches!(status, text_input::Status::Focused { .. }) {
+                ACCENT
+            } else {
+                BORDER
+            },
+            width: 1.0,
+            radius: RADIUS_ROW,
         },
         icon: ACCENT,
         placeholder: MUTED,

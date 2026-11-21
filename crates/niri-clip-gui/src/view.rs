@@ -15,28 +15,9 @@ impl App {
     pub(super) fn view(&self) -> Element<'_, Message> {
         let cur = self.cur_hash();
         let filtered = self.filtered();
-        let q_lower = self.query.to_lowercase();
-
-        // 视觉对齐 fzf TUI：info 头行 → "剪贴板> " 提示符 → 行列表 → 底部预览
-        let counter = format!("{}/{}", filtered.len(), self.clips.len());
-        // 提示行：键位 accent 高亮、说明 muted，紧凑单行（fzf header 风格）
-        let mut hints: Vec<text::Span<'static, (), Font>> = Vec::new();
-        let hint_groups = [
-            ("1-9,0", "快选"),
-            ("⏎", "复制"),
-            ("右键", "连复"),
-            ("/", "搜索"),
-            ("Ctrl-P", "固定"),
-            ("Ctrl-X", "删除"),
-            ("Esc", "清除/退出"),
-        ];
-        for (i, (k, d)) in hint_groups.iter().enumerate() {
-            if i > 0 {
-                hints.push(text::Span::new(" · ").color(SCROLLBAR));
-            }
-            hints.push(text::Span::new((*k).to_string()).color(ACCENT));
-            hints.push(text::Span::new((*d).to_string()).color(MUTED));
-        }
+        let query = self.query.trim();
+        let q_lower = query.to_lowercase();
+        let shown = filtered.len().min(store::MENU_LIMIT);
 
         let rows = filtered
             .iter()
@@ -139,45 +120,38 @@ impl App {
             list = list.push(row);
         }
 
-        let mut col = iced::widget::column![].push(
-            container(
-                row![
-                    text::Rich::with_spans(hints)
-                        .size(10)
-                        .font(UI_FONT)
-                        .wrapping(text::Wrapping::None),
-                    space::horizontal(),
-                    text(counter).size(10).color(MUTED)
-                ]
-                .width(Length::Fill),
-            )
-            .width(Length::Fill)
-            .padding([6, 10]),
-        );
-        // 列不再用统一 spacing(6)：列表与预览之间零缝隙，预览背景全铺满
-        // 到底边；上方元素间的间距改为显式垂直空隙
-        col = col
-            .push(vspace(6.0))
-            .push(
-                // fzf 式提示符行：无输入框边框，前缀 + 透明输入区
-                row![
-                    text("剪贴板> ").size(14).color(ACCENT),
-                    text_input("", &self.query)
-                        .id(self.search_id.clone())
-                        .on_input(Message::Query)
-                        .on_paste(Message::Query)
-                        .size(14)
-                        .font(UI_FONT)
-                        .padding([7, 0])
-                        .style(prompt_style)
-                ]
-                .width(Length::Fill)
-                .padding([0, 10]),
-            )
-            .push(vspace(6.0))
-            .push(rule::horizontal(1.0).style(rule_style))
-            .push(vspace(6.0))
-            .push(
+        let placeholder = if self.search_mode {
+            "搜索剪贴板历史"
+        } else {
+            "搜索剪贴板历史  (/)"
+        };
+        let search = text_input(placeholder, &self.query)
+            .id(self.search_id.clone())
+            .on_input(Message::Query)
+            .on_paste(Message::Query)
+            .size(15)
+            .padding([8, 10])
+            .style(prompt_style);
+        let header = row![search, text(format!("{shown} 项")).size(12).color(MUTED)]
+            .align_y(iced::Alignment::Center)
+            .spacing(12)
+            .padding([10, 12]);
+        let mut col = iced::widget::column![header, rule::horizontal(1.0).style(rule_style)];
+        if filtered.is_empty() {
+            let label = if query.is_empty() {
+                "暂无剪贴板历史"
+            } else if self.search_in_flight {
+                "正在搜索…"
+            } else {
+                "没有匹配的条目"
+            };
+            col = col.push(
+                container(text(label).size(15).color(MUTED))
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            );
+        } else {
+            col = col.push(
                 scrollable(list)
                     .id(self.list_id.clone())
                     .height(Length::Fill)
@@ -185,10 +159,11 @@ impl App {
                     .on_scroll(Message::Scrolled)
                     .style(scroll_style),
             );
+        }
 
         if self.confirm_delete {
             col = col.push(vspace(6.0)).push(
-                container(text("◆ 星标条目删除确认：再按 Ctrl-X 执行，Esc 取消").size(12))
+                container(text("再次按 Ctrl-X 删除固定条目，Esc 取消").size(12))
                     .width(Length::Fill)
                     .padding([6, 10])
                     .style(confirm_style),
@@ -250,6 +225,15 @@ impl App {
                 .style(preview_style),
             );
         }
+
+        col = col.push(rule::horizontal(1.0).style(rule_style)).push(
+            container(
+                text("↑↓ 选择    Enter 复制    Ctrl-P 固定    Ctrl-X 删除")
+                    .size(12)
+                    .color(MUTED),
+            )
+            .padding([6, 12]),
+        );
 
         container(col)
             .width(Length::Fill)
