@@ -85,8 +85,6 @@ enum Message {
         id: i64,
         handle: Option<image::Handle>,
     },
-    /// 启动后触发一次：让首屏选中的图片也走后台解码路径
-    Tick,
 }
 
 // 键入、搜索结果和列表重载都可能携带剪贴板正文。调试日志只记录事件名。
@@ -107,7 +105,6 @@ impl std::fmt::Debug for Message {
             Self::PickStay(_) => "PickStay",
             Self::Scrolled(_) => "Scrolled",
             Self::ImageReady { .. } => "ImageReady",
-            Self::Tick => "Tick",
         })
     }
 }
@@ -243,8 +240,9 @@ struct App {
     notify_enabled: bool,
     /// 滚动视口实测半高（on_scroll 回填，resize 自适应），初始为估算值
     viewport_half: f32,
+    viewport_offset: f32,
     /// 鼠标悬停跟随开关：键盘导航时关闭——列表在静止指针下滑动会
-    /// 逐行触发 on_enter，悬停跟随会反复抢走选中态（界面闪烁根因）
+    /// 逐行触发悬停事件，悬停跟随会反复抢走选中态（界面闪烁根因）
     mouse_follow: bool,
     /// 当前项指针 TTL 缓存：(读取时刻, 值)。▶ 标记的文件读收敛到
     /// 至多 2 次/秒（TTL 内的滞后对 ▶ 展示无感知影响）
@@ -291,6 +289,7 @@ impl App {
             enable_preview: cfg.enable_preview,
             notify_enabled: cfg.notify_enabled,
             viewport_half: VIEWPORT_HALF,
+            viewport_offset: 0.0,
             mouse_follow: false,
             cur_cache: RefCell::new(None),
             image_cache: RefCell::new(Vec::new()),
@@ -446,7 +445,8 @@ impl App {
 /// 行定高：Rich 文本 14px × 行高 1.3 ≈ 18.2 + 上下 padding 8，凑整 27。
 /// 分界线 1px → 行距（pitch）恒定 28，键盘导航的 scroll_to 据此精确计算
 const ROW_HEIGHT: f32 = 27.0;
-const ROW_PITCH: f32 = ROW_HEIGHT + 1.0;
+const ROW_SEPARATOR: f32 = 1.0;
+const ROW_PITCH: f32 = ROW_HEIGHT + ROW_SEPARATOR;
 /// 视口半高初始估算（675 - 头行/提示符/预览窗格），on_scroll 回填实测值
 const VIEWPORT_HALF: f32 = 240.0;
 /// 保留最近解码的预览缩略图。
@@ -465,12 +465,11 @@ fn main() -> iced::Result {
     // rule.kdl 约定，app-id = "niri-clip-gui"），winit 原生 IME
     iced::application(
         || {
-            let app = App::new();
-            // 搜索默认关（/ 才进入）：启动不聚焦输入框——光标不闪烁，窗口
-            // 零强制重绘待机。Tick 触发首屏选中图片的后台解码派发
-            // （ensure_image_decode 挂在 update 尾部，启动后需一条消息引出）
-            let tick = Task::perform(async {}, move |_| Message::Tick);
-            (app, tick)
+            let mut app = App::new();
+            app.refresh_cur();
+            // 首屏直接派发需要的图片解码，避免文本和空库为一次启动消息重做布局。
+            let decode = app.ensure_image_decode();
+            (app, decode)
         },
         App::update,
         App::view,

@@ -39,7 +39,6 @@ impl App {
                 }
                 return Task::none();
             }
-            Message::Tick => return Task::none(),
             Message::Query(q) => {
                 // 同值回调必须忽略：搜索框持有焦点时，iced text_input 把
                 // Ctrl+X 当"剪切"处理——空输入无编辑也发 on_input("")，且
@@ -56,8 +55,8 @@ impl App {
             }
             Message::Key(key, modifiers) => return self.on_key(key, modifiers),
             Message::Hover(idx) => {
-                // 仅在鼠标活跃时跟随：键盘滚动中忽略 on_enter（防闪烁）
-                if self.mouse_follow && idx < self.visible_len() {
+                // 仅在鼠标活跃且换行时跟随，行内移动保留该行的删除确认。
+                if self.mouse_follow && idx != self.selected && idx < self.visible_len() {
                     self.set_selection(idx);
                     // 选中已离开星标行：挂起的二段确认随之作废
                     self.cancel_confirm();
@@ -89,8 +88,9 @@ impl App {
             Message::Scrolled(vp) => {
                 // 真实视口高度回填：resize / 预览高度变化后滚动跟随仍居中
                 let h = vp.bounds().height;
+                self.viewport_offset = vp.absolute_offset().y;
                 if h > 1.0 {
-                    self.viewport_half = (h / 2.0).clamp(120.0, 400.0);
+                    self.viewport_half = h / 2.0;
                 }
             }
             Message::Copy { exit } => {
@@ -303,7 +303,7 @@ impl App {
 
     pub(super) fn move_selection(&mut self, delta: i32) -> Task<Message> {
         // 键盘导航接管选中：暂停悬停跟随（列表滚过静止指针会触发
-        // 一串 on_enter，把选中态抢回去——闪烁根因）
+        // 一串悬停事件，把选中态抢回去——闪烁根因）
         self.mouse_follow = false;
         let n = self.visible_len();
         if n > 0 {
@@ -410,7 +410,7 @@ impl App {
             self.confirm_delete = false;
         }
     }
-    /// ▶ 指针缓存刷新：只在 update（真实消息）路径执行，绝不进 view——
+    /// ▶ 指针缓存刷新：在初始化或 update 路径执行，绝不进 view——
     /// view 会被搜索框光标闪烁周期性拉动重绘（~2Hz），渲染路径上的同步
     /// fs IO（state/current 文件读）会造成与光标同节奏的周期性掉帧/背景
     /// 闪烁。view 只消费缓存（见 cur_hash）

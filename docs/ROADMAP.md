@@ -179,7 +179,7 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 
 | 候选项 | 说明 | 前置 |
 |---|---|---|
-| **原生 UI 后续** | 已交付原生窗口、操作语义和后端选择，选型见 [ADR-001](ADR-001.md)。日常 niri 会话中，空库与满菜单的按键到搜索可输入延迟均超过 50 ms。分段测量已完成，满菜单主要耗时在读完历史到提交首帧，空库需同时检查按键到 CLI 入口的启动链路。测量口径见[架构 §9](ARCHITECTURE.md#performance)。其余验收包括 niri stable / sway 兼容性和各次 minor 发布的文档核对 | 依赖的 `niri-clip-core` 已交付 |
+| **原生 UI 后续** | 已交付原生窗口、操作语义和后端选择，选型见 [ADR-001](ADR-001.md)。按视口布局已降低满菜单的端到端延迟，空库与满菜单的中位数仍超过 50 ms。已拆查首帧布局和 niri 启动链路，软件绘制耗时上升原因待定位。测量口径见[架构 §9](ARCHITECTURE.md#performance)。其余验收包括 niri stable / sway 兼容性和各次 minor 发布的文档核对 | 依赖的 `niri-clip-core` 已交付 |
 | OSC52 远程剪贴板 | SSH/终端场景同步历史 | 1.1（selection 抽象） |
 | 历史内容动作插件化 | 自定义 action（URL 直接打开等） | 2.4 导出格式稳定 |
 | 多选批量删除（TUI/GUI） | fzf `--multi` + GUI 多选；同类均有（clipse 多选、cliphist 2025 已支持多行 delete），批量清理大历史的刚需 | 无 |
