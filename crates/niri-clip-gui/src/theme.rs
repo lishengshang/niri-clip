@@ -52,6 +52,13 @@ pub const HL: Color = Color {
     b: 0.478,
     a: 1.0,
 };
+/// 选中行使用更亮的匹配色，避免红色小字在蓝底上变淡。
+pub const HL_SELECTED: Color = Color {
+    r: 1.0,
+    g: 0.69,
+    b: 0.69,
+    a: 1.0,
+};
 pub const ACCENT: Color = Color {
     r: 0.48,
     g: 0.64,

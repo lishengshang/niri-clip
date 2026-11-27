@@ -151,8 +151,8 @@ impl Standby {
 
     fn subscription(&self) -> Subscription<Event> {
         let events = if self.window.is_some() {
-            iced::event::listen_with(|event, _, id| {
-                App::input_event(event).map(|m| Event::Ui(id, m))
+            iced::event::listen_with(|event, status, id| {
+                App::input_event(event, status).map(|m| Event::Ui(id, m))
             })
         } else if let Some(id) = self.last_closed {
             // 重开窗口自动取消旧定时器。标记窗口 ID 也保护已入队的到期消息。

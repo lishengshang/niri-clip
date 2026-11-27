@@ -32,7 +32,7 @@ use theme::*;
 use iced::widget::{
     container, image, mouse_area, operation, row, rule, scrollable, space, text, text_input,
 };
-use iced::{keyboard, mouse, Background, Border, Element, Font, Length, Subscription, Task};
+use iced::{event, keyboard, mouse, Background, Border, Element, Font, Length, Subscription, Task};
 use niri_clip_core::{config::SelectorConfig, confirm, preview, store};
 
 /// 主字体：JetBrainsMono Nerd Font（真机已装）。
@@ -213,9 +213,8 @@ struct App {
     search_id: iced::widget::Id,
     /// 行列表 scrollable 的 Id：键盘导航时 scroll_to 跟随选中
     list_id: iced::widget::Id,
-    /// 搜索模式（fzf 语义：/ 或 Ctrl-F 才进入，Esc 退出）。未进入时输入框
-    /// 不持有焦点——光标不闪烁 → 窗口零强制重绘待机（闪烁的最后来源）。
-    /// 退出时轮换 search_id 使旧 widget 状态连同焦点一起丢弃
+    preview_id: iced::widget::Id,
+    /// 搜索会话可以保留查询并把焦点交回列表，Esc 才结束会话。
     search_mode: bool,
     clips: Vec<store::Clip>,
     /// clips 更替代数：每次整表重载 +1，作为过滤缓存的失效键之一
@@ -287,6 +286,7 @@ impl App {
             closing: false,
             search_id: iced::widget::Id::unique(),
             list_id: iced::widget::Id::unique(),
+            preview_id: iced::widget::Id::unique(),
             // 搜索默认关（fzf 语义：/ 才进入）：启动时不聚焦输入框，光标
             // 不闪烁，窗口零重绘待机
             search_mode: false,
@@ -444,12 +444,38 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        iced::event::listen_with(|event, _, _| Self::input_event(event))
+        event::listen_with(|event, status, _| Self::input_event(event, status))
     }
 
-    fn input_event(event: iced::Event) -> Option<Message> {
+    fn input_event(event: iced::Event, status: event::Status) -> Option<Message> {
         match event {
-            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                modifiers,
+                repeat,
+                ..
+            }) => {
+                use keyboard::key::Named;
+
+                let captured = status == event::Status::Captured;
+                match key.as_ref() {
+                    // 搜索框消费了剪切时，不再把同一次按键交给删除。
+                    // 长按产生的重复事件也不能充当第二次确认。
+                    keyboard::Key::Character("x")
+                        if modifiers.control() && (captured || repeat) =>
+                    {
+                        return None;
+                    }
+                    keyboard::Key::Named(Named::Tab) if repeat => return None,
+                    // 保留输入框对文本与光标移动的处理。
+                    keyboard::Key::Character("/")
+                    | keyboard::Key::Named(Named::Home | Named::End)
+                        if captured =>
+                    {
+                        return None;
+                    }
+                    _ => {}
+                }
                 Some(Message::Key(key, modifiers))
             }
             // 悬停跟随只由物理指针移动恢复（见 Message::MouseMove 注释）
@@ -657,6 +683,62 @@ mod tests {
         });
         assert_eq!(app.ensure_image_decode().units(), 1);
         assert_eq!(app.selected_id, Some(3));
+    }
+
+    #[test]
+    fn ctrl_x_only_reaches_delete_for_a_fresh_unclaimed_press() {
+        let route = |status, repeat| {
+            let key = keyboard::Key::Character("x".into());
+            App::input_event(
+                iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    modified_key: key.clone(),
+                    key,
+                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyX),
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::CTRL,
+                    text: None,
+                    repeat,
+                }),
+                status,
+            )
+        };
+        assert!(route(event::Status::Captured, false).is_none());
+        assert!(route(event::Status::Ignored, true).is_none());
+        assert!(matches!(
+            route(event::Status::Ignored, false),
+            Some(Message::Key(_, _))
+        ));
+    }
+
+    #[test]
+    fn preview_scroll_preserves_selection_while_page_navigation_changes_it() {
+        use keyboard::key::Named;
+
+        let clips = (1..=40).map(|id| clip(id, "synthetic")).collect();
+        let mut app = App::with_history(Config::default().into(), clips);
+        app.viewport_half = 2.0 * ROW_PITCH;
+
+        let _ = app.on_key(
+            keyboard::Key::Named(Named::PageDown),
+            keyboard::Modifiers::empty(),
+        );
+        assert_eq!(app.selected_id, Some(5));
+        let scroll = app.on_key(
+            keyboard::Key::Named(Named::PageDown),
+            keyboard::Modifiers::SHIFT,
+        );
+        assert_eq!(scroll.units(), 1);
+        assert_eq!(app.selected_id, Some(5));
+        let _ = app.on_key(
+            keyboard::Key::Named(Named::End),
+            keyboard::Modifiers::empty(),
+        );
+        assert_eq!(app.selected_id, Some(40));
+        let _ = app.on_key(
+            keyboard::Key::Named(Named::Home),
+            keyboard::Modifiers::empty(),
+        );
+        assert_eq!(app.selected_id, Some(1));
     }
 
     #[test]

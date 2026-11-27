@@ -26,6 +26,7 @@ impl App {
         }
         // 主体消息处理 + 选中图片的后台预解码派发（每条消息后检查一次：
         // 选中变了/解码完成都可能产生新的待解码目标，命中缓存则零开销）
+        let previous = self.selected_id;
         let task = self.handle_message(message);
         if self.closing {
             return task;
@@ -36,6 +37,13 @@ impl App {
         // 删除确认横幅的本地镜像同样只在消息路径刷新（见 refresh_confirm）
         self.refresh_confirm();
         let decode = self.ensure_image_decode();
+        if self.enable_preview && self.selected_id != previous {
+            let reset_preview = operation::scroll_to(
+                self.preview_id.clone(),
+                operation::AbsoluteOffset { x: 0.0, y: 0.0 },
+            );
+            return Task::batch([task, decode, reset_preview]);
+        }
         Task::batch([task, decode])
     }
 
@@ -56,10 +64,7 @@ impl App {
                 return Task::none();
             }
             Message::Query(q) => {
-                // 同值回调必须忽略：搜索框持有焦点时，iced text_input 把
-                // Ctrl+X 当"剪切"处理——空输入无编辑也发 on_input("")，且
-                // 该消息先于订阅的 Key 到达。若在此复位选中，Ctrl-X 实际
-                // 执行时 selected 已被归零 → 永远删掉顶部行（跳顶根因）
+                // 如空搜索框收到剪切，iced 仍会产生内容未变的查询消息。
                 if q == self.query {
                     return Task::none();
                 }
@@ -204,43 +209,63 @@ impl App {
         key: keyboard::Key,
         modifiers: keyboard::Modifiers,
     ) -> Task<Message> {
+        use keyboard::key::Named;
+
         // 仅导航/动作键；普通字符、Backspace、Space、IME 提交由持焦点的
         // text_input 自行处理（winit 原生 IME，中文可用）
         match key {
-            keyboard::Key::Named(keyboard::key::Named::ArrowUp) => return self.move_selection(-1),
-            keyboard::Key::Named(keyboard::key::Named::ArrowDown) => return self.move_selection(1),
-            keyboard::Key::Character(c)
-                if c == "/" && !modifiers.control() && !self.search_mode =>
-            {
+            keyboard::Key::Named(Named::ArrowUp) => return self.move_selection(-1),
+            keyboard::Key::Named(Named::ArrowDown) => return self.move_selection(1),
+            keyboard::Key::Named(Named::Home) => return self.select_with_keyboard(0),
+            keyboard::Key::Named(Named::End) => {
+                return self.select_with_keyboard(self.visible_len().saturating_sub(1));
+            }
+            keyboard::Key::Named(Named::PageUp | Named::PageDown) => {
+                let direction = if key == keyboard::Key::Named(Named::PageUp) {
+                    -1
+                } else {
+                    1
+                };
+                if modifiers.shift() {
+                    return self.scroll_preview(direction as f32);
+                }
+                let rows = (self.viewport_half * 2.0 / ROW_PITCH).floor() as isize;
+                return self.move_selection(direction * rows.max(1));
+            }
+            keyboard::Key::Named(Named::Tab) => {
+                // 搜索框是唯一原生焦点控件；Tab 在它和列表键盘导航间切换。
+                self.search_mode = true;
+                return operation::focus_next();
+            }
+            keyboard::Key::Character(c) if c == "/" && !modifiers.control() => {
                 // fzf 语义：/ 进入搜索（Ctrl-F 同效）。输入框获得焦点后
                 // 光标才开始闪烁；未进入时字符不进入搜索，导航/快选不受影响
                 self.search_mode = true;
                 return iced::widget::operation::focus(self.search_id.clone());
             }
-            keyboard::Key::Character(c) if modifiers.control() && c == "f" && !self.search_mode => {
+            keyboard::Key::Character(c) if modifiers.control() && c == "f" => {
                 self.search_mode = true;
                 return iced::widget::operation::focus(self.search_id.clone());
             }
-            keyboard::Key::Named(keyboard::key::Named::Escape) => {
-                // fzf 语义：有输入/确认时先取消，空查询才退出。
-                // 退出搜索时轮换输入框 Id：旧 widget 状态连同焦点一起丢弃，
-                // 光标熄灭 → 窗口回到零重绘待机（周期性闪烁的最后来源）
-                if self.search_mode || !self.query.is_empty() {
-                    self.search_mode = false;
-                    self.query.clear();
-                    self.cancel_confirm();
-                    self.set_selection(0);
-                    self.search_id = iced::widget::Id::unique();
-                    return self.scroll_to_selected();
-                }
+            keyboard::Key::Named(Named::Escape) => {
                 if self.confirm_delete {
                     self.cancel_confirm();
+                } else if self.search_mode || !self.query.is_empty() {
+                    self.search_mode = false;
+                    self.query.clear();
+                    self.set_selection(0);
+                    return Task::batch([
+                        self.scroll_to_selected(),
+                        iced::advanced::widget::operate(
+                            iced::advanced::widget::operation::focusable::unfocus(),
+                        ),
+                    ]);
                 } else {
                     // 同 CopyFinished：走正常析构（任务 2.6 / D3）
                     return self.close();
                 }
             }
-            keyboard::Key::Named(keyboard::key::Named::Enter) => {
+            keyboard::Key::Named(Named::Enter) => {
                 return self.update(Message::Copy { exit: true });
             }
             keyboard::Key::Character(c) if modifiers.control() && c == "y" => {
@@ -318,14 +343,17 @@ impl App {
         Task::none()
     }
 
-    pub(super) fn move_selection(&mut self, delta: i32) -> Task<Message> {
+    fn move_selection(&mut self, delta: isize) -> Task<Message> {
+        self.select_with_keyboard(self.selected.saturating_add_signed(delta))
+    }
+
+    fn select_with_keyboard(&mut self, target: usize) -> Task<Message> {
         // 键盘导航接管选中：暂停悬停跟随（列表滚过静止指针会触发
         // 一串悬停事件，把选中态抢回去——闪烁根因）
         self.mouse_follow = false;
         let n = self.visible_len();
         if n > 0 {
-            let next = self.selected as i64 + delta as i64;
-            let next = next.clamp(0, n as i64 - 1) as usize;
+            let next = target.min(n - 1);
             if next != self.selected {
                 // 选中已离开星标行：挂起的二段确认随之作废
                 self.cancel_confirm();
@@ -335,6 +363,20 @@ impl App {
             return self.scroll_to_selected();
         }
         Task::none()
+    }
+
+    fn scroll_preview(&self, direction: f32) -> Task<Message> {
+        if self.enable_preview && self.selected_id.is_some() {
+            operation::scroll_by(
+                self.preview_id.clone(),
+                operation::AbsoluteOffset {
+                    x: 0.0,
+                    y: direction * (PREVIEW_HEIGHT - 28.0),
+                },
+            )
+        } else {
+            Task::none()
+        }
     }
 
     /// 把选中行滚动到可视区中部（行高定长 ROW_PITCH，偏移可精确计算；

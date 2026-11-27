@@ -66,6 +66,7 @@ impl App {
             let preview = preview::preview_text_columns(clip, self.preview_width.min(PREVIEW_COLS))
                 .replace('↵', "⏎");
             let base = if selected { ROW_FG_SELECTED } else { ROW_FG };
+            let highlight = if selected { HL_SELECTED } else { HL };
 
             // fzf 灵魂：命中查询子序列的字符用 hl 色点亮
             let flags = if self.query.is_empty() {
@@ -83,17 +84,21 @@ impl App {
                     .as_ref()
                     .is_some_and(|f| f.get(i).copied().unwrap_or(false));
                 if i > 0 && hit != run_hit {
-                    spans.push(text::Span::new(std::mem::take(&mut run)).color(if run_hit {
-                        HL
-                    } else {
-                        base
-                    }));
+                    spans.push(
+                        text::Span::new(std::mem::take(&mut run))
+                            .color(if run_hit { highlight } else { base })
+                            .underline(run_hit),
+                    );
                 }
                 run_hit = hit;
                 run.push(ch);
             }
             if !run.is_empty() {
-                spans.push(text::Span::new(run).color(if run_hit { HL } else { base }));
+                spans.push(
+                    text::Span::new(run)
+                        .color(if run_hit { highlight } else { base })
+                        .underline(run_hit),
+                );
             }
 
             // 鼠标交互：悬停跟随选中，点击复制关闭
@@ -173,7 +178,11 @@ impl App {
             .size(15)
             .padding([8, 10])
             .style(prompt_style);
-        let header = row![search, text(format!("{shown} 项")).size(12).color(MUTED)]
+        let position = match selected {
+            Some(_) => format!("{} / {shown} 项", self.selected + 1),
+            None => format!("{shown} 项"),
+        };
+        let header = row![search, text(position).size(12).color(MUTED)]
             .align_y(iced::Alignment::Center)
             .spacing(12)
             .padding([10, 12]);
@@ -252,6 +261,7 @@ impl App {
             col = col.push(
                 container(
                     scrollable(text(self.preview_text(clip)).size(12))
+                        .id(self.preview_id.clone())
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .style(scroll_style),
@@ -263,14 +273,14 @@ impl App {
             );
         }
 
-        col = col.push(rule::horizontal(1.0).style(rule_style)).push(
-            container(
-                text("↑↓ 选择    Enter 复制    Ctrl-P 固定    Ctrl-X 删除")
-                    .size(12)
-                    .color(MUTED),
-            )
-            .padding([6, 12]),
-        );
+        let tips = if self.enable_preview {
+            "Tab 搜索或列表    ↑↓ / PgUp / PgDn 选择    Enter 复制\nCtrl-P 固定    Ctrl-X 删除    Shift+PgUp/PgDn 滚动文本预览"
+        } else {
+            "Tab 搜索或列表    ↑↓ / PgUp / PgDn 选择    Enter 复制\nCtrl-P 固定    Ctrl-X 删除"
+        };
+        col = col
+            .push(rule::horizontal(1.0).style(rule_style))
+            .push(container(text(tips).size(12).color(MUTED)).padding([6, 12]));
 
         container(col)
             .width(Length::Fill)
