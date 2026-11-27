@@ -204,6 +204,36 @@ fn all_three_image_types_roundtrip_through_store_and_copy() {
     }
 }
 
+#[test]
+fn failed_copy_reports_error_and_preserves_current_clip() {
+    let sb = Sandbox::new("copy-failure", "");
+    write_exe(
+        &sb.root.join("fakebin/wl-copy"),
+        &format!("{FAKE_WL_COPY}exit 5\n"),
+    );
+    let text = b"synthetic text fixture";
+    let image = payload(PNG, b"copy-failure", 128);
+    assert!(sb.store(text).status.success());
+    let text_id = sb.ids()[0];
+    assert!(sb.store(&image).status.success());
+    let image_id = sb.ids()[0];
+    assert!(sb.store(b"existing clipboard selection").status.success());
+    let original = sb.list_raw();
+
+    for (id, bytes) in [(text_id, text.as_slice()), (image_id, image.as_slice())] {
+        let out = sb.run(&["copy", &id.to_string()], None);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "copy reported success for {id}");
+        assert!(out.stdout.is_empty());
+        assert!(
+            stderr.contains("wl-copy failed: exit status: 5"),
+            "{stderr}"
+        );
+        assert_eq!(sb.copied().1, bytes);
+        assert_eq!(sb.list_raw(), original, "copy failure changed current clip");
+    }
+}
+
 /// 截图常态：> max_clip_bytes（默认 1 MiB）但 < max_image_bytes（10 MiB）。
 /// 锁定向图片限额续读的逻辑——按文本限额截断会存下残缺图片。
 #[test]

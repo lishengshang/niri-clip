@@ -892,38 +892,33 @@ pub fn get(id: i64) -> Result<Clip> {
 /// 此前一律写 text，把占位文本顶进剪贴板（还顺带毁掉当前真实的截图），
 /// 粘贴出来的是一行字而不是图。
 pub fn copy_to_clipboard(id: i64) -> Result<()> {
+    use std::process::{Command, Stdio};
+
     let clip = get(id)?;
+    let mut command = Command::new("wl-copy");
+    // wl-copy 会 fork 守护进程常驻服务剪贴板，不得持有调用方终端 fd。
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     if clip.mime.starts_with("image/") {
         let path = clip
             .image_path
             .as_deref()
             .context("图片条目缺少数据文件路径")?;
         let file = std::fs::File::open(path).with_context(|| format!("open {path}"))?;
-        let mut wl = std::process::Command::new("wl-copy")
+        command
             .arg(format!("--type={}", clip.mime))
             // wl-copy 直接读 fd，无需内存中转 stdin 管道
-            .stdin(std::process::Stdio::from(file))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("wl-copy")?;
-        wl.wait()?;
-        touch_current(&clip.hash);
-        return Ok(());
+            .stdin(Stdio::from(file));
+    } else {
+        command.stdin(Stdio::piped());
     }
-    let mut wl = std::process::Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        // wl-copy 会 fork 守护进程常驻服务剪贴板，不得持有调用方终端 fd
-        // （详见 tui.rs 同款注释），重定向 null 释放 pty
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("wl-copy")?;
-    wl.stdin
-        .as_mut()
-        .expect("piped stdin")
-        .write_all(clip.text.as_bytes())?;
-    wl.wait()?;
+    let mut child = command.spawn().context("start wl-copy")?;
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(clip.text.as_bytes()));
+    let status = child.wait().context("wait for wl-copy")?;
+    anyhow::ensure!(status.success(), "wl-copy failed: {status}");
+    written.context("write to wl-copy")?;
     touch_current(&clip.hash);
     Ok(())
 }
