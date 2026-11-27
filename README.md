@@ -4,7 +4,11 @@ niri / Wayland 的剪贴板历史管理器。按 `Mod+V` 查找、固定或重�
 
 ## 安装
 
-在 niri 会话中使用。安装 Rust 稳定版、C 编译器和 `wl-clipboard`，然后从源码构建。选择器至少安装一种。原生窗口依赖 Wayland 和 libxkbcommon，终端界面需要 fzf 0.71 以上和终端模拟器，fuzzel 可独立使用。
+在 niri 会话中安装 `wl-clipboard`，并选择一个界面。原生窗口依赖 Wayland 和 libxkbcommon，fzf 界面需要 0.71 或更新版本和终端模拟器，fuzzel 可独立使用。
+
+**GitHub Release**。在发布页下载 Linux x86_64 的 CLI 归档、`SHA256SUMS` 和可选的 GUI 归档。在下载目录运行 `sha256sum --check --ignore-missing SHA256SUMS`，确认每个要安装的归档均显示 `OK`。解包后将 `niri-clip` 和可选的 `niri-clip-gui` 放在 `~/.cargo/bin`。[GitHub Releases](https://github.com/lishengshang/niri-clip/releases)
+
+**源码安装**。安装 Rust 稳定版和 C 编译器，再运行：
 
 ```sh
 git clone https://github.com/lishengshang/niri-clip
@@ -13,7 +17,7 @@ cargo install --locked --path crates/niri-clip
 cargo install --locked --path crates/niri-clip-gui   # 可选，原生窗口
 ```
 
-确保 `~/.cargo/bin` 在 niri 的 `PATH` 中。当前分发方式为源码安装。AUR、crates.io 和预编译发布包的进度见[路线图](docs/ROADMAP.md)。
+确保 `~/.cargo/bin` 在 niri 的 `PATH` 中。AUR 和 crates.io 的发布进度见[路线图](docs/ROADMAP.md)。
 
 ## 开始使用
 

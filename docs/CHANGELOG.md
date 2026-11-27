@@ -2,77 +2,16 @@
 
 ## Unreleased
 
+## v0.7.0 - 2026-11-27
+
 ### Added
+
+- GitHub Releases 提供 Linux x86_64 的 CLI、原生 GUI 和 SHA-256 校验清单。
 
 - 原生浮窗在同一 niri 显示器上恢复上次关闭时的位置，可用 `remember_window_position` 关闭。
 - 原生浮窗支持用 `gui_idle_timeout_secs` 设置关闭后的待机秒数。待机期间重新打开会复用 GUI 进程并重新读取历史。默认关闭即退出。[打开延迟与待机开销](ARCHITECTURE.md#gui-standby)
 - `niri-clip doctor` 检查配置、数据库、守护进程、niri 绑定和运行依赖。发现失败项时返回非零退出码。
 
-### Changed
-
-- 原生窗口支持在搜索框和结果之间切换焦点，按页导航结果，并用键盘滚动文本预览。
-- 普通剪贴板独立维护当前标记。PRIMARY 划选仍可入库。
-- `store` 直接识别 stdin 中的 PNG、JPEG、WebP，按图片限额读取。
-- 同步 CLI 命令直接执行，daemon 使用单线程 Tokio 运行时。
-- 原生窗口简化搜索栏和按键提示，区分空历史、查询中与无匹配。图片预览缓存等比缩略图，快速切换时一次解码一张。
-- 原生窗口只布局视口及邻近的历史行，缩短首帧和滚动时的布局。
-- 原生窗口并行初始化字体库，历史行共用窗口底色，选中行使用无阴影的圆角高亮。
-- 原生窗口按需创建搜索、复制和图片解码所用的后台线程，减少打开窗口时启动的线程。快捷键延迟和内存复测见[架构 §9](ARCHITECTURE.md#performance)。
-- 选择器打开时复用已读取的排序设置，省去编译捕获过滤正则的工作。捕获与 `doctor` 继续校验同一份配置。[启动复测](ARCHITECTURE.md#selector-config)
-- 查询基准在计时前校验实际库存和返回行数。修正后的数据见[架构 §9](ARCHITECTURE.md#performance)。
-
-### Fixed
-
-- 文件导出保留已有目标和目录权限。导入预检不会创建或迁移历史数据库。
-- 并发打开旧库时串行升级，升级会修复 FTS 索引。孤儿图片清理等待正在写入的事务。
-- 原生窗口在搜索框剪切文字时保留历史，长按删除键只触发一次确认。
-- 监听进程意外退出时 daemon 回收另一条监听并返回失败。
-- 图片格式检测独立于文本限额。被跳过或清空的普通剪贴板内容会清除旧的当前标记。
-- `niri-clip man` 在一页内列出可调用的子命令。core 归档随包提供系统服务模板和配置样例。
-- 显式选择 fuzzel 或从旧版 fzf 回退时，直接打开选择器。切换 fzf 二进制后会重新核对版本。
-- `wl-copy` 失败时报告错误，保留历史中的当前项。
-- 原生窗口收到全库搜索结果后刷新列表和选中项，连续输入只接续最新查询。
-- 修正 PRIMARY 监听参数顺序。将 daemon 输出重定向到日志文件时，纯图片仍能捕获。
-- 取消固定的条目移到普通历史开头，避免选择器跟着旧条目滚到后面。
-
-### Security
-
-- 过滤规则无效时暂停文本捕获。已标为敏感的剪贴板事件跳过入库。
-- 未知二进制捕获日志仅显示长度。GUI 调试日志仅显示事件名与选中项标识。
-
-## v0.7.0 - 2026-10-06
-
-### Changed
-- **daemon systemd 单元沙箱加固（3.5）**：`niri-clip.service` 新增 22 项
-  沙箱指令，白名单到"daemon + wl-paste/wl-copy/notify-send 子进程"所需
-  最小面：AF_UNIX + 自身 state 目录读写（`StateDirectory=`，目录自动创建
-  且跟随自定义 `XDG_STATE_HOME`，要求 systemd ≥248）、无 capability、
-  系统调用限 `@system-service`（`~@resources` 二次收窄）、`UMask=0077`
-  （顺带把 flock/pending_delete 等默认 0644 文件收为 0600）、
-  ProtectSystem=strict + ProtectHome=read-only + 内核接口/时钟/主机名全锁。
-  网络防线 = `RestrictAddressFamilies=AF_UNIX`（seccomp 层，user unit
-  生效）——`IPAddressDeny` 经真机实测在 user manager 下不生效（IP
-  firewall 需 root，systemd 启动即警告），不配以免虚假安全感。
-  `systemd-analyze security` 离线评分 **9.4 UNSAFE → 1.9 OK**，真机运行
-  中单元 **1.6 OK**；真机 drop-in 实测 daemon 在沙箱内捕获链路正常、零
-  seccomp 错误（复现：`systemd-analyze security --offline=true
-  assets/niri-clip.service`）。剩余扣分为结构性地板（wayland 必需 AF_UNIX、
-  state 必须在 home 下）与强化档留白（`PrivateUsers` 有 wayland
-  SO_PEERCRED uid 校验风险，默认不开）。文件权限与日志复核结果见 `docs/SECURITY-AUDIT.md`。**真机部署**：重装单元后 `daemon-reload` +
-  restart 确认捕获/粘贴/通知链路正常
-
-### Fixed
-- **GUI 列表行两处显示问题（用户反馈）**：① 当前项指针 ▶ 与固定标记 ◆
-  原本直接拼接，条目"既是当前项又被固定"时两图标贴死糊成一个字形——
-  前缀中间补空格；② 长文本列表行生硬截断：`preview_width` 的"字符数"
-  预算（默认 100）远超 500px 窗口实际行宽（约 46 列），且 CJK/emoji 的
-  advance 约为拉丁 2 倍，混排文本行尾被渲染器像素级硬裁、省略号一并被
-  裁掉。修复：core 新增按显示列宽截断的 `preview_text_columns`（宽字符
-  计 2 列，截断必补 `…`，5 个单测锁定），GUI 按 500px 窗口换算预算
-  （44 列，口径见 view.rs `PREVIEW_COLS`），`cfg.preview_width` 降为
-  用户上限；TUI 终端走字符网格继续用 `preview_text`，语义不变
-
-### Added
 - **加密存储 PoC 结论（3.4 / ADR-006）**：实测评估三条路线后**决定 v2.0 以
   按条目 AEAD（chacha20poly1305 + argon2id）落地，opt-in 默认关**——闭包
   +6 crate、加密 2.5µs/条、密文开销 16 字节；加密条目排除 FTS，搜索走线性
@@ -99,10 +38,39 @@
   标记改为"再按同键确认删除"（挂起可由 Ctrl-X/Ctrl-D 任一发起）。
   端到端测试覆盖弱规则期入库 → 规则强化 → 清除的 3.3 目标场景
 
-### Fixed
-- 大库 `list()` 按索引读取当前项和其余条目，schema v5 增加时间索引。列表查询基准见[架构 §9](ARCHITECTURE.md#performance)。
-
 ### Changed
+
+- Release CI 在发布前校验 tag、测试结果和构建产物。
+
+- 原生窗口支持在搜索框和结果之间切换焦点，按页导航结果，并用键盘滚动文本预览。
+- 普通剪贴板独立维护当前标记。PRIMARY 划选仍可入库。
+- `store` 直接识别 stdin 中的 PNG、JPEG、WebP，按图片限额读取。
+- 同步 CLI 命令直接执行，daemon 使用单线程 Tokio 运行时。
+- 原生窗口简化搜索栏和按键提示，区分空历史、查询中与无匹配。图片预览缓存等比缩略图，快速切换时一次解码一张。
+- 原生窗口只布局视口及邻近的历史行，缩短首帧和滚动时的布局。
+- 原生窗口并行初始化字体库，历史行共用窗口底色，选中行使用无阴影的圆角高亮。
+- 原生窗口按需创建搜索、复制和图片解码所用的后台线程，减少打开窗口时启动的线程。快捷键延迟和内存复测见[架构 §9](ARCHITECTURE.md#performance)。
+- 选择器打开时复用已读取的排序设置，省去编译捕获过滤正则的工作。捕获与 `doctor` 继续校验同一份配置。[启动复测](ARCHITECTURE.md#selector-config)
+- 查询基准在计时前校验实际库存和返回行数。修正后的数据见[架构 §9](ARCHITECTURE.md#performance)。
+
+- **daemon systemd 单元沙箱加固（3.5）**：`niri-clip.service` 新增 22 项
+  沙箱指令，白名单到"daemon + wl-paste/wl-copy/notify-send 子进程"所需
+  最小面：AF_UNIX + 自身 state 目录读写（`StateDirectory=`，目录自动创建
+  且跟随自定义 `XDG_STATE_HOME`，要求 systemd ≥248）、无 capability、
+  系统调用限 `@system-service`（`~@resources` 二次收窄）、`UMask=0077`
+  （顺带把 flock/pending_delete 等默认 0644 文件收为 0600）、
+  ProtectSystem=strict + ProtectHome=read-only + 内核接口/时钟/主机名全锁。
+  网络防线 = `RestrictAddressFamilies=AF_UNIX`（seccomp 层，user unit
+  生效）——`IPAddressDeny` 经真机实测在 user manager 下不生效（IP
+  firewall 需 root，systemd 启动即警告），不配以免虚假安全感。
+  `systemd-analyze security` 离线评分 **9.4 UNSAFE → 1.9 OK**，真机运行
+  中单元 **1.6 OK**；真机 drop-in 实测 daemon 在沙箱内捕获链路正常、零
+  seccomp 错误（复现：`systemd-analyze security --offline=true
+  assets/niri-clip.service`）。剩余扣分为结构性地板（wayland 必需 AF_UNIX、
+  state 必须在 home 下）与强化档留白（`PrivateUsers` 有 wayland
+  SO_PEERCRED uid 校验风险，默认不开）。文件权限与日志复核结果见 `docs/SECURITY-AUDIT.md`。**真机部署**：重装单元后 `daemon-reload` +
+  restart 确认捕获/粘贴/通知链路正常
+
 - **默认 `ignore_regex` 强化（3.1）**：新增密码管理器输出格式的精确匹配——
   1Password 秘密引用 `op://`、OTP 迁移 `otpauth[-migration]://`、Bitwarden
   `bitwarden://`（scheme 词边界 + `://` 锚定，普通 URL 不误伤）、KeePassXC
@@ -117,6 +85,33 @@
   格式 + 原关键词语义不回归 + scheme 边界不误伤
 
 ### Fixed
+
+- AUR 模板改用正确的归档目录，源码构建遵守 Cargo.lock。预编译 CLI 模板与 GitHub Release 产物配套。
+
+- 文件导出保留已有目标和目录权限。导入预检不会创建或迁移历史数据库。
+- 并发打开旧库时串行升级，升级会修复 FTS 索引。孤儿图片清理等待正在写入的事务。
+- 原生窗口在搜索框剪切文字时保留历史，长按删除键只触发一次确认。
+- 监听进程意外退出时 daemon 回收另一条监听并返回失败。
+- 图片格式检测独立于文本限额。被跳过或清空的普通剪贴板内容会清除旧的当前标记。
+- `niri-clip man` 在一页内列出可调用的子命令。core 归档随包提供系统服务模板和配置样例。
+- 显式选择 fuzzel 或从旧版 fzf 回退时，直接打开选择器。切换 fzf 二进制后会重新核对版本。
+- `wl-copy` 失败时报告错误，保留历史中的当前项。
+- 原生窗口收到全库搜索结果后刷新列表和选中项，连续输入只接续最新查询。
+- 修正 PRIMARY 监听参数顺序。将 daemon 输出重定向到日志文件时，纯图片仍能捕获。
+- 取消固定的条目移到普通历史开头，避免选择器跟着旧条目滚到后面。
+
+- **GUI 列表行两处显示问题（用户反馈）**：① 当前项指针 ▶ 与固定标记 ◆
+  原本直接拼接，条目"既是当前项又被固定"时两图标贴死糊成一个字形——
+  前缀中间补空格；② 长文本列表行生硬截断：`preview_width` 的"字符数"
+  预算（默认 100）远超 500px 窗口实际行宽（约 46 列），且 CJK/emoji 的
+  advance 约为拉丁 2 倍，混排文本行尾被渲染器像素级硬裁、省略号一并被
+  裁掉。修复：core 新增按显示列宽截断的 `preview_text_columns`（宽字符
+  计 2 列，截断必补 `…`，5 个单测锁定），GUI 按 500px 窗口换算预算
+  （44 列，口径见 view.rs `PREVIEW_COLS`），`cfg.preview_width` 降为
+  用户上限；TUI 终端走字符网格继续用 `preview_text`，语义不变
+
+- 大库 `list()` 按索引读取当前项和其余条目，schema v5 增加时间索引。列表查询基准见[架构 §9](ARCHITECTURE.md#performance)。
+
 - **>1 MiB 截图无法入库（主捕获路径限流误杀图片，用户实测报告）**：主模式
   `wl-paste --watch` 管道不辨 MIME，截图以原始图片字节直灌 `store`，而入口
   自 1.2 限流起统一按 `max_clip_bytes`（文本 1 MiB）裁断——超文本限即整体
@@ -129,6 +124,11 @@
   ≤1 MiB 图片与正常文本行为不变。回归测试 `crates/niri-clip/tests/store_stdin.rs`
   锁定文本超限拒绝（零入库、报文本限额）与正常文本入库；图片正路径依赖
   真实剪贴板内容，须真机 Wayland 会话人工验证
+
+### Security
+
+- 过滤规则无效时暂停文本捕获。已标为敏感的剪贴板事件跳过入库。
+- 未知二进制捕获日志仅显示长度。GUI 调试日志仅显示事件名与选中项标识。
 
 ## v0.6.0 - 2026-09-12
 
