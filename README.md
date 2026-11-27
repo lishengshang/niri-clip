@@ -17,13 +17,15 @@ cargo install --locked --path crates/niri-clip-gui   # 可选，原生窗口
 
 ## 开始使用
 
-1. 启动捕获。使用 Cargo 默认安装位置时，可安装用户服务。已在 niri 中配置 `spawn-at-startup "niri-clip" "daemon"` 的用户可沿用该方式。
+1. 选择一种方式启动捕获。使用 Cargo 默认安装位置时，可安装 systemd 用户服务。
 
    ```sh
    niri-clip install-service
    systemctl --user daemon-reload
    systemctl --user enable --now niri-clip.service
    ```
+
+   也可以在 niri 配置顶层添加 `spawn-at-startup "niri-clip" "daemon"`，在下次登录时自动启动。要在当前会话立即启动，可运行 `niri msg action spawn -- niri-clip daemon`。
 
 2. 在 niri 配置的 `binds` 中添加快捷键。仓库也提供[快捷键和浮动窗口规则](assets/niri-clip.kdl)。
 
@@ -77,6 +79,7 @@ enable_image_preview = true
 | 导出与恢复 | `niri-clip export history.ndjson`、`niri-clip import history.ndjson` |
 | 从 cliphist 迁移 | `niri-clip migrate` |
 | 查看命令和参数 | `niri-clip --help`、`niri-clip <命令> --help` |
+| 阅读命令手册 | `niri-clip man \| man -l -` |
 
 ## 开发
 

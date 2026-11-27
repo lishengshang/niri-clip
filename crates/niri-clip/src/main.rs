@@ -10,7 +10,12 @@ mod doctor;
 mod tui;
 
 #[derive(Parser)]
-#[command(name = "niri-clip", version, about = "niri / Wayland 剪贴板历史管理器")]
+#[command(
+    name = "niri-clip",
+    version,
+    about = "niri / Wayland 剪贴板历史管理器",
+    after_help = "直接运行 niri-clip 打开选择器。运行 niri-clip <子命令> --help 查看子命令用法。"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -24,7 +29,7 @@ enum Commands {
     Tui,
     /// 从标准输入捕获文本或图片
     Store,
-    /// 安装 systemd user 单元到 ~/.config/systemd/user/（随后 enable --now 即可托管）
+    /// 写入 systemd 用户单元（使用 Cargo 默认安装路径 ~/.cargo/bin/niri-clip）
     InstallService,
     /// 列出历史 (供 fzf reload 调用)
     #[command(name = "list-raw")]
@@ -51,9 +56,8 @@ enum Commands {
         #[arg(long)]
         fzf: bool,
     },
-    /// 快速删除当前项（▶ 最后一次复制的内容，任务 3.3）：无需定位选中行，
-    /// Mod+V 打开后一把 Ctrl-D 即可清掉刚复制进来的敏感内容。确认语义同
-    /// delete（星标需二次确认，ADR-005）；--fzf 由 fzf 绑定调用
+    /// 删除历史中标有 ▶ 的条目。该标记跟踪最近一次成功捕获或从历史复制的记录。
+    /// fzf 中可用 Ctrl-D。固定条目需二次确认。
     DeleteCurrent {
         #[arg(long)]
         fzf: bool,

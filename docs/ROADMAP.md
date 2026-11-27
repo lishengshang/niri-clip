@@ -1,6 +1,6 @@
 # niri-clip 长期开发路线图
 
-> 更新日期：2026-11-21 · 工作区版本：v0.7.0
+> 更新日期：2026-11-27 · 工作区版本：v0.7.0
 > 时间估算假设：单人维护者，每周 8–12 有效工时；所有时间节点为**相对量**，按实际投入动态校准。
 > 实测数值（依赖闭包/编译时间/基准）的唯一真相源为 `ARCHITECTURE.md` §9，本文不重复记数。
 
@@ -163,7 +163,7 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 | 4.2 | AUR 三包齐备 | `niri-clip`（release）、`niri-clip-git`、`niri-clip-bin`（预编译）。**决策（2026-08-28）：AUR 首次发布随 epic（原生 UI）合并后的首个版本一起**；主包构建 `-p niri-clip`（不含 gui 依赖链，makedepends 不需要 libxkbcommon），`niri-clip-gui` 待 M5.4 单独分包；`sqlite` 非运行依赖（rusqlite bundled）已移除 | 三包 CI 自动 bump + 安装冒烟 |
 | 4.3 | crates.io 发布 | `cargo publish`，检查 package metadata 完整 | `cargo install niri-clip` 可用 |
 | 4.4 | waybar 模块 | JSON 输出（历史条数/最新条目/daemon 状态），`niri-clip waybar` | waybar wiki 配置示例可用 |
-| 4.5 | 🟡 文档完善 | README 已整理安装、快捷键、数据位置并附合成数据实图。架构文档已更新性能口径，Unreleased 已按变更类型整理 | 待校对 man 页，并由新用户从源码安装到首次复制 |
+| 4.5 | 🟡 文档完善 | 已校对生成的 man 页，README 补充了启动捕获的两种方式。干净 XDG 环境下已从源码安装，由 niri 启动捕获和原生窗口，选中合成历史并通过剪贴板回读 | 待新用户在自己的 niri 会话中按 README 独立走完首次复制 |
 | 4.6 | CI 深化 | 增加：release 自动打包（GitHub Releases + SHA256）、AUR 机器人、benchmark 趋势 | tag 即全渠道发布，人工只做审核 |
 | 4.7 | ✅ 兼容性矩阵验证 | niri 26.04 嵌套会话中，fzf 0.75.0 分别在 foot、Alacritty、kitty 内通过选择和复制回读。fzf 0.70.0 直接回退 fuzzel 1.15.0 并通过回读 | 合成数据验证，覆盖无控制终端的启动路径 |
 | 4.8 | 版本语义承诺 | 发布 v1.0.0，宣布 SemVer + 配置格式向后兼容承诺 | CHANGELOG 声明 |
