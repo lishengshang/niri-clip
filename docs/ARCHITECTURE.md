@@ -177,6 +177,7 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
 - `PKGBUILD` `cargo build --release --locked` → `/usr/bin/niri-clip` + `/usr/share/doc` + `systemd user`
 - `PKGBUILD.git` `git+https://...` + `pkgver()`
 - `AUR` `makepkg --printsrcinfo > .SRCINFO`
+- core crate 经本地符号链接复用系统服务模板和配置样例。Cargo 打包时把两者作为普通文件收进独立归档，可在工作区之外构建和运行测试。
 - systemd 单元内置 22 项沙箱指令（AF_UNIX + 自身 state 最小面）；指令取舍、
   实测评分与强化档见 `SECURITY-AUDIT.md` §③（该文是沙箱细节的唯一出处）
 

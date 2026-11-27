@@ -394,8 +394,8 @@ mod tests {
     /// 缺失即断言失败（防止它被静默删除后本测试空转）
     #[test]
     fn example_config_matches_defaults_and_parses() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/config.toml.example");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example");
         assert!(
             path.exists(),
             "config/config.toml.example 必须存在: {}",

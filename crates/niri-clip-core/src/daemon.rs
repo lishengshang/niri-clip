@@ -11,7 +11,7 @@ use crate::store;
 const CAPTURE_SELECTION: &str = "NIRI_CLIP_CAPTURE_SELECTION";
 
 /// systemd user 单元模板（随二进制内置，供 `install-service` 一键落盘）
-pub const SERVICE_UNIT: &str = include_str!(concat!(
+pub const SERVICE_UNIT: &str = include_str!("../assets/niri-clip.service");
 
 // =====================================================================
 // 捕获架构（v0.4.1 起）
