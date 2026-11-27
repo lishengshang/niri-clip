@@ -160,7 +160,7 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
 | 4.1 | ✅ 图片剪贴板 | PNG、JPEG、WebP 从 stdin 识别并入库，GUI 预览，复制原始字节 | 集成测试覆盖三格式、去重与限额。日常 niri 会话已验证截图捕获、预览和重粘贴，复制前后 PNG 的 SHA-256 一致。嵌套 niri 另验证了 PRIMARY 文本 |
-| 4.2 | AUR 三包齐备 | `niri-clip`（release）、`niri-clip-git`、`niri-clip-bin`（预编译）。**决策（2026-08-28）：AUR 首次发布随 epic（原生 UI）合并后的首个版本一起**；主包构建 `-p niri-clip`（不含 gui 依赖链，makedepends 不需要 libxkbcommon），`niri-clip-gui` 待 M5.4 单独分包；`sqlite` 非运行依赖（rusqlite bundled）已移除 | 三包 CI 自动 bump + 安装冒烟 |
+| 4.2 | 🟡 AUR 三包齐备 | 仓库提供 `niri-clip`、`niri-clip-git`、`niri-clip-bin` 及独立 `niri-clip-gui` 配方。主包仅构建 CLI，源码构建锁定依赖。当前验证配方与安装树，AUR 上架待账号就绪 | 按发布归档填入摘要，生成各包 `.SRCINFO`，上架后验证安装 |
 | 4.3 | 🟡 crates.io 发布 | core 归档包含服务模板和配置样例，已在独立目录验证构建和测试 | 待按依赖顺序发布，验证从 registry 安装 |
 | 4.4 | waybar 模块 | JSON 输出（历史条数/最新条目/daemon 状态），`niri-clip waybar` | waybar wiki 配置示例可用 |
 | 4.5 | 🟡 文档完善 | 已校对生成的 man 页，README 补充了启动捕获的两种方式。干净 XDG 环境下已从源码安装，由 niri 启动捕获和原生窗口，选中合成历史并通过剪贴板回读 | 待新用户在自己的 niri 会话中按 README 独立走完首次复制 |

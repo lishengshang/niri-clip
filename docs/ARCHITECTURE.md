@@ -175,8 +175,8 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
 ## 6. 打包
 
 - `PKGBUILD` `cargo build --release --locked` → `/usr/bin/niri-clip` + `/usr/share/doc` + `systemd user`
-- `PKGBUILD.git` `git+https://...` + `pkgver()`
-- `AUR` `makepkg --printsrcinfo > .SRCINFO`
+- `PKGBUILD.git` 使用 VCS 源与 `pkgver()`，构建锁定 `Cargo.lock`。`PKGBUILD.gui` 从同一个版本标签的源码归档构建 GUI。
+- `PKGBUILD.bin` 安装经 SHA-256 校验的 GitHub Release CLI。AUR 仓库分别维护各包的 `PKGBUILD` 和 `.SRCINFO`。源码摘要在标签固定后用 `updpkgsums` 生成，预编译包摘要从已核对的 `SHA256SUMS` 取得，再用 `makepkg --printsrcinfo > .SRCINFO` 导出元数据。
 - core crate 经本地符号链接复用系统服务模板和配置样例。Cargo 打包时把两者作为普通文件收进独立归档，可在工作区之外构建和运行测试。
 - systemd 单元内置 22 项沙箱指令（AF_UNIX + 自身 state 最小面）；指令取舍、
   实测评分与强化档见 `SECURITY-AUDIT.md` §③（该文是沙箱细节的唯一出处）
