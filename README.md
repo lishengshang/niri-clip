@@ -43,7 +43,7 @@ cargo install --locked --path crates/niri-clip-gui   # 可选，原生窗口
 
 ![原生窗口显示合成的中英文历史、固定条目和选中内容预览](assets/history-window.png)
 
-默认依次选择原生窗口、fzf、fuzzel。原生窗口支持中文输入法。fzf 在菜单载入的条目中筛选，原生窗口和 `niri-clip search` 可查询全库。
+默认优先选择原生窗口。fzf 需要 0.71 或更新版本，在快捷键启动时由终端承载。fzf 版本过低或缺少终端时会回退到已安装的 fuzzel。显式配置 `tui_backend = "fuzzel"` 可直接打开 fuzzel。原生窗口支持中文输入法。fzf 在菜单载入的条目中筛选，原生窗口和 `niri-clip search` 可查询全库。
 
 | 原生窗口 | 操作 |
 |---|---|

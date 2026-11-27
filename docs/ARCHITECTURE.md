@@ -48,7 +48,7 @@ v0.3 及之前位于 `~/.cache/niri-clip/`；连接时检测旧库并用 `VACUUM
 | `daemon.lock` | daemon 单实例 flock（`core::single_instance`） | 可（内核释放，无陈锁） |
 | `gui.lock` | 原生 UI 单实例 flock（同一机制，2.6/C4 起不再用 PID 文件） | 可（内核释放） |
 | `pending_delete` | ★ 条目二段确认挂起态（id + 时间戳，15s TTL）——语义与判定归 `core::confirm`（ADR-005）；fzf TUI 用行尾标记呈现、原生 UI 用横幅、CLI 用提示文案 | 可（TTL 到期或显式 `clear()` 即清） |
-| `fzf.version` | fzf 版本门控缓存（二进制 mtime 变化即失效） | 可（退化为每次实查） |
+| `fzf.version` | fzf 版本门控缓存（按可执行文件的设备、inode 和 ctime 识别） | 可（下次打开时重新探测） |
 | `tui.log` | 无 TTY 时外层终端重跑的日志（排障入口） | 可 |
 
 **两条并存的 UI 路径**：fzf TUI（经终端，`tui_backend` 为 auto/fzf/fuzzel）

@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
+use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use niri_clip_core::config::{Config, SelectorConfig};
@@ -22,32 +25,43 @@ pub(crate) fn parse_version(s: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
-/// fzf 版本门控。`fzf --version` 每次约 10ms，而 Mod+V 是高频路径——
-/// 版本号缓存到 state/fzf.version，仅当 fzf 二进制 mtime 比缓存新时重查
-/// （fzf 升级自动失效重校，不会出现"升级后门控判定过期"的问题）。
-fn fzf_version_ok() -> bool {
-    let Ok(fzf_path) = which::which("fzf") else {
-        return false;
-    };
-    let cache = Config::state_dir().join("fzf.version");
-    let fzf_mtime = std::fs::metadata(&fzf_path).and_then(|m| m.modified()).ok();
-    let cache_mtime = std::fs::metadata(&cache).and_then(|m| m.modified()).ok();
-    if let (Some(f), Some(c)) = (fzf_mtime, cache_mtime) {
-        if f <= c {
-            let cached = std::fs::read_to_string(&cache).unwrap_or_default();
-            return parse_version(&cached)
-                .map(|v| v >= FZF_MIN)
-                .unwrap_or(false);
+fn ensure_state_dir(dir: &Path) -> std::io::Result<()> {
+    DirBuilder::new().recursive(true).mode(0o700).create(dir)
+}
+
+/// 缓存实际选中的 fzf。`PATH` 换成另一份已存在的 fzf 时，即使文件
+/// 比缓存更旧，也要重新探测。ctime 还覆盖保留 mtime 的原地替换。
+fn fzf_version_ok(fzf: &Path, state: &Path) -> bool {
+    let cache = state.join("fzf.version");
+    let key = fs::metadata(fzf)
+        .ok()
+        .map(|m| format!("{}:{}:{}:{}", m.dev(), m.ino(), m.ctime(), m.ctime_nsec()));
+    if let (Some(key), Ok(cached)) = (&key, fs::read_to_string(&cache)) {
+        if let Some((cached_key, version)) = cached.split_once('\n') {
+            if cached_key == key {
+                if let Some(version) = parse_version(version) {
+                    return version >= FZF_MIN;
+                }
+            }
         }
     }
-    let Ok(out) = Command::new("fzf").arg("--version").output() else {
+
+    let Ok(out) = Command::new(fzf).arg("--version").output() else {
         return false;
     };
-    let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // 缓存写失败（只读 fs 等）不影响本次判定，只是退回每次实查
-    let _ = std::fs::create_dir_all(Config::state_dir());
-    let _ = std::fs::write(&cache, &ver);
-    parse_version(&ver).map(|v| v >= FZF_MIN).unwrap_or(false)
+    if !out.status.success() {
+        return false;
+    }
+    let output = String::from_utf8_lossy(&out.stdout);
+    let Some(version) = parse_version(&output) else {
+        return false;
+    };
+    if let Some(key) = key {
+        if ensure_state_dir(state).is_ok() {
+            let _ = fs::write(cache, format!("{key}\n{}\n", output.trim()));
+        }
+    }
+    version >= FZF_MIN
 }
 
 /// 原生 GUI 二进制定位（多级兜底）：PATH → 与当前可执行文件同目录
@@ -74,8 +88,8 @@ pub(crate) fn gui_binary() -> Option<std::path::PathBuf> {
 /// - "native"：原生 xdg 窗口（niri-clip-gui 二进制），无终端依赖
 /// - "fzf"：fzf 承载于终端（--track 不跳顶唯一现成解）
 /// - "fuzzel"：dmenu 兜底（无 TTY 需求）
-/// - "auto"：native 可用优先；其次 fzf；最后 fuzzel（fzf 版本地板在
-///   run() 里二次校验，此处只查存在性）
+/// - "auto"：native 可用优先；其次 fzf；最后 fuzzel（fzf 版本和 TTY
+///   在 run() 中校验，此处只查存在性）
 pub(crate) fn backend(configured: &str) -> &'static str {
     match configured {
         "fuzzel" => "fuzzel",
@@ -133,12 +147,26 @@ fn terminal_wrap() -> Option<(&'static str, &'static [&'static str])> {
 /// fzf 退出瞬间 alt-screen 收起，若 scrollback 里有启动日志/copied 文本，
 /// 关闭时终端会闪现一帧"脚本输出"；重定向后 scrollback 干净，闪窗只剩
 /// 空帧不可见。日志文件同时充当无 systemd 环境的排障入口。
-fn respawn_in_terminal(term: &str, prefix: &[&str], exe: &std::path::Path) -> Result<()> {
-    let log = Config::state_dir().join("tui.log");
-    let inner = format!("exec '{}' tui >> '{}' 2>&1", exe.display(), log.display());
+fn respawn_in_terminal(term: &str, prefix: &[&str], exe: &Path) -> Result<()> {
+    let state = Config::state_dir();
+    ensure_state_dir(&state).context("create state directory for tui.log")?;
+    let log = state.join("tui.log");
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&log)
+        .with_context(|| format!("open {}", log.display()))?;
     Command::new(term)
         .args(prefix)
-        .args(["sh", "-c", &inner])
+        .args([
+            "/bin/sh",
+            "-c",
+            r#"exec "$1" tui >> "$2" 2>&1"#,
+            "niri-clip",
+        ])
+        .arg(exe)
+        .arg(log)
         .spawn()
         .with_context(|| format!("spawn {term} to host fzf"))?;
     Ok(())
@@ -146,84 +174,57 @@ fn respawn_in_terminal(term: &str, prefix: &[&str], exe: &std::path::Path) -> Re
 
 pub fn run() -> Result<()> {
     let cfg = SelectorConfig::load();
-    let mut be = backend(&cfg.tui_backend);
+    let candidate = backend(&cfg.tui_backend);
 
     // native：xdg 窗口无需 TTY，直接拉起独立 GUI 后返回。
-    // 二进制缺失时降级：显式 "native" → fzf/fuzzel；auto 已在此前选择过。
-    if be == "native" {
-        return match gui_binary() {
-            Some(gui) => {
-                if niri_clip_core::gui_activation::show_existing() {
-                    return Ok(());
-                }
-                Command::new(&gui)
-                    .spawn()
-                    .with_context(|| format!("spawn {}", gui.display()))?;
-                Ok(())
+    if candidate == "native" {
+        if let Some(gui) = gui_binary() {
+            if niri_clip_core::gui_activation::show_existing() {
+                return Ok(());
             }
-            None => {
-                eprintln!("[niri-clip tui] niri-clip-gui 不可用，回退 fzf/fuzzel");
-                be = if has_bin("fzf") { "fzf" } else { "fuzzel" };
-                run_fallback(be, &cfg)
-            }
-        };
+            Command::new(&gui)
+                .spawn()
+                .with_context(|| format!("spawn {}", gui.display()))?;
+            return Ok(());
+        }
+        eprintln!("[niri-clip tui] niri-clip-gui 不可用，回退 fzf/fuzzel");
     }
 
-    // fzf/fuzzel：无控制终端（niri spawn 裸拉起）时先做 tty 探测——
-    // fzf 需要包一层终端；version 检查留给实际执行 fzf 的路径
-    if !has_controlling_tty() {
-        if let Some((term, prefix)) = terminal_wrap() {
-            let exe = std::env::current_exe()?;
-            return respawn_in_terminal(term, prefix, &exe);
-        }
+    if candidate == "fuzzel" {
+        return run_fuzzel(&cfg);
+    }
+
+    // 先做版本门控，只有实际使用 fzf 才探测控制终端或包装一层终端。
+    let fzf = which::which("fzf")
+        .ok()
+        .filter(|path| fzf_version_ok(path, &Config::state_dir()));
+    let Some(fzf) = fzf else {
         if has_bin("fuzzel") {
-            eprintln!("[niri-clip tui] 无可用终端承载 fzf，回退 fuzzel");
+            eprintln!("[niri-clip tui] fzf 不可用或 <0.71，回退 fuzzel");
             return run_fuzzel(&cfg);
         }
         if cfg.notify_enabled {
-            niri_clip_core::notify::send(
-                "fzf 需要 TTY：请安装 foot/ghostty/kitty 等终端，或安装 fuzzel",
-            );
+            niri_clip_core::notify::send("niri-clip 需要 fzf >= 0.71（或安装 fuzzel）");
         }
-        anyhow::bail!("no controlling tty and no terminal emulator / fuzzel available");
+        anyhow::bail!("fzf unavailable or too old (<0.71) and fuzzel unavailable");
+    };
+    if has_controlling_tty() {
+        eprintln!("[niri-clip tui] backend=fzf db={:?}", Config::db_path());
+        return run_fzf(&cfg, &fzf);
     }
-
-    // fzf 版本地板：低于 0.71（--id-nth）时参数无法解析，主动回退 fuzzel
-    if be == "fzf" && !fzf_version_ok() {
-        if has_bin("fuzzel") {
-            eprintln!("[niri-clip tui] fzf 缺失或 <0.71（--id-nth 地板），回退 fuzzel");
-            be = "fuzzel";
-        } else {
-            if cfg.notify_enabled {
-                niri_clip_core::notify::send("niri-clip 需要 fzf >= 0.71（或安装 fuzzel）");
-            }
-            anyhow::bail!("fzf missing or too old (<0.71) and fuzzel unavailable");
-        }
+    if let Some((term, prefix)) = terminal_wrap() {
+        return respawn_in_terminal(term, prefix, &std::env::current_exe()?);
     }
-    eprintln!("[niri-clip tui] backend={} db={:?}", be, Config::db_path());
-    match be {
-        "fzf" => run_fzf(&cfg),
-        _ => run_fuzzel(&cfg),
+    if has_bin("fuzzel") {
+        eprintln!("[niri-clip tui] 无可用终端承载 fzf，回退 fuzzel");
+        return run_fuzzel(&cfg);
     }
-}
-
-/// native 不可用时的降级执行：仍处于无 TTY 环境的决策辅助
-fn run_fallback(be: &'static str, cfg: &SelectorConfig) -> Result<()> {
-    match be {
-        "fuzzel" => run_fuzzel(cfg),
-        "fzf" => {
-            // 无 TTY 时 fzf 无法运行：包终端重跑（backend 已定型 fzf）
-            if has_controlling_tty() {
-                return run_fzf(cfg);
-            }
-            if let Some((term, prefix)) = terminal_wrap() {
-                let exe = std::env::current_exe()?;
-                return respawn_in_terminal(term, prefix, &exe);
-            }
-            anyhow::bail!("fzf 需要 TTY 且无可用终端模拟器");
-        }
-        _ => run_fuzzel(cfg),
+    if cfg.notify_enabled {
+        niri_clip_core::notify::send(
+            "fzf 需要 TTY：请安装 foot/ghostty/kitty 等终端，或安装 fuzzel",
+        );
     }
+    anyhow::bail!("no controlling tty and no terminal emulator / fuzzel available");
 }
 
 /// 菜单行渲染的**唯一出口**（fzf 初始输入 / `list-raw` / `search` 三处共用）。
@@ -277,7 +278,7 @@ const FZF_NTH: &str = "4..";
 /// `--track` 的条目身份字段（原始行下标 = id 列）
 const FZF_ID_NTH: &str = "4";
 
-fn run_fzf(cfg: &SelectorConfig) -> Result<()> {
+fn run_fzf(cfg: &SelectorConfig, executable: &Path) -> Result<()> {
     // 清理上次会话可能残留的挂起删除（进程退出不会自动清）
     niri_clip_core::confirm::clear();
     let clips = menu_clips(cfg)?;
@@ -352,7 +353,7 @@ fn run_fzf(cfg: &SelectorConfig) -> Result<()> {
     // 缺 ~/.cargo/bin，裸 niri-clip 会让 Ctrl-Y 静默失效
     binds.push(format!("ctrl-y:execute-silent({exe} copy {{4}})"));
 
-    let mut fzf = Command::new("fzf")
+    let mut fzf = Command::new(executable)
         .arg("--no-sort")
         .arg("--delimiter=\t")
         // 匹配只作用于 preview 列（见 FZF_NTH 注释：按变换后口径计下标）
@@ -398,11 +399,13 @@ fn run_fzf(cfg: &SelectorConfig) -> Result<()> {
         .spawn()
         .context("spawn fzf")?;
 
-    {
-        let stdin = fzf.stdin.as_mut().unwrap();
-        stdin.write_all(input.as_bytes())?;
-    }
+    let write_result = fzf.stdin.as_mut().unwrap().write_all(input.as_bytes());
     let out = fzf.wait_with_output()?;
+    match out.status.code() {
+        Some(0) => write_result?,
+        Some(1 | 130) => return Ok(()), // 无匹配或用户取消
+        _ => anyhow::bail!("fzf exited with {}", out.status),
+    }
     let selected = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if selected.is_empty() {
         return Ok(());

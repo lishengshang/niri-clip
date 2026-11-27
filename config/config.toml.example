@@ -10,7 +10,8 @@ pinned_on_top = true
 # 匹配的文本跳过捕获。使用 TOML 单引号，保留正则表达式中的反斜杠。
 ignore_regex = '(?i)(\b(?:op|otpauth|bitwarden)[\w-]*://|\{REF:|\{TOTP\}|\{TIMEOTP\})|password|secret|token|otp|auth'
 
-# auto 依次选择原生窗口、fzf、fuzzel；也可填 native、fzf 或 fuzzel。
+# auto 优先原生窗口，其次使用 fzf 0.71+，不可用时尝试 fuzzel。
+# 也可填 native、fzf 或 fuzzel。显式选择 fuzzel 时直接启动，无需终端。
 tui_backend = "auto"
 # niri 原生浮窗在上次使用的显示器恢复关闭时的位置，false 始终采用窗口规则。
 remember_window_position = true
