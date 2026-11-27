@@ -114,6 +114,39 @@ enum Commands {
     Man,
 }
 
+fn render_man() -> Result<Vec<u8>> {
+    use std::io::Write as _;
+
+    let command = Cli::command();
+    let program = command.get_name().replace('-', r"\-");
+    let subpage_prefix = format!(r"{program}\-");
+    let mut source = Vec::new();
+    clap_mangen::Man::new(command).render(&mut source)?;
+
+    // clap_mangen emits references to separate subcommand pages. Keep the generated
+    // descriptions and show the command invocations on our single installed page.
+    let mut output = Vec::with_capacity(source.len());
+    let mut in_subcommands = false;
+    for line in std::str::from_utf8(&source)?.lines() {
+        if line.starts_with(".SH ") {
+            in_subcommands = line == ".SH SUBCOMMANDS";
+        }
+
+        let subcommand = if in_subcommands {
+            line.strip_prefix(&subpage_prefix)
+                .and_then(|name| name.strip_suffix("(1)"))
+        } else {
+            None
+        };
+        if let Some(name) = subcommand {
+            writeln!(output, r"\fB{program} {name}\fR")?;
+        } else {
+            writeln!(output, "{line}")?;
+        }
+    }
+    Ok(output)
+}
+
 /// println! 的 EPIPE 安全版：stdout 管道被下游截断（`niri-clip status | head`）
 /// 时 Rust 默认 SIGPIPE=SIG_IGN，写入返回 EPIPE 而 println! 会 panic。
 /// CLI 输出仅是给人看的，写失败静默忽略即可
@@ -392,9 +425,7 @@ fn main() -> Result<()> {
             let _ = std::io::stdout().write_all(&buf);
         }
         Some(Commands::Man) => {
-            let mut buf = Vec::new();
-            clap_mangen::Man::new(Cli::command()).render(&mut buf)?;
-            let _ = std::io::stdout().write_all(&buf);
+            let _ = std::io::stdout().write_all(&render_man()?);
         }
         None => {
             tui::run()?;

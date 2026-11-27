@@ -56,7 +56,7 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 ✅ Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    已交付（v0.6.0）；2.7 已于 v0.7 前补交付
 ✅ Phase 3   v0.7          安全与隐私强化                         已交付（v0.7.0）
   Phase 4   v1.0          Production 正式发布（进行中，4.9 ✅）    约 3–4 周
-  Phase 5   v1.x          生态与集成（原生UI核心已交付/waybar/OSC52） v1.0 后持续
+  Phase 5   v1.x          生态与集成（原生 UI 后续/OSC52）           v1.0 后持续
   Phase 6   v2.0+         长期愿景（加密/跨合成器/原生UI增强）     远期
 ```
 
