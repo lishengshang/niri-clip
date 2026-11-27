@@ -134,27 +134,16 @@ pub fn image_content_key(mime: &str, bytes: &[u8]) -> String {
 }
 
 pub fn should_ignore(text: &str, cfg: &Config) -> bool {
-    if text.chars().count() < cfg.min_store_length {
-        return true;
-    }
-    // 编译产物随 Config::load 缓存（见 config.rs ignore_re）；None = 模式非法，不过滤
-    if let Some(re) = &cfg.ignore_re {
-        if re.is_match(text) {
-            return true;
-        }
-    }
-    false
+    text.chars().count() < cfg.min_store_length
+        || cfg.ignore_re.as_ref().is_none_or(|re| re.is_match(text))
 }
 
 // =====================================================================
 // v0.5：当前项指针（current pointer）
 //
-// state/current 单行文件记录"最后一次被成功捕获的内容 hash"。语义：
-// ▶ 标识 = 你最后一次复制的东西 ≈ Ctrl+V 会粘出的内容。
-// - 仅在捕获成功时刷新（新入库 / 去重刷 ts）；被 ignore_regex 过滤、
-//   超过体积上限、空载荷均不写 → "当前剪贴板不在历史中"由指针与列表
-//   不匹配自然表达，不会撒谎。
-// - list() 依此把当前项排到第 1 行（星标之上），fzf/fuzzel 行首打 ▶。
+// state/current 保存最近一项被捕获或复制的历史指纹。捕获入口观察到剪贴板
+// 变更但未保留该内容时清除指针，避免 delete-current 作用于此前的历史项。
+// list() 依此把当前项排到第 1 行（星标之上），选择器以 ▶ 标记。
 // =====================================================================
 
 fn current_pointer_path() -> PathBuf {
@@ -172,8 +161,34 @@ pub fn current_hash() -> Option<String> {
 /// 刷新当前项指针（供捕获路径与 TUI copy 路径调用）。
 /// 指针属辅助功能，写失败不阻断捕获，仅记 stderr。
 pub fn touch_current(hash: &str) {
-    if let Err(e) = std::fs::write(current_pointer_path(), hash) {
+    let result = crate::single_instance::InstanceGuard::acquire("current").and_then(|_guard| {
+        std::fs::write(current_pointer_path(), hash).context("write current file")
+    });
+    if let Err(e) = result {
         eprintln!("[niri-clip] write current pointer failed: {e}");
+    }
+}
+
+pub(crate) fn current_revision() -> Option<std::fs::Metadata> {
+    std::fs::metadata(current_pointer_path()).ok()
+}
+
+/// A rejected capture must not erase a marker set by a newer capture or copy.
+pub(crate) fn clear_current_if_unchanged(previous: Option<std::fs::Metadata>) {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(previous) = previous else {
+        return;
+    };
+    let revision = |m: &std::fs::Metadata| (m.dev(), m.ino(), m.ctime(), m.ctime_nsec());
+    let result = crate::single_instance::InstanceGuard::acquire("current").and_then(|_guard| {
+        if current_revision().is_some_and(|m| revision(&m) == revision(&previous)) {
+            std::fs::remove_file(current_pointer_path())?;
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        eprintln!("[niri-clip] clear current pointer failed: {error}");
     }
 }
 
@@ -185,7 +200,7 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
 
 /// 去重写入的**共用骨架**（文本/图片两条路径共用，任务 2.6 / C6）：
 /// `BEGIN IMMEDIATE` → 按 hash 查重 → 已存在则刷新 `ts`、否则 INSERT →
-/// 提交 → 刷新当前项指针。
+/// 提交。调用方负责决定是否刷新普通剪贴板的当前项。
 ///
 /// `BEGIN IMMEDIATE` 的必要性见 `insert_with` 的注释（多进程并发下
 /// "先查后插"必须原子化）。`on_new_row` 在**事务内**对新插入的行执行额外工作
@@ -214,8 +229,6 @@ where
     if let Some(id) = exists {
         tx.execute("UPDATE clips SET ts=?1 WHERE id=?2", params![ts, id])?;
         tx.commit()?;
-        // 重复捕获同样代表"剪贴板变成了这个内容"：刷新指针
-        touch_current(hash);
         return Ok((false, None));
     }
     tx.execute(
@@ -225,24 +238,37 @@ where
     let id = tx.last_insert_rowid();
     let extra = on_new_row(&tx, id)?;
     tx.commit()?;
-    touch_current(hash);
     Ok((true, Some(extra)))
 }
 
 /// 同 insert，但复用调用方已加载的配置（捕获热路径上 Config::load 的
 /// 同步读盘 + TOML 解析是每次捕获都要付的成本，能省则省）
 pub fn insert_with(text: String, mime: Option<String>, cfg: &Config) -> Result<bool> {
+    Ok(insert_text_with(&text, mime, cfg, true)?.unwrap_or(false))
+}
+
+/// `None` 表示跳过。重复捕获返回 `Some(false)`，已有历史项仍是当前内容。
+pub(crate) fn insert_text_with(
+    text: &str,
+    mime: Option<String>,
+    cfg: &Config,
+    mark_current: bool,
+) -> Result<Option<bool>> {
     // 统一空白语义：所有捕获路径（watch 管道 / try_system_capture / native
     // 轮询）必须在同一 hash 口径下去重。此前仅 try_system_capture 做 trim，
     // 同一次剪贴板变化的竞态双触发会以"原文版 + trim 版"两份入库（真实库
     // 可见 ts 仅差 40ms、长度差首尾空白的成对条目），TUI Enter 复制后即
     // 表现为多出一条"带 ↵/空格"的孪生记录。
-    let text = text.trim().to_string();
+    let text = text.trim();
     if text.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
-    if should_ignore(&text, cfg) {
-        return Ok(false);
+    anyhow::ensure!(
+        cfg.ignore_re.is_some(),
+        "ignore_regex 编译失败，已跳过文本捕获；请检查 config.toml"
+    );
+    if should_ignore(text, cfg) {
+        return Ok(None);
     }
     // v0.5：单条体积上限。守卫放 store 层（单一真相源）——除 daemon 三个捕获
     // 路径外，migrate 等所有调用方同样受限；daemon 侧另有 Read::take 有界读
@@ -253,10 +279,10 @@ pub fn insert_with(text: String, mime: Option<String>, cfg: &Config) -> Result<b
             text.len(),
             cfg.max_clip_bytes
         );
-        return Ok(false);
+        return Ok(None);
     }
     let mut conn = connect()?;
-    let hash = hash_text(&text);
+    let hash = hash_text(text);
     let ts = Utc::now().timestamp_millis();
     let mime = mime.unwrap_or_else(|| "text/plain".to_string());
     let size = text.len() as i64;
@@ -264,12 +290,15 @@ pub fn insert_with(text: String, mime: Option<String>, cfg: &Config) -> Result<b
     // 检查 + 插入的原子性由 upsert_clip 的 BEGIN IMMEDIATE 保证：否则多进程
     // 并发时（典型：fzf 选中旧条目 -> wl-copy 写回 -> daemon 捕获同一 hash）
     // 双双通过检查后一方撞 UNIQUE 报错并被静默吞掉
-    let (inserted, _) = upsert_clip(&mut conn, &hash, &text, &mime, ts, size, |_, _| Ok(()))?;
+    let (inserted, _) = upsert_clip(&mut conn, &hash, text, &mime, ts, size, |_, _| Ok(()))?;
 
+    if mark_current {
+        touch_current(&hash);
+    }
     if inserted {
         enforce_max_items(&mut conn, cfg.max_items)?;
     }
-    Ok(inserted)
+    Ok(Some(inserted))
 }
 
 /// v0.4：入库图片剪贴板。
@@ -285,6 +314,15 @@ pub fn insert_image(mime: &str, bytes: &[u8]) -> Result<Option<InsertedImage>> {
 
 /// 同 insert_image，但复用调用方已加载的配置（见 insert_with）
 pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Option<InsertedImage>> {
+    insert_captured_image(mime, bytes, cfg, true)
+}
+
+pub(crate) fn insert_captured_image(
+    mime: &str,
+    bytes: &[u8],
+    cfg: &Config,
+    mark_current: bool,
+) -> Result<Option<InsertedImage>> {
     // v0.5：图片单张体积上限（截图通常 1–3MB，默认 10MiB 给足余量）
     if bytes.len() > cfg.max_image_bytes {
         eprintln!(
@@ -313,6 +351,9 @@ pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Optio
         |tx, id| write_image_payload(tx, id, bytes),
     )?;
 
+    if mark_current {
+        touch_current(&hash);
+    }
     if inserted {
         enforce_max_items(&mut conn, cfg.max_items)?;
     }

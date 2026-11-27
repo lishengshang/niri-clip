@@ -144,6 +144,21 @@ fn delete_current_removes_last_capture_without_selection() {
     cleanup(&dir);
 }
 
+#[test]
+fn skipped_capture_clears_current_without_deleting_history() {
+    let dir = sandbox("skipped-current");
+    set_regex(&dir, "FILTER_SAMPLE");
+    store_text(&dir, "ordinary entry");
+    store_text(&dir, "FILTER_SAMPLE");
+
+    assert!(!list_raw(&dir)[0].contains('▶'));
+    run(&dir, &["delete-current"]);
+    let listing = list_raw(&dir);
+    assert_eq!(listing.len(), 1);
+    assert!(listing[0].contains("ordinary entry"));
+    cleanup(&dir);
+}
+
 /// `delete-current` 对星标当前项遵循 ADR-005：首按挂起不删，同 id 二按才删
 #[test]
 fn delete_current_respects_pinned_double_confirm() {

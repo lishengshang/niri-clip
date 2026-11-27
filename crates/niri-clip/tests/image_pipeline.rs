@@ -74,7 +74,8 @@ impl Sandbox {
             .env("SQLITE_TMPDIR", &self.root)
             .env("FAKE_CAPTURE", &self.capture)
             .env("PATH", self.root.join("fakebin"))
-            .env_remove("WAYLAND_DISPLAY")
+            .env("WAYLAND_DISPLAY", self.root.join("unused-wayland"))
+            .env_remove("WAYLAND_SOCKET")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -139,13 +140,31 @@ if [ "$1" = --primary ]; then selection=primary; fi
 if [ /dev/stdout -ef /dev/null ]; then
     printf ok > "$FAKE_CAPTURE/$selection"
 fi
+if [ "$selection" = primary ]; then
+    printf '%s' "$$" > "$FAKE_CAPTURE/primary-pid"
+    exec /bin/sleep 10
+fi
+while [ ! -f "$FAKE_CAPTURE/primary-pid" ]; do /bin/sleep 0.02; done
+exit 7
 "#,
     );
     let out = sb.run(&["daemon"], None);
-    assert!(out.status.success());
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("CLIPBOARD wl-paste watcher exited"));
     for selection in ["clipboard", "primary"] {
         assert_eq!(fs::read(sb.capture.join(selection)).unwrap(), b"ok");
     }
+    let sibling = fs::read_to_string(sb.capture.join("primary-pid")).unwrap();
+    assert!(!Path::new("/proc").join(sibling).exists());
+}
+
+#[test]
+fn daemon_reports_unexpected_successful_watcher_exit() {
+    let sb = Sandbox::new("watch-stop", "");
+    write_exe(&sb.root.join("fakebin/wl-paste"), "#!/bin/sh\nexit 0\n");
+    let out = sb.run(&["daemon"], None);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("CLIPBOARD wl-paste watcher exited"));
 }
 
 /// 构造带指定 magic 的图片载荷，尾部标记用于验证字节完整性
@@ -160,6 +179,22 @@ fn payload(magic: &[u8], marker: &[u8], len: usize) -> Vec<u8> {
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n";
 const JPEG: &[u8] = b"\xFF\xD8\xFF\xE0";
 const WEBP: &[u8] = b"RIFF\x00\x00\x00\x00WEBP";
+
+#[test]
+fn image_header_is_recognized_below_the_text_limit() {
+    let sb = Sandbox::new(
+        "short-text-limit",
+        "max_clip_bytes = 4\nmax_image_bytes = 256",
+    );
+    let bytes = payload(WEBP, b"bounded read", 128);
+    assert!(sb.store(&bytes).status.success());
+    assert!(sb.list_raw().contains("[image image/webp 128 bytes]"));
+    assert!(sb
+        .run(&["copy", &sb.ids()[0].to_string()], None)
+        .status
+        .success());
+    assert_eq!(sb.copied().1, bytes);
+}
 
 /// png/jpeg/webp 三条同构路径：stdin 入库 → 复制回剪贴板，MIME 与字节完全一致。
 #[test]

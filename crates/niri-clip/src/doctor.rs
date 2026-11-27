@@ -152,7 +152,7 @@ fn check_config(report: &mut Report, cfg: &Config, error: Option<&str>) {
     if cfg.ignore_re.is_none() {
         report.fail(
             "敏感过滤",
-            "ignore_regex 无法编译，命中规则不会生效",
+            "ignore_regex 无法编译，文本捕获已暂停",
             Some("修正 config.toml 的 ignore_regex（TOML 建议用单引号字面量）"),
         );
     } else {
@@ -174,9 +174,9 @@ fn check_config(report: &mut Report, cfg: &Config, error: Option<&str>) {
         );
     }
     if cfg.capture_timeout_secs == 0 {
-        report.fail(
+        report.warn(
             "capture_timeout_secs",
-            "为 0，捕获子进程会被立即杀死",
+            "为 0，已禁用捕获子进程超时",
             Some("设为 ≥1（默认 5）"),
         );
     }

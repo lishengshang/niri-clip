@@ -61,6 +61,22 @@ fn clear_db() {
 }
 
 #[test]
+fn rejected_capture_cannot_clear_a_newer_marker() {
+    with_env(|_| {
+        clear_db();
+        assert!(insert("first capture".into(), None).unwrap());
+        let previous = current_revision();
+        assert!(insert("newer capture".into(), None).unwrap());
+
+        clear_current_if_unchanged(previous);
+        assert_eq!(current_hash(), Some(hash_text("newer capture")));
+
+        clear_current_if_unchanged(current_revision());
+        assert_eq!(current_hash(), None);
+    });
+}
+
+#[test]
 fn should_ignore_filters_secrets_and_short_input() {
     let cfg = Config::default();
     assert!(should_ignore("my password is hunter2", &cfg));

@@ -56,7 +56,7 @@ enum Commands {
         #[arg(long)]
         fzf: bool,
     },
-    /// 删除历史中标有 ▶ 的条目。该标记跟踪最近一次成功捕获或从历史复制的记录。
+    /// 删除历史中标有 ▶ 的条目。该标记跟踪普通剪贴板。
     /// fzf 中可用 Ctrl-D。固定条目需二次确认。
     DeleteCurrent {
         #[arg(long)]

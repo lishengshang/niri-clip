@@ -8,11 +8,10 @@ use wl_clipboard_rs::paste::{self, get_contents, ClipboardType, MimeType, Seat};
 use crate::config::Config;
 use crate::store;
 
+const CAPTURE_SELECTION: &str = "NIRI_CLIP_CAPTURE_SELECTION";
+
 /// systemd user 单元模板（随二进制内置，供 `install-service` 一键落盘）
 pub const SERVICE_UNIT: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../assets/niri-clip.service"
-));
 
 // =====================================================================
 // 捕获架构（v0.4.1 起）
@@ -20,12 +19,12 @@ pub const SERVICE_UNIT: &str = include_str!(concat!(
 //   主模式  ：wl-paste --watch timeout <N>s niri-clip store
 //             —— 事件驱动，selection 变化才触发；零空闲往返；
 //                子进程级别 timeout 为任何病态读挂起划界（秒级回收），
-//                从机制上杜绝“daemon 进程存活但捕获停滞”的静默失联。
+//                监听进程提前退出时，停止同组监听并向服务管理器报告失败。
 //   回退模式：原 500ms 轮询仅在缺失 wl-paste 二进制时启用。
 //
 // 历史事故备忘（issue #2）：纯轮询实现中 read_to_end 对个别来源应用会
 // 无限阻塞且不产生错误——进程活着、捕获停死。以事件源 + 时间边界重构后
-// 该故障形态不再可能发生。
+// 每次捕获可独立超时回收。
 // =====================================================================
 
 /// `--watch` 后的第一个参数是命令，其余参数原样交给该命令。
@@ -43,15 +42,20 @@ fn watch_command(
         .arg(format!("{timeout_secs}s"))
         .arg(exe)
         .arg("store")
+        .env(
+            CAPTURE_SELECTION,
+            if primary { "primary" } else { "clipboard" },
+        )
+        .kill_on_drop(true)
         // wl-paste 会按 stdout 文件名推断 MIME。daemon 的日志路径与选区类型无关。
         .stdout(std::process::Stdio::null());
     command
 }
 
 /// 超限提示：stderr 恒写；桌面通知受 notify_enabled 门控（P1-4，无通知服务时静默）
-fn notify_oversize(msg: &str) {
+fn notify_oversize(msg: &str, cfg: &Config) {
     eprintln!("[niri-clip store] {msg}，已忽略");
-    if Config::load().notify_enabled {
+    if cfg.notify_enabled {
         crate::notify::send(msg);
     }
 }
@@ -65,31 +69,59 @@ fn notify_oversize(msg: &str) {
 /// * stdin 为空（历史兼容：直接手动执行 store）→ 保持旧的
 ///   get_contents(Text) 探测，并在开启图片预览时尝试图片 MIME。
 ///
-/// v0.5 限流：读取用 `Read::take(max+1)` 划界——读满 max+1 即判定超限
-/// 整体拒绝，未超限时 take 内已到 EOF 载荷完整；杜绝超大载荷全内存直通
-/// （文本路径内存上限 = max_clip_bytes + 1，图片路径 = max_image_bytes + 1）。
+/// 先读至多 12 字节识别图片，再在同一输入流内按对应限额续读。
 pub fn store_from_stdin() -> Result<()> {
-    let cfg = Config::load();
-    let text_cap = cfg.max_clip_bytes as u64;
-    let mut stdin = std::io::stdin().lock();
-    let mut buf = Vec::new();
-    stdin.by_ref().take(text_cap + 1).read_to_end(&mut buf)?;
+    let state = std::env::var("CLIPBOARD_STATE");
+    let mark_current = !matches!(std::env::var(CAPTURE_SELECTION).as_deref(), Ok("primary"));
+    let previous = if mark_current {
+        store::current_revision()
+    } else {
+        None
+    };
+    let outcome = match state.as_deref() {
+        Ok("nil" | "clear" | "sensitive") => Ok(false),
+        state => capture_stdin(
+            std::io::stdin().lock(),
+            &Config::load(),
+            state != Ok("data"),
+            mark_current,
+        ),
+    };
+    finish_capture(outcome, previous)
+}
 
-    // 图片：stdin 不带 MIME（wl-paste watch 在无文本可给时按 try_any 兜底
-    // 输出任意类型），只能靠 magic 判定。先按文本限额读够判定所需的头，命中
-    // 后再**沿同一 stdin 续读**到图片限额——单次读取直接入库，不再"丢弃字节
-    // + 回头再读一次剪贴板"（第二次读到的不一定是触发时那份内容，且来源应用
-    // 已退出时直接失败）。内存上限仍是该分支自己的限额 +1。
-    if cfg.enable_image_preview {
-        if let Some(mime) = sniff_image_mime(&buf) {
-            let image_cap = cfg.max_image_bytes as u64;
-            if (buf.len() as u64) <= image_cap {
-                let rest = image_cap + 1 - buf.len() as u64;
-                stdin.by_ref().take(rest).read_to_end(&mut buf)?;
-            }
-            ingest_image(mime, &buf, &cfg)?;
-            return Ok(());
-        }
+fn finish_capture(outcome: Result<bool>, previous: Option<std::fs::Metadata>) -> Result<()> {
+    if !matches!(&outcome, Ok(true)) {
+        store::clear_current_if_unchanged(previous);
+    }
+    outcome.map(|_| ())
+}
+
+fn capture_stdin(
+    mut stdin: impl Read,
+    cfg: &Config,
+    probe_if_empty: bool,
+    mark_current: bool,
+) -> Result<bool> {
+    let mut buf = Vec::new();
+    let mime = if cfg.enable_image_preview {
+        stdin
+            .by_ref()
+            .take(IMAGE_HEADER_BYTES)
+            .read_to_end(&mut buf)?;
+        sniff_image_mime(&buf)
+    } else {
+        None
+    };
+    let cap = if mime.is_some() {
+        cfg.max_image_bytes
+    } else {
+        cfg.max_clip_bytes
+    } as u64;
+    let rest = cap.saturating_add(1).saturating_sub(buf.len() as u64);
+    stdin.take(rest).read_to_end(&mut buf)?;
+    if let Some(mime) = mime {
+        return ingest_image(mime, &buf, cfg, mark_current);
     }
 
     if buf.len() as u64 > cfg.max_clip_bytes as u64 {
@@ -99,51 +131,49 @@ pub fn store_from_stdin() -> Result<()> {
         // max_image_bytes 重新裁决（其超限通知自行负责，此处不再叠加文本
         // 报错）；图片不可走时才按文本超限拒绝。
         if cfg.enable_image_preview && clipboard_offers_image() {
-            capture_image_if_enabled()?;
-            return Ok(());
+            return capture_image_if_enabled(cfg, mark_current);
         }
-        notify_oversize(&format!(
-            "条目超过 max_clip_bytes={} 字节",
-            cfg.max_clip_bytes
-        ));
-        return Ok(());
+        notify_oversize(
+            &format!("条目超过 max_clip_bytes={} 字节", cfg.max_clip_bytes),
+            cfg,
+        );
+        return Ok(false);
     }
 
     // 非空载荷：优先视作 UTF-8 文本
-    if !buf.is_empty() {
-        match String::from_utf8(buf) {
-            Ok(text) => {
-                ingest_text(&text, &cfg)?;
-                return Ok(());
-            }
-            Err(broken) => {
-                // 非 UTF-8 且不是受支持的图片 magic：不在文本语义里硬塞，
-                // 只记录并交给 stderr 排障（下方再按图片 MIME 探测一次）
-                eprintln!(
-                    "[niri-clip store] non-utf8 payload ({} bytes)",
-                    broken.as_bytes().len()
-                );
-            }
+    if buf.is_empty() {
+        return if probe_if_empty {
+            try_system_capture(cfg, mark_current)
+        } else {
+            Ok(false)
+        };
+    }
+    match String::from_utf8(buf) {
+        Ok(text) => ingest_text(&text, cfg, mark_current),
+        Err(broken) => {
+            eprintln!(
+                "[niri-clip store] non-utf8 payload ({} bytes)",
+                broken.as_bytes().len()
+            );
+            try_system_capture(cfg, mark_current)
         }
     }
-    try_system_capture().map(|_| ())
 }
 
 /// 文本入库（含 ignore 规则），统一入口便于测试。复用调用方已加载的配置
-fn ingest_text(text: &str, cfg: &Config) -> Result<bool> {
-    let inserted = store::insert_with(text.to_string(), None, cfg)?;
-    if inserted {
-        eprintln!("[niri-clip store] inserted");
-    } else {
-        eprintln!("[niri-clip store] deduplicated/ignored");
+fn ingest_text(text: &str, cfg: &Config, mark_current: bool) -> Result<bool> {
+    let outcome = store::insert_text_with(text, None, cfg, mark_current)?;
+    match outcome {
+        Some(true) => eprintln!("[niri-clip store] inserted"),
+        Some(false) => eprintln!("[niri-clip store] deduplicated"),
+        None => eprintln!("[niri-clip store] ignored"),
     }
-    Ok(inserted)
+    Ok(outcome.is_some())
 }
 
 /// 无 stdin 数据时的系统剪贴板探测：先文本，后图片（受开关约束）。
 /// 所有失败在此收敛为“本次未捕获”，由调用方决定是否报错。
-fn try_system_capture() -> Result<bool> {
-    let cfg = Config::load();
+fn try_system_capture(cfg: &Config, mark_current: bool) -> Result<bool> {
     let max = cfg.max_clip_bytes;
     let cap = max as u64 + 1;
     match get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text) {
@@ -151,21 +181,21 @@ fn try_system_capture() -> Result<bool> {
             let mut v = Vec::new();
             if pipe.take(cap).read_to_end(&mut v).is_ok() {
                 if v.len() as u64 > max as u64 {
-                    notify_oversize(&format!("条目超过 max_clip_bytes={max} 字节"));
+                    notify_oversize(&format!("条目超过 max_clip_bytes={max} 字节"), cfg);
                     return Ok(false);
                 }
                 let text = String::from_utf8(v)
                     .map_err(|_| anyhow!("clipboard payload is not valid utf-8"))?;
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
-                    return ingest_text(trimmed, &cfg);
+                    return ingest_text(trimmed, cfg, mark_current);
                 }
             }
             Ok(false)
         }
         Err(paste::Error::ClipboardEmpty | paste::Error::NoSeats | paste::Error::NoMimeType) => {
             // 无文本可取：若开启了图片预览则尝试图片 MIME
-            capture_image_if_enabled()
+            capture_image_if_enabled(cfg, mark_current)
         }
         Err(e) => Err(e.into()),
     }
@@ -173,6 +203,7 @@ fn try_system_capture() -> Result<bool> {
 
 /// 受支持的图片 MIME，探测序即尝试序（png 优先——截图场景的主型）。
 const IMAGE_MIMES: [&str; 3] = ["image/png", "image/jpeg", "image/webp"];
+const IMAGE_HEADER_BYTES: u64 = 12;
 
 /// 按文件头（magic）判断 stdin 载荷是否为受支持的图片。
 ///
@@ -201,15 +232,15 @@ fn sniff_image_mime(bytes: &[u8]) -> Option<&'static str> {
 
 /// 图片入库的唯一落点：stdin magic 路径与剪贴板 MIME 路径共用，
 /// 保证两条入口的超限文案与日志格式一致。
-fn ingest_image(mime: &str, bytes: &[u8], cfg: &Config) -> Result<bool> {
+fn ingest_image(mime: &str, bytes: &[u8], cfg: &Config, mark_current: bool) -> Result<bool> {
     if bytes.len() > cfg.max_image_bytes {
-        notify_oversize(&format!(
-            "图片超过 max_image_bytes={} 字节",
-            cfg.max_image_bytes
-        ));
+        notify_oversize(
+            &format!("图片超过 max_image_bytes={} 字节", cfg.max_image_bytes),
+            cfg,
+        );
         return Ok(false);
     }
-    match store::insert_image_with(mime, bytes, cfg) {
+    match store::insert_captured_image(mime, bytes, cfg, mark_current) {
         Ok(Some(img)) => {
             eprintln!(
                 "[niri-clip store] stored image #{} ({mime}, {} B) -> {}",
@@ -219,7 +250,7 @@ fn ingest_image(mime: &str, bytes: &[u8], cfg: &Config) -> Result<bool> {
             );
             Ok(true)
         }
-        Ok(None) => Ok(false),
+        Ok(None) => Ok(true), // 限额已验证，None 表示重复的历史项。
         Err(e) => Err(anyhow!("insert image: {e:#}")),
     }
 }
@@ -238,8 +269,7 @@ fn clipboard_offers_image() -> bool {
     })
 }
 
-fn capture_image_if_enabled() -> Result<bool> {
-    let cfg = Config::load();
+fn capture_image_if_enabled(cfg: &Config, mark_current: bool) -> Result<bool> {
     if !cfg.enable_image_preview {
         return Ok(false);
     }
@@ -252,7 +282,7 @@ fn capture_image_if_enabled() -> Result<bool> {
         ) {
             let mut v = Vec::new();
             if pipe.take(cap).read_to_end(&mut v).is_ok() && !v.is_empty() {
-                return ingest_image(mime, &v, &cfg);
+                return ingest_image(mime, &v, cfg, mark_current);
             }
         }
     }
@@ -284,17 +314,21 @@ async fn run_watch(timeout_secs: u64, capture_primary: bool) -> Result<()> {
         None
     };
     println!("[niri-clip daemon] watching clipboard changes ...");
-    match primary_watcher.as_mut() {
-        None => {
-            let status = clip_watcher.wait().await?;
-            eprintln!("[niri-clip daemon] wl-paste exited: {status:?}");
-        }
-        Some(primary) => {
-            let (a, b) = tokio::join!(clip_watcher.wait(), primary.wait());
-            eprintln!("[niri-clip daemon] wl-paste exited: {a:?} / {b:?}");
-        }
-    }
-    Ok(())
+    let (selection, status) = match primary_watcher.as_mut() {
+        None => ("CLIPBOARD", clip_watcher.wait().await),
+        Some(primary) => tokio::select! {
+            status = clip_watcher.wait() => {
+                let _ = primary.kill().await;
+                ("CLIPBOARD", status)
+            }
+            status = primary.wait() => {
+                let _ = clip_watcher.kill().await;
+                ("PRIMARY", status)
+            }
+        },
+    };
+    let status = status.with_context(|| format!("wait for {selection} wl-paste watcher"))?;
+    anyhow::bail!("{selection} wl-paste watcher exited unexpectedly: {status}");
 }
 
 /// 原生轮询（回退模式）：仅当系统中不存在 wl-paste 时启用。
@@ -310,6 +344,7 @@ async fn run_native_polling() -> Result<()> {
     let cap = max as u64 + 1;
     let mut last_hash: Option<String> = None;
     loop {
+        let previous = store::current_revision();
         match get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text) {
             Ok((pipe, _)) => {
                 let mut v = Vec::new();
@@ -323,7 +358,11 @@ async fn run_native_polling() -> Result<()> {
                         );
                         if last_hash.as_ref() != Some(&key) {
                             last_hash = Some(key);
-                            notify_oversize(&format!("条目超过 max_clip_bytes={max} 字节"));
+                            store::clear_current_if_unchanged(previous);
+                            notify_oversize(
+                                &format!("条目超过 max_clip_bytes={max} 字节"),
+                                &Config::load(),
+                            );
                         }
                         sleep(Duration::from_millis(500)).await;
                         continue;
@@ -334,7 +373,8 @@ async fn run_native_polling() -> Result<()> {
                             let key = store::hash_text(trimmed);
                             if last_hash.as_ref() != Some(&key) {
                                 last_hash = Some(key);
-                                if let Err(e) = store::insert(trimmed.to_string(), None) {
+                                let outcome = ingest_text(trimmed, &Config::load(), true);
+                                if let Err(e) = finish_capture(outcome, previous) {
                                     eprintln!("[daemon native] store error: {e:#}");
                                 }
                             }
@@ -351,7 +391,8 @@ async fn run_native_polling() -> Result<()> {
         }
 
         // 图片抓取保持沿用轮询路径（低频场景可接受）
-        if let Err(e) = capture_image_if_enabled() {
+        last_hash = None;
+        if let Err(e) = finish_capture(capture_image_if_enabled(&Config::load(), true), previous) {
             eprintln!("[daemon native] image capture error: {e:#}");
         }
         sleep(Duration::from_millis(500)).await;

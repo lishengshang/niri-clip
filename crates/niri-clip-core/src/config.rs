@@ -49,7 +49,7 @@ pub struct Config {
     #[serde(default)]
     pub capture_primary: bool,
     /// ignore_regex 的编译产物：每条入库热路径都要过一遍过滤，不能在
-    /// should_ignore 里反复 Regex::new。编译失败为 None（同旧行为：不过滤）。
+    /// should_ignore 里反复 Regex::new。编译失败为 None，捕获拒绝保存文本。
     /// 注意：直接改字段赋值 ignore_regex 时需同步重编译（代码内无此用法）
     #[serde(skip)]
     #[serde(default)]
@@ -459,12 +459,12 @@ mod tests {
     }
 
     #[test]
-    fn load_invalid_regex_means_no_filter() {
+    fn invalid_regex_rejects_text() {
         let _g = ENV_LOCK.lock().unwrap();
         let root = std::env::temp_dir().join(format!("niri-clip-cfg-re-{}", std::process::id()));
         let cfg_dir = root.join("config");
         std::fs::create_dir_all(cfg_dir.join("niri-clip")).unwrap();
-        // 非法正则：编译失败 → ignore_re=None（过滤关闭），而不是整个配置崩掉
+        // 正则错误只影响捕获，其他已解析的配置仍然有效。
         std::fs::write(
             cfg_dir.join("niri-clip/config.toml"),
             "ignore_regex = \"([unclosed\"\n",
@@ -476,7 +476,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         assert!(cfg.ignore_re.is_none(), "非法正则应得 None");
-        assert!(!crate::store::should_ignore("password", &cfg));
+        assert!(crate::store::should_ignore("password", &cfg));
     }
 
     #[test]

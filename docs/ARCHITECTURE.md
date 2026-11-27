@@ -44,7 +44,8 @@ v0.3 及之前位于 `~/.cache/niri-clip/`；连接时检测旧库并用 `VACUUM
 |---|---|---|
 | `db.sqlite` (+`-wal`/`-shm`) | 主库 | 否（数据本体） |
 | `images/{id}.bin` | 图片载荷，按 clip id 关联 | 否（不可再生） |
-| `current` | ▶ 当前项指针（最后成功捕获的 hash） | 可（退化为无 ▶ 标记） |
+| `current` | ▶ 最近捕获或从历史复制的条目指纹。捕获跳过和空选区事件清除该标记 | 可（退化为无 ▶ 标记） |
+| `current.lock` | 短时串行化当前项更新和清除 | 进程停止后可删除 |
 | `migration.lock` | 串行化旧库搬迁、schema 迁移和快照发布 | 进程停止后可删除 |
 | `daemon.lock` | daemon 单实例 flock（`core::single_instance`） | 可（内核释放，无陈锁） |
 | `gui.lock` | 原生 UI 单实例 flock（同一机制，2.6/C4 起不再用 PID 文件） | 可（内核释放） |
@@ -71,9 +72,9 @@ wl-paste --watch timeout <秒数>s <niri-clip 路径> store
 wl-paste --primary --watch timeout <秒数>s <niri-clip 路径> store
 ```
 
-`--watch` 后面是命令及其参数。`wl-paste` 会根据 stdout 文件名推断 MIME，因此监听进程将 stdout 指向 `/dev/null`，诊断写入 stderr。超时值取自 `capture_timeout_secs`。[wl-paste 参数与 MIME 选择](https://github.com/bugaevc/wl-clipboard/blob/v2.3.0/src/wl-paste.c)
+`--watch` 后面是命令及其参数。`wl-paste` 会根据 stdout 文件名推断 MIME，因此监听进程将 stdout 指向 `/dev/null`，诊断写入 stderr。超时值取自 `capture_timeout_secs`，为 0 时关闭超时。任一监听进程意外退出时，daemon 回收另一条监听并返回失败，使 systemd 的 `Restart=on-failure` 生效。[wl-paste 参数与 MIME 选择](https://github.com/bugaevc/wl-clipboard/blob/v2.3.0/src/wl-paste.c)
 
-`store` 从 stdin 读取载荷。启用图片时通过文件头识别 PNG、JPEG、WebP，沿同一输入流按图片限额读取。文本按文本限额和过滤规则处理。未知格式可能触发系统剪贴板回读。超限、过滤和去重均在入库路径处理。
+`store` 从 stdin 读取载荷。启用图片时先读取识别 PNG、JPEG、WebP 所需的头部，再按对应限额续读同一输入流。文本按文本限额和过滤规则处理，规则无法编译时暂停文本捕获。`CLIPBOARD_STATE` 标为敏感或空时跳过读取。未知格式可能触发剪贴板回读。普通剪贴板捕获到重复条目仍刷新当前标记，观察到变更却未保留内容时清除原有标记。清除前在短锁内核对修订，保留并发复制产生的新标记。PRIMARY 捕获仅刷新历史。
 
 缺少 `wl-paste` 时，daemon 退回到每 500 ms 读取一次普通选区。该路径可能漏掉两次读取间的复制，开启图片时还会探测图片 MIME。正常部署使用 `wl-clipboard`。服务配置见[安装说明](../README.md)。
 
