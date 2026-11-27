@@ -45,6 +45,7 @@ v0.3 及之前位于 `~/.cache/niri-clip/`；连接时检测旧库并用 `VACUUM
 | `db.sqlite` (+`-wal`/`-shm`) | 主库 | 否（数据本体） |
 | `images/{id}.bin` | 图片载荷，按 clip id 关联 | 否（不可再生） |
 | `current` | ▶ 当前项指针（最后成功捕获的 hash） | 可（退化为无 ▶ 标记） |
+| `migration.lock` | 串行化旧库搬迁、schema 迁移和快照发布 | 进程停止后可删除 |
 | `daemon.lock` | daemon 单实例 flock（`core::single_instance`） | 可（内核释放，无陈锁） |
 | `gui.lock` | 原生 UI 单实例 flock（同一机制，2.6/C4 起不再用 PID 文件） | 可（内核释放） |
 | `pending_delete` | ★ 条目二段确认挂起态（id + 时间戳，15s TTL）——语义与判定归 `core::confirm`（ADR-005）；fzf TUI 用行尾标记呈现、原生 UI 用横幅、CLI 用提示文案 | 可（TTL 到期或显式 `clear()` 即清） |
@@ -100,11 +101,11 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
 - **schema 迁移**：`PRAGMA user_version` 驱动。0→1 建基表并清理 FTS 占位；
   1→2 补 `image_path` 列；2→3 建 clips_fts 全文索引并回填存量；3→4 文本 hash
   全表重算为 blake3（事务内合并重复 + 前置 VACUUM INTO 快照 + ▶ 指针重映射，
-  见 ADR-003）；4→5 补 idx_ts（2.7，纯增索引无损升级）。此后 schema 变更必须
-  新增版本号与迁移步骤
+  见 ADR-003）；4→5 补 `idx_ts`；5→6 从 `clips` 在事务内重建 FTS，以修复旧版并发回填产生的重复索引记录。旧库搬迁与升级共用 `migration.lock`，快照写完再发布。已升级的库正常打开时跳过迁移锁。
 - **插入原子性**：SELECT 去重检查 + INSERT 包在 `BEGIN IMMEDIATE` 事务里。
   否则多进程并发（典型：fzf 选中旧条目 → wl-copy 写回 → daemon 同时捕获）
   双双通过检查后一方撞 UNIQUE 报错被静默吞掉
+- **图片生命周期**：入库和导入共用图片文件写入路径，在写事务中发布文件。孤儿清理也持有 SQLite 写锁，确保待提交图片不会被当作孤儿。淘汰先提交行删除，再清理关联文件。
 - **排序时间**：捕获和取消固定都会刷新 `ts`。取消固定使用 `idx_pinned_ts`
   取得普通历史最新时间，在同一条 SQL 中翻转标记并写入更晚的时间。日期清理也按 `ts` 计算。
 - **上限裁剪**：超过正数容量上限时，`enforce_max_items` 保护固定条目与当前项，
@@ -131,12 +132,7 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
   沙盒位置由 `NIRI_CLIP_STRESS_DIR` 指定（`/tmp` 为小容量 tmpfs 的环境下必需，
   否则会以 `SQLITE_FULL` 死在写入中途）。实测数值见 §9
 
-- **导出/回灌（2.4，backup.rs）**：NDJSON 流式格式（首行 header + 每行一条目，
-  图片内嵌 base64，选型与被拒备选见 ADR-004）。导出读事务（deferred 快照）
-  保证 COUNT 与全表扫描一致，文件 0600；回灌 hash 幂等（blake3 / `img:` FNV
-  重算比对拦截损坏条目）+ 单 BEGIN IMMEDIATE 事务原子提交，保留原 ts/pinned
-  不触碰 ▶ 指针，结束 enforce_max_items；`--sqlite` 走 `VACUUM INTO` 物理快照
-  （复用 migrate_legacy_db 模式，目标已存在拒绝覆盖）
+- **导出/回灌（2.4，backup.rs）**：NDJSON 流式格式内嵌图片，读事务保证行数和扫描一致。NDJSON 与 `VACUUM INTO` 快照均以 0600 临时文件写完后发布，已有目标会报错。回灌按 hash 去重并校验内容，保留时间、固定状态和当前标记。预检用只读连接统计，也能读取尚未升级的历史。 [格式与文件边界](ADR-004.md)
 
 ## 4. UI 后端 - 不跳顶（本节述 fzf/fuzzel 路径；原生窗口见 §10）
 

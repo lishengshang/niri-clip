@@ -81,6 +81,8 @@ enable_image_preview = true
 | 查看命令和参数 | `niri-clip --help`、`niri-clip <命令> --help` |
 | 阅读命令手册 | `niri-clip man \| man -l -` |
 
+导出需要新文件路径，以保留已有数据库和备份。导入前可运行 `niri-clip import history.ndjson --dry-run` 检查内容和预计新增条数，预检不会创建或迁移数据库。
+
 ## 开发
 
 ```sh

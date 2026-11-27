@@ -40,23 +40,52 @@ pub struct InsertedImage {
 
 /// 连接（含旧库搬迁 + schema 迁移）。backup.rs（导出/回灌）同用此唯一入口
 pub(crate) fn connect() -> Result<Connection> {
+    use crate::migrate;
+
     let path = Config::db_path();
-    crate::migrate::migrate_legacy_db(&path)?;
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
-        tighten_dir_perms(p);
-    }
-    let conn = Connection::open(&path).context("open sqlite")?;
+    let existing = if path.try_exists()? {
+        let conn = open_connection(&path)?;
+        if migrate::schema_version(&conn)? == migrate::SCHEMA_VERSION {
+            configure_connection(&conn, &path)?;
+            return Ok(conn);
+        }
+        Some(conn)
+    } else {
+        None
+    };
+
+    let _migration = crate::single_instance::InstanceGuard::acquire("migration")?;
+    tighten_dir_perms(&Config::state_dir());
+    let mut conn = match existing {
+        Some(conn) => conn,
+        None => {
+            migrate::migrate_legacy_db(&path)?;
+            open_connection(&path)?
+        }
+    };
+    configure_connection(&conn, &path)?;
+    migrate::migrate_schema(&mut conn)?;
+    Ok(conn)
+}
+
+fn open_connection(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path).context("open sqlite")?;
     conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
+    Ok(conn)
+}
+
+fn configure_connection(conn: &Connection, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tighten_dir_perms(parent);
+    }
+    tighten_file_perms(path);
     conn.execute_batch(
         "
         PRAGMA journal_mode=WAL;
         PRAGMA synchronous=NORMAL;
         ",
     )?;
-    tighten_file_perms(&path);
-    crate::migrate::migrate_schema(&conn)?;
-    Ok(conn)
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -238,7 +267,7 @@ pub fn insert_with(text: String, mime: Option<String>, cfg: &Config) -> Result<b
     let (inserted, _) = upsert_clip(&mut conn, &hash, &text, &mime, ts, size, |_, _| Ok(()))?;
 
     if inserted {
-        enforce_max_items(&conn, cfg.max_items)?;
+        enforce_max_items(&mut conn, cfg.max_items)?;
     }
     Ok(inserted)
 }
@@ -270,10 +299,6 @@ pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Optio
     let ts = Utc::now().timestamp_millis();
     let placeholder = format!("[image {} {} bytes]", mime, bytes.len());
 
-    let dir = Config::images_dir();
-    std::fs::create_dir_all(&dir)?;
-    tighten_dir_perms(&dir);
-
     // 骨架（去重/提交/刷指针）与文本路径共用；差异只在 `on_new_row`——
     // 数据文件写入必须落在**同一事务窗口内**：先落 `.tmp-` 再原子 rename 到最终
     // 路径，任何一步失败即随 tx 回滚行，不再出现"有行无图"的永久残缺状态
@@ -285,37 +310,60 @@ pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Optio
         mime,
         ts,
         bytes.len() as i64,
-        |tx, id| -> Result<InsertedImage> {
-            let path = dir.join(format!("{id}.bin"));
-            let tmp = dir.join(format!(".tmp-{id}.bin"));
-            std::fs::write(&tmp, bytes)
-                .with_context(|| format!("write image cache {}", tmp.display()))?;
-            std::fs::rename(&tmp, &path)
-                .with_context(|| format!("publish image cache {}", path.display()))?;
-            tighten_file_perms(&path);
-            tx.execute(
-                "UPDATE clips SET image_path=?1 WHERE id=?2",
-                params![path.to_string_lossy(), id],
-            )?;
-            Ok(InsertedImage { id, path })
-        },
+        |tx, id| write_image_payload(tx, id, bytes),
     )?;
 
     if inserted {
-        enforce_max_items(&conn, cfg.max_items)?;
+        enforce_max_items(&mut conn, cfg.max_items)?;
     }
     Ok(extra)
+}
+
+/// The caller holds the SQLite writer reservation until it commits the row.
+/// Startup cleanup takes the same reservation before inspecting these files.
+pub(crate) fn write_image_payload(
+    tx: &rusqlite::Transaction<'_>,
+    id: i64,
+    bytes: &[u8],
+) -> Result<InsertedImage> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let dir = Config::images_dir();
+    std::fs::create_dir_all(&dir)?;
+    tighten_dir_perms(&dir);
+    let path = dir.join(format!("{id}.bin"));
+    let path_text = path.to_str().context("图片路径必须是 UTF-8")?;
+    let tmp = dir.join(format!(".tmp-{id}.bin"));
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => {
+            return Err(e).with_context(|| format!("remove old image data {}", tmp.display()))
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .with_context(|| format!("open image data {}", tmp.display()))?;
+    file.write_all(bytes)?;
+    // Make the file and its final directory entry durable before committing the row.
+    file.sync_all()?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("publish image data {}", path.display()))?;
+    std::fs::File::open(&dir)?.sync_all()?;
+    tx.execute(
+        "UPDATE clips SET image_path=?1 WHERE id=?2",
+        params![path_text, id],
+    )?;
+    Ok(InsertedImage { id, path })
 }
 
 /// 执行 `DELETE ... RETURNING image_path` 并返回被删行的数据文件路径
 /// （任务 2.6 / C7）。
 ///
-/// 只收集路径、**不删文件**：删除时机由调用方决定——`prune_before` 必须在
-/// commit 之后删（事务回滚时行还在，文件不能先没），而 `enforce_max_items`
-/// 处于自动提交语义下可立即删。此前两处各写一遍同样的收尸逻辑。
-///
-/// 注：`gc_images` 不适用本助手——它需要按行累计字节数逐条淘汰，是**有意**
-/// 的逐行删除（见其注释），与这里"一条 DELETE 批量删"的形态不同。
+/// 调用方必须在提交删除事务后再删除文件，回滚时原行仍需其载荷。
 fn delete_rows_image_paths(
     conn: &Connection,
     sql: &str,
@@ -337,10 +385,27 @@ fn delete_rows_image_paths(
 ///
 /// 取消固定会刷新排序时间，当前项因此可能比普通历史更旧。仅在需要裁剪时
 /// 读取当前项指针，避免按时间裁剪掉仍在剪贴板中的条目。
-pub(crate) fn enforce_max_items(conn: &Connection, max_items: usize) -> Result<()> {
+fn enforce_max_items(conn: &mut Connection, max_items: usize) -> Result<()> {
+    // The common path stays read-only when the history is below its limit.
+    let count: usize = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
+    if count > max_items {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let paths = trim_history(&tx, max_items)?;
+        tx.commit()?;
+        remove_image_files(&paths);
+    }
+    Ok(())
+}
+
+pub(crate) fn trim_history(
+    tx: &rusqlite::Transaction<'_>,
+    max_items: usize,
+) -> Result<Vec<String>> {
+    let conn: &Connection = tx;
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
-    if count > max_items as i64 {
-        let to_del = count - max_items as i64;
+    let max_items = i64::try_from(max_items).unwrap_or(i64::MAX);
+    if count > max_items {
+        let to_del = count - max_items;
         // RETURNING 带出被淘汰条目的数据文件路径，行删文件也删（否则
         // images/ 只进不出，截图类负载下 state 目录会无限膨胀）
         let cur = if max_items == 0 {
@@ -348,18 +413,21 @@ pub(crate) fn enforce_max_items(conn: &Connection, max_items: usize) -> Result<(
         } else {
             current_hash().unwrap_or_default()
         };
-        let paths = delete_rows_image_paths(
+        return delete_rows_image_paths(
             conn,
             "DELETE FROM clips WHERE id IN (
-                 SELECT id FROM clips WHERE pinned=0 AND hash IS NOT ?2 ORDER BY ts ASC LIMIT ?1
+                 SELECT id FROM clips WHERE pinned=0 AND hash IS NOT ?2 ORDER BY ts ASC, id ASC LIMIT ?1
              ) RETURNING image_path",
             &[&to_del, &cur],
-        )?;
-        for p in paths {
-            let _ = std::fs::remove_file(p);
-        }
+        );
     }
-    Ok(())
+    Ok(Vec::new())
+}
+
+pub(crate) fn remove_image_files(paths: &[String]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// 孤儿清扫：回收 images/ 下不被任何 clips.image_path 引用的数据文件。
@@ -367,13 +435,19 @@ pub(crate) fn enforce_max_items(conn: &Connection, max_items: usize) -> Result<(
 /// insert_image 在 rename 成功但 UPDATE 失败窗口内留下的无主文件。
 /// `.tmp-` 前缀为入库中途崩溃的临时文件，一并清理。daemon 启动时调用一次。
 pub fn prune_orphan_images() -> Result<usize> {
-    let conn = connect()?;
+    prune_orphan_images_with(&mut connect()?)
+}
+
+fn prune_orphan_images_with(conn: &mut Connection) -> Result<usize> {
     let dir = Config::images_dir();
     if !dir.exists() {
         return Ok(0);
     }
+    // A writer may already have published a file that readers cannot see in SQL yet.
+    // Wait for that transaction and exclude new writes throughout the scan.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let referenced: std::collections::HashSet<String> = {
-        let mut stmt = conn.prepare("SELECT image_path FROM clips WHERE image_path IS NOT NULL")?;
+        let mut stmt = tx.prepare("SELECT image_path FROM clips WHERE image_path IS NOT NULL")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut set = std::collections::HashSet::new();
         for r in rows {
@@ -384,17 +458,21 @@ pub fn prune_orphan_images() -> Result<usize> {
     let mut n = 0;
     for entry in std::fs::read_dir(&dir)?.flatten() {
         let p = entry.path();
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if !name.starts_with(".tmp-") && referenced.contains(&p.to_string_lossy().to_string()) {
+        let name = entry.file_name();
+        let owned = name.to_str().and_then(|name| name.strip_suffix(".bin"));
+        let Some(stem) = owned else { continue };
+        let id = stem
+            .strip_prefix(".tmp-import-")
+            .or_else(|| stem.strip_prefix(".tmp-"))
+            .unwrap_or(stem);
+        if id.parse::<i64>().is_err() || referenced.contains(p.to_string_lossy().as_ref()) {
             continue;
         }
         if std::fs::remove_file(&p).is_ok() {
             n += 1;
         }
     }
+    tx.commit()?;
     Ok(n)
 }
 
@@ -408,11 +486,12 @@ pub fn gc_images(max_bytes: u64) -> Result<usize> {
     if max_bytes == 0 {
         return Ok(0);
     }
-    let conn = connect()?;
+    let mut conn = connect()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let cur_hash = current_hash().unwrap_or_default();
     // size 列对图片条目即数据文件字节数（见 insert_image_with），
     // SUM 即 images/ 目录总量
-    let total: i64 = conn.query_row(
+    let total: i64 = tx.query_row(
         "SELECT COALESCE(SUM(size),0) FROM clips WHERE image_path IS NOT NULL",
         [],
         |r| r.get(0),
@@ -421,12 +500,12 @@ pub fn gc_images(max_bytes: u64) -> Result<usize> {
     if need <= 0 {
         return Ok(0);
     }
-    let mut n = 0usize;
+    let mut paths = Vec::new();
     while need > 0 {
         // 逐条淘汰最旧的可淘汰图片行（ts ASC, id ASC：同毫秒内先入先出）。
         // 候选数远小于库规模，逐条成本可忽略；批量 DELETE 需按字节累计，
         // 复杂度不划算。可淘汰集合为空时提前收手（全受保护时宁超配额不丢数据）
-        let victim: Option<(i64, Option<String>, i64)> = conn
+        let victim: Option<(i64, String, i64)> = tx
             .query_row(
                 "SELECT id, image_path, size FROM clips
                  WHERE image_path IS NOT NULL AND pinned=0 AND hash != ?1
@@ -434,18 +513,17 @@ pub fn gc_images(max_bytes: u64) -> Result<usize> {
                 params![cur_hash],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .ok();
+            .optional()?;
         let Some((id, path, size)) = victim else {
             break;
         };
-        conn.execute("DELETE FROM clips WHERE id=?1", params![id])?;
-        if let Some(p) = path {
-            let _ = std::fs::remove_file(p);
-        }
+        tx.execute("DELETE FROM clips WHERE id=?1", params![id])?;
+        paths.push(path);
         need -= size as i128;
-        n += 1;
     }
-    Ok(n)
+    tx.commit()?;
+    remove_image_files(&paths);
+    Ok(paths.len())
 }
 
 // =====================================================================
@@ -596,9 +674,7 @@ pub fn prune_before(cutoff_ms: i64, dry_run: bool) -> Result<PruneOutcome> {
     // （prune_orphan_images 只兜底"有文件无行"，反向残缺无清扫）。commit 后
     // 删除失败的残留与既有口径一致，同样由孤儿清扫兜底
     let images_deleted = image_files.len();
-    for p in image_files {
-        let _ = std::fs::remove_file(p);
-    }
+    remove_image_files(&image_files);
     Ok(PruneOutcome {
         deleted: deleted as usize,
         images_deleted,
@@ -732,29 +808,22 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<Clip>> {
 
 pub fn delete(id: i64) -> Result<()> {
     let conn = connect()?;
-    let img: Option<String> = conn
-        .query_row(
-            "SELECT image_path FROM clips WHERE id=?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .ok();
-    conn.execute("DELETE FROM clips WHERE id=?1", params![id])?;
-    // 行删文件也删；文件清理失败不阻断（残留由 prune_orphan_images 兜底）
-    if let Some(p) = img {
-        let _ = std::fs::remove_file(p);
-    }
+    let paths = delete_rows_image_paths(
+        &conn,
+        "DELETE FROM clips WHERE id=?1 RETURNING image_path",
+        &[&id],
+    )?;
+    remove_image_files(&paths);
     Ok(())
 }
 
 pub fn wipe() -> Result<()> {
-    let conn = connect()?;
-    conn.execute("DELETE FROM clips", [])?;
-    // 全库清空后 images/ 下不再有任何引用者，整个目录内容可安全清空
-    if let Ok(rd) = std::fs::read_dir(Config::images_dir()) {
-        for e in rd.flatten() {
-            let _ = std::fs::remove_file(e.path());
-        }
+    let mut conn = connect()?;
+    let paths = delete_rows_image_paths(&conn, "DELETE FROM clips RETURNING image_path", &[])?;
+    remove_image_files(&paths);
+    // A capture may commit a new row after the wipe. Only remove unreferenced files.
+    if let Err(e) = prune_orphan_images_with(&mut conn) {
+        eprintln!("[niri-clip wipe] image cleanup failed: {e:#}");
     }
     Ok(())
 }
@@ -820,9 +889,7 @@ pub fn wipe_sensitive(dry_run: bool) -> Result<WipeOutcome> {
     }
     tx.commit()?;
     let images_deleted = image_files.len();
-    for p in image_files {
-        let _ = std::fs::remove_file(p);
-    }
+    remove_image_files(&image_files);
     Ok(WipeOutcome {
         deleted: ids.len(),
         images_deleted,

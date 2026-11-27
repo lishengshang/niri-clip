@@ -118,10 +118,7 @@ fn busy_timeout_is_set_on_connection() {
         let uv: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(
-            uv, 5,
-            "schema 应迁移到版本 5（FTS5 + blake3 统一 + idx_ts）"
-        );
+        assert_eq!(uv, crate::migrate::SCHEMA_VERSION);
     });
 }
 
@@ -460,10 +457,66 @@ fn prune_orphan_images_removes_unreferenced_files() {
         // 入库中途崩溃的临时文件
         let tmp = dir.join(".tmp-1234.bin");
         std::fs::write(&tmp, b"tmp").unwrap();
+        let unrelated = dir.join("keep.txt");
+        std::fs::write(&unrelated, b"unrelated").unwrap();
         assert_eq!(prune_orphan_images().unwrap(), 2);
         assert!(!orphan.exists() && !tmp.exists());
         assert!(img.path.exists(), "被引用的文件不得误删");
+        assert!(unrelated.exists(), "清扫只处理本应用创建的文件");
         assert_eq!(prune_orphan_images().unwrap(), 0, "二次清扫应无残留");
+    });
+}
+
+#[test]
+fn orphan_cleanup_waits_for_image_writer_commit() {
+    with_env(|_| {
+        let mut conn = connect().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        tx.execute(
+            "INSERT INTO clips (hash, text, ts) VALUES ('image', 'fixture', 1)",
+            [],
+        )
+        .unwrap();
+        let image = write_image_payload(&tx, tx.last_insert_rowid(), b"new image data").unwrap();
+
+        std::thread::scope(|scope| {
+            let (started, starting) = std::sync::mpsc::channel();
+            let (finished, finishing) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                let mut conn = connect().unwrap();
+                started.send(()).unwrap();
+                finished
+                    .send(prune_orphan_images_with(&mut conn).unwrap())
+                    .unwrap();
+            });
+            starting.recv().unwrap();
+            assert!(finishing
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err());
+            tx.commit().unwrap();
+            assert_eq!(finishing.recv().unwrap(), 0);
+        });
+        assert_eq!(std::fs::read(image.path).unwrap(), b"new image data");
+    });
+}
+
+#[test]
+fn rolled_back_history_trim_preserves_image_payload() {
+    with_env(|_| {
+        let image = insert_image("image/png", b"preserved image")
+            .unwrap()
+            .unwrap();
+        let mut conn = connect().unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let paths = trim_history(&tx, 0).unwrap();
+        assert_eq!(paths, [image.path.to_str().unwrap()]);
+        tx.rollback().unwrap();
+        assert!(get(image.id).is_ok());
+        assert_eq!(std::fs::read(image.path).unwrap(), b"preserved image");
     });
 }
 
@@ -517,12 +570,13 @@ fn fts_migration_backfills_and_upgrade_is_lossless() {
     with_env(|_| {
         clear_db();
         // 手工构造 v2 旧库文件（不经过 connect()，否则直接迁满）
-        {
+        let conn = {
             // 裸开不会自建父目录（connect 才会）
             std::fs::create_dir_all(Config::db_path().parent().unwrap()).unwrap();
             let conn = Connection::open(Config::db_path()).unwrap();
             conn.execute_batch(
-                "CREATE TABLE clips (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT UNIQUE,
+                "PRAGMA journal_mode=WAL;
+                 CREATE TABLE clips (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT UNIQUE,
                  text TEXT NOT NULL, mime TEXT DEFAULT 'text/plain', ts INTEGER NOT NULL,
                  pinned INTEGER DEFAULT 0, size INTEGER, image_path TEXT);
                  INSERT INTO clips(hash, text, mime, ts) VALUES
@@ -531,8 +585,27 @@ fn fts_migration_backfills_and_upgrade_is_lossless() {
                  PRAGMA user_version=2;",
             )
             .unwrap();
-        }
-        // 下一次 connect() 走 v3 迁移：回填后存量行可搜（中英文）
+            conn
+        };
+        conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let barrier = std::sync::Barrier::new(7);
+        std::thread::scope(|scope| {
+            let barrier = &barrier;
+            for _ in 0..6 {
+                scope.spawn(move || {
+                    barrier.wait();
+                    connect().unwrap();
+                });
+            }
+            barrier.wait();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        conn.execute(
+            "INSERT INTO clips_fts(clips_fts, rank) VALUES('integrity-check', 1)",
+            [],
+        )
+        .unwrap();
         assert_eq!(search("legacy world", 10).unwrap().len(), 1);
         assert_eq!(search("存量中文", 10).unwrap().len(), 1);
         let n: i64 = connect()
@@ -540,6 +613,30 @@ fn fts_migration_backfills_and_upgrade_is_lossless() {
             .query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 2, "旧库升级无损：行数不变");
+    });
+}
+
+#[test]
+fn fts_migration_repairs_an_already_damaged_index() {
+    with_env(|_| {
+        insert("existing indexed text".into(), None).unwrap();
+        let conn = connect().unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version=5;
+             INSERT INTO clips_fts(rowid, text) SELECT id, text FROM clips;",
+        )
+        .unwrap();
+        let integrity = "INSERT INTO clips_fts(clips_fts, rank) VALUES('integrity-check', 1)";
+        assert!(conn.execute(integrity, []).is_err());
+        drop(conn);
+
+        let conn = connect().unwrap();
+        conn.execute(integrity, []).unwrap();
+        assert_eq!(
+            crate::migrate::schema_version(&conn).unwrap(),
+            crate::migrate::SCHEMA_VERSION
+        );
+        assert_eq!(search("indexed text", 10).unwrap().len(), 1);
     });
 }
 
@@ -634,7 +731,7 @@ fn blake3_migration_merges_duplicates_and_never_doubles() {
         let ver: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, 5, "迁移必须推进到 v5");
+        assert_eq!(ver, crate::migrate::SCHEMA_VERSION);
 
         // 防翻倍断言：5 行（4 文本 + 1 图片）合并 1 条重复 → 4 行，只减不增
         let n: i64 = conn
@@ -1071,6 +1168,54 @@ fn import_dry_run_stats_match_real_run() {
 }
 
 #[test]
+fn import_dry_run_leaves_missing_and_legacy_history_untouched() {
+    with_env(|g| {
+        let text = "legacy clipboard item";
+        let backup = g.root.join("incoming.ndjson");
+        write_lines(
+            &backup,
+            &[
+                format!("{{\"format\":\"{EXPORT_FORMAT}\",\"version\":{EXPORT_VERSION}}}"),
+                format!(
+                    "{{\"text\":\"{text}\",\"hash\":\"{}\",\"mime\":\"text/plain\",\"ts\":1,\"pinned\":false}}",
+                    hash_text(text),
+                ),
+            ],
+        );
+        let missing = backup::import_file(&backup, true).unwrap();
+        assert_eq!((missing.imported, missing.exists), (1, 0));
+        assert!(!Config::state_dir().exists());
+
+        let legacy = Config::legacy_db_path();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let old = Connection::open(&legacy).unwrap();
+        old.execute_batch(
+            "CREATE TABLE clips (id INTEGER PRIMARY KEY AUTOINCREMENT, hash TEXT UNIQUE,
+             text TEXT NOT NULL, mime TEXT DEFAULT 'text/plain', ts INTEGER NOT NULL,
+             pinned INTEGER DEFAULT 0, size INTEGER, image_path TEXT);
+             PRAGMA user_version=2;",
+        )
+        .unwrap();
+        old.execute(
+            "INSERT INTO clips(hash, text, ts) VALUES ('old-hash', ?1, 1)",
+            [text],
+        )
+        .unwrap();
+        drop(old);
+        let before = std::fs::read(&legacy).unwrap();
+
+        let dry = backup::import_file(&backup, true).unwrap();
+        assert_eq!((dry.imported, dry.exists), (0, 1));
+        assert!(!Config::state_dir().exists());
+        assert_eq!(std::fs::read(&legacy).unwrap(), before);
+
+        let actual = backup::import_file(&backup, false).unwrap();
+        assert_eq!((actual.imported, actual.exists), (0, 1));
+        assert_eq!(std::fs::read(&legacy).unwrap(), before);
+    });
+}
+
+#[test]
 fn import_enforces_max_items_and_protects_pinned() {
     with_env(|g| {
         clear_db();
@@ -1123,7 +1268,7 @@ fn export_header_and_image_entry_schema() {
         let header: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
         assert_eq!(header["format"], EXPORT_FORMAT);
         assert_eq!(header["version"], EXPORT_VERSION);
-        assert_eq!(header["user_version"], 5, "与 migrate.rs 当前 schema 对齐");
+        assert_eq!(header["user_version"], crate::migrate::SCHEMA_VERSION);
         assert_eq!(header["count"], 2);
 
         let img_line = lines
@@ -1171,6 +1316,50 @@ fn export_sqlite_snapshot_roundtrip_and_no_overwrite() {
     });
 }
 
+#[test]
+fn export_preserves_existing_targets_and_directory_permissions() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    with_env(|g| {
+        insert("existing history item".into(), None).unwrap();
+        let db = Config::db_path();
+        let original = std::fs::read(&db).unwrap();
+        let shared = g.root.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = shared.join("db-link");
+        let alias = shared.join("db-alias");
+        let prior_backup = shared.join("existing-backup");
+        symlink(&db, &link).unwrap();
+        std::fs::hard_link(&db, &alias).unwrap();
+        std::fs::write(&prior_backup, b"previous backup data").unwrap();
+        for path in [&db, &link, &alias, &prior_backup] {
+            assert!(backup::export_json_file(Some(path)).is_err());
+            assert!(backup::export_sqlite(path).is_err());
+        }
+        assert_eq!(std::fs::read(&db).unwrap(), original);
+        assert_eq!(
+            std::fs::read(&prior_backup).unwrap(),
+            b"previous backup data"
+        );
+
+        let ndjson = shared.join("new.ndjson");
+        let sqlite = shared.join("new.sqlite");
+        backup::export_json_file(Some(&ndjson)).unwrap();
+        backup::export_sqlite(&sqlite).unwrap();
+        assert_eq!(
+            std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        for path in [ndjson, sqlite] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    });
+}
+
 /// 降低容量时，当前项即使比刚取消固定的普通条目更旧也受保护。
 #[test]
 fn max_items_eviction_never_drops_the_current_item() {
@@ -1206,7 +1395,7 @@ fn max_items_eviction_never_drops_the_current_item() {
             assert!(!toggle_pin(clip.id).unwrap());
         }
         let current = current_hash().unwrap();
-        enforce_max_items(&connect().unwrap(), 2).unwrap();
+        enforce_max_items(&mut connect().unwrap(), 2).unwrap();
         let remaining = list(3).unwrap();
         assert_eq!(remaining.len(), 2);
         assert_eq!(remaining[0].hash, current);

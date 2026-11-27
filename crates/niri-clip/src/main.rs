@@ -88,7 +88,7 @@ enum Commands {
     /// 全量导出历史为 NDJSON（首行元数据 + 每行一个条目，图片内嵌 base64；
     /// hash 幂等合并键，格式见 ADR-004）
     Export {
-        /// 输出文件路径；`-` 写 stdout（可管道 `| gzip`）
+        /// 新文件路径（拒绝覆盖）；`-` 写 stdout（可管道 `| gzip`）
         path: String,
         /// 额外用 VACUUM INTO 产出完整 db.sqlite 物理快照（已存在则报错）
         #[arg(long)]
@@ -98,7 +98,7 @@ enum Commands {
     Import {
         /// 备份文件路径（niri-clip export 产物）
         path: String,
-        /// 只校验并统计，不写入
+        /// 只校验并统计，不创建、升级或写入历史库
         #[arg(long)]
         dry_run: bool,
     },
