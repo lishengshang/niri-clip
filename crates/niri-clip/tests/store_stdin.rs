@@ -135,6 +135,67 @@ fn text_stdin_still_captures_normally() {
 }
 
 #[test]
+fn invalid_filter_and_sensitive_selection_never_store_text() {
+    let dir = sandbox("rejected-text");
+    let sample = b"private synthetic capture";
+    let write_sample = |mut command: Command, success| {
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _ = child.stdin.take().unwrap().write_all(sample);
+        let out = child.wait_with_output().unwrap();
+        assert_eq!(out.status.success(), success);
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("private synthetic capture"));
+        out
+    };
+    let mut command = store_cmd(&dir);
+    command.env("CLIPBOARD_STATE", "sensitive");
+    write_sample(command, true);
+
+    fs::write(
+        dir.join("config/niri-clip/config.toml"),
+        "ignore_regex = '['\nnotify_enabled = false\n",
+    )
+    .unwrap();
+    let out = write_sample(store_cmd(&dir), false);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ignore_regex"));
+    assert!(list_raw(&dir).is_empty());
+    cleanup(&dir);
+}
+
+#[test]
+fn primary_capture_does_not_replace_or_clear_the_clipboard_marker() {
+    let dir = sandbox("primary-marker");
+    for (selection, state, payload) in [
+        ("clipboard", "data", "ordinary clipboard"),
+        ("primary", "data", "selected text"),
+        ("primary", "nil", ""),
+    ] {
+        let mut child = store_cmd(&dir)
+            .env("NIRI_CLIP_CAPTURE_SELECTION", selection)
+            .env("CLIPBOARD_STATE", state)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    let output = list_raw(&dir);
+    let first = output.lines().next().unwrap();
+    assert!(first.contains("ordinary clipboard") && first.contains('▶'));
+    assert!(output.contains("selected text"));
+    cleanup(&dir);
+}
+
+#[test]
 fn non_utf8_diagnostic_contains_only_the_size() {
     let dir = sandbox("binary-log");
     let marker = "sample-clipboard-marker";

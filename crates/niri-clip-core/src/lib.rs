@@ -7,6 +7,7 @@ pub mod backup;
 pub mod config;
 pub mod confirm;
 pub mod daemon;
+pub mod gui_activation;
 pub(crate) mod migrate;
 pub mod notify;
 pub mod preview;

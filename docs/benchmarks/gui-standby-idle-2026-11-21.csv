@@ -1,0 +1,3 @@
+history_rows,gui_rss_kib,gui_threads,sample_seconds,cpu_ticks,clock_hz,exit_after_check_seconds
+0,17880,3,5,0,100,29.853391
+300,19440,3,5,0,100,29.857282

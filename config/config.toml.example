@@ -4,21 +4,29 @@
 # 历史条数上限，固定条目受保护。
 max_items = 750
 min_store_length = 1
+# 将固定条目排在普通历史之前。取消固定的条目移到普通历史开头。
 pinned_on_top = true
 
 # 匹配的文本跳过捕获。使用 TOML 单引号，保留正则表达式中的反斜杠。
+# 正则无法编译时暂停文本捕获。运行 niri-clip doctor 可检查规则。
 ignore_regex = '(?i)(\b(?:op|otpauth|bitwarden)[\w-]*://|\{REF:|\{TOTP\}|\{TIMEOTP\})|password|secret|token|otp|auth'
 
-# auto 依次选择原生窗口、fzf、fuzzel；也可填 native、fzf 或 fuzzel。
+# auto 优先原生窗口，其次使用 fzf 0.71+，不可用时尝试 fuzzel。
+# 也可填 native、fzf 或 fuzzel。显式选择 fuzzel 时直接启动，无需终端。
 tui_backend = "auto"
+# niri 原生浮窗在上次使用的显示器恢复关闭时的位置，false 始终采用窗口规则。
+remember_window_position = true
+# 原生窗口关闭后保留进程的秒数。0 立即退出，设为 30 可在短时间内快速重开。
+gui_idle_timeout_secs = 0
 preview_width = 100
 enable_preview = true
 # 捕获 PNG、JPEG、WebP。原生窗口显示缩略图，终端预览需要 chafa。
 enable_image_preview = false
 notify_enabled = true
 
-# 单次捕获的超时（秒）。启用 PRIMARY 后也记录鼠标划选的文本。
+# 单次捕获的超时（秒）。设为 0 禁用超时。
 capture_timeout_secs = 5
+# 启用后，鼠标划选的文本进入历史，当前项仍跟踪普通剪贴板。
 capture_primary = false
 
 # 单条文本和图片的大小上限（字节）。

@@ -1,6 +1,10 @@
 //! 渲染（自 main.rs 拆出，纯代码搬移）：主视图 + 底部预览窗格 +
 //! ▶/图片缓存读取（缓存刷新 refresh_cur 在 update.rs 消息路径）。
 
+use std::ops::Range;
+
+use iced::widget::{responsive, Column};
+
 use super::*;
 
 /// 列表行预览的列宽预算（显示列，CJK/emoji 计 2），与窗口像素的换算口径：
@@ -11,114 +15,156 @@ use super::*;
 /// 省略号早现一格。`cfg.preview_width` 仍作用户上限（配小生效）。
 const PREVIEW_COLS: usize = 44;
 
+const OVERSCAN_ROWS: usize = 3;
+
+fn history_height(rows: usize) -> f32 {
+    (rows as f32 * ROW_PITCH - ROW_SEPARATOR).max(0.0)
+}
+
+fn history_window(rows: usize, offset: f32, height: f32) -> Range<usize> {
+    let full_height = history_height(rows);
+    let height = height.clamp(0.0, full_height);
+    // 列表变短或窗口变高时，Scrollable 会把偏移收回新末尾。
+    // 先用同样的边界算首屏，避免漏画收回后应出现的行。
+    let offset = offset.clamp(0.0, full_height - height);
+    let first = (offset / ROW_PITCH).floor() as usize;
+    let end = ((offset + height) / ROW_PITCH).ceil() as usize;
+    first.saturating_sub(OVERSCAN_ROWS)..(end + OVERSCAN_ROWS).min(rows)
+}
+
 impl App {
+    fn history_list(
+        &self,
+        clips: &[&store::Clip],
+        current: Option<&str>,
+        height: f32,
+    ) -> Element<'_, Message> {
+        let window = history_window(clips.len(), self.viewport_offset, height);
+        let q_lower = self.query.trim().to_lowercase();
+        let rows = window.clone().map(|idx| {
+            let clip = clips[idx];
+            let selected = idx == self.selected;
+            let cursor = if selected { "❯" } else { " " };
+            let cur_mark = if current == Some(clip.hash.as_str()) {
+                "▶"
+            } else {
+                " "
+            };
+            let star = if clip.pinned { "◆" } else { " " };
+            // 快选序号任意状态都显示：搜索态裸数字被输入框接管，
+            // 序号对应 Alt+1-9,0（见 update.rs 快选分支，0 = 第 10 行）
+            let quick = match idx {
+                0..=8 => format!("{}", idx + 1),
+                9 => "0".to_string(),
+                _ => " ".to_string(),
+            };
+            // cur_mark 与 star 之间必须留空格：▶◆ 直接拼接时两个图标
+            // 贴死（当前项恰被固定是最常见组合），视觉上糊成一个字形
+            let prefix = format!("{cursor} {quick} {cur_mark} {star} ");
+            // ↵（U+21B5）字形覆盖差（tofu），GUI 侧换成 ⏎；截断按显示
+            // 列宽（PREVIEW_COLS 口径），cfg.preview_width 作为用户上限
+            let preview = preview::preview_text_columns(clip, self.preview_width.min(PREVIEW_COLS))
+                .replace('↵', "⏎");
+            let base = if selected { ROW_FG_SELECTED } else { ROW_FG };
+            let highlight = if selected { HL_SELECTED } else { HL };
+
+            // fzf 灵魂：命中查询子序列的字符用 hl 色点亮
+            let flags = if self.query.is_empty() {
+                None
+            } else {
+                fuzzy_flags(&q_lower, &preview)
+            };
+
+            let mut spans: Vec<text::Span<'static, (), Font>> = Vec::new();
+            spans.push(text::Span::new(prefix).color(base));
+            let mut run = String::new();
+            let mut run_hit = false;
+            for (i, ch) in preview.chars().enumerate() {
+                let hit = flags
+                    .as_ref()
+                    .is_some_and(|f| f.get(i).copied().unwrap_or(false));
+                if i > 0 && hit != run_hit {
+                    spans.push(
+                        text::Span::new(std::mem::take(&mut run))
+                            .color(if run_hit { highlight } else { base })
+                            .underline(run_hit),
+                    );
+                }
+                run_hit = hit;
+                run.push(ch);
+            }
+            if !run.is_empty() {
+                spans.push(
+                    text::Span::new(run)
+                        .color(if run_hit { highlight } else { base })
+                        .underline(run_hit),
+                );
+            }
+
+            // 鼠标交互：悬停跟随选中，点击复制关闭
+            let row = mouse_area(
+                container(
+                    text::Rich::with_spans(spans)
+                        .size(14)
+                        .font(UI_FONT)
+                        .width(Length::Fill)
+                        .wrapping(text::Wrapping::None),
+                )
+                .width(Length::Fill)
+                .height(Length::Fixed(ROW_HEIGHT))
+                .padding([4, 10])
+                .style(move |_| container::Style {
+                    // 普通行共用窗口底色；实色高亮足够标出选中行，省去软件阴影。
+                    background: selected.then_some(Background::Color(SEL_BG)),
+                    border: Border {
+                        radius: RADIUS_ROW,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            )
+            .on_press(Message::Pick(idx))
+            .on_right_press(Message::PickStay(idx));
+            let row = if selected {
+                row
+            } else {
+                // 滚动后同一个控件槽位可能显示另一条记录，按当前坐标反馈悬停。
+                row.on_move(move |_| Message::Hover(idx))
+            };
+
+            (idx, Element::from(row))
+        });
+
+        // 等高占位保留完整滚动范围。普通 Column 会按类型更新控件状态，
+        // 适合内容在占位与行之间替换，并会跳过视口外的绘制。
+        let mut list = Column::with_capacity(window.len() * 2 + 2);
+        if window.start != 0 {
+            list = list.push(vspace(window.start as f32 * ROW_PITCH));
+        }
+        for (idx, row) in rows {
+            list = list.push(row);
+            if idx + 1 < clips.len() {
+                list = list.push(rule::horizontal(ROW_SEPARATOR).style(rule_style));
+            }
+        }
+        if window.end < clips.len() {
+            list = list.push(vspace(history_height(clips.len() - window.end)));
+        }
+        scrollable(list)
+            .id(self.list_id.clone())
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .on_scroll(Message::Scrolled)
+            .style(scroll_style)
+            .into()
+    }
+
     pub(super) fn view(&self) -> Element<'_, Message> {
         let cur = self.cur_hash();
         let filtered = self.filtered();
         let query = self.query.trim();
-        let q_lower = query.to_lowercase();
         let shown = filtered.len().min(store::MENU_LIMIT);
-
-        let rows = filtered
-            .iter()
-            .enumerate()
-            .take(store::MENU_LIMIT)
-            .map(|(idx, clip)| {
-                let selected = idx == self.selected;
-                let cursor = if selected { "❯" } else { " " };
-                let cur_mark = if cur.as_deref() == Some(clip.hash.as_str()) {
-                    "▶"
-                } else {
-                    " "
-                };
-                let star = if clip.pinned { "◆" } else { " " };
-                // 快选序号任意状态都显示：搜索态裸数字被输入框接管，
-                // 序号对应 Alt+1-9,0（见 update.rs 快选分支，0 = 第 10 行）
-                let quick = match idx {
-                    0..=8 => format!("{}", idx + 1),
-                    9 => "0".to_string(),
-                    _ => " ".to_string(),
-                };
-                // cur_mark 与 star 之间必须留空格：▶◆ 直接拼接时两个图标
-                // 贴死（当前项恰被固定是最常见组合），视觉上糊成一个字形
-                let prefix = format!("{cursor} {quick} {cur_mark} {star} ");
-                // ↵（U+21B5）字形覆盖差（tofu），GUI 侧换成 ⏎；截断按显示
-                // 列宽（PREVIEW_COLS 口径），cfg.preview_width 作为用户上限
-                let preview =
-                    preview::preview_text_columns(clip, self.preview_width.min(PREVIEW_COLS))
-                        .replace('↵', "⏎");
-                let base = if selected { ROW_FG_SELECTED } else { ROW_FG };
-
-                // fzf 灵魂：命中查询子序列的字符用 hl 色点亮
-                let flags = if self.query.is_empty() {
-                    None
-                } else {
-                    fuzzy_flags(&q_lower, &preview)
-                };
-
-                let mut spans: Vec<text::Span<'static, (), Font>> = Vec::new();
-                spans.push(text::Span::new(prefix).color(base));
-                let mut run = String::new();
-                let mut run_hit = false;
-                for (i, ch) in preview.chars().enumerate() {
-                    let hit = flags
-                        .as_ref()
-                        .is_some_and(|f| f.get(i).copied().unwrap_or(false));
-                    if i > 0 && hit != run_hit {
-                        spans.push(text::Span::new(std::mem::take(&mut run)).color(if run_hit {
-                            HL
-                        } else {
-                            base
-                        }));
-                    }
-                    run_hit = hit;
-                    run.push(ch);
-                }
-                if !run.is_empty() {
-                    spans.push(text::Span::new(run).color(if run_hit { HL } else { base }));
-                }
-
-                // 鼠标交互：悬停跟随选中，点击复制关闭
-                let row = mouse_area(
-                    container(
-                        text::Rich::with_spans(spans)
-                            .size(14)
-                            .font(UI_FONT)
-                            .width(Length::Fill)
-                            .wrapping(text::Wrapping::None),
-                    )
-                    .width(Length::Fill)
-                    .height(Length::Fixed(ROW_HEIGHT))
-                    .padding([4, 10])
-                    .style(move |_| container::Style {
-                        background: Some(Background::Color(if selected { SEL_BG } else { BG })),
-                        border: Border {
-                            radius: RADIUS_ROW,
-                            ..Default::default()
-                        },
-                        shadow: if selected {
-                            SHADOW_ROW
-                        } else {
-                            Shadow::default()
-                        },
-                        ..Default::default()
-                    }),
-                )
-                .on_press(Message::Pick(idx))
-                .on_right_press(Message::PickStay(idx))
-                .on_enter(Message::Hover(idx));
-
-                Element::from(row)
-            });
-
-        // 行列表：行间细分界线（fzf 行分隔观感）
-        let mut list = iced::widget::column![];
-        for (idx, row) in rows.enumerate() {
-            if idx > 0 {
-                list = list.push(rule::horizontal(1.0).style(rule_style));
-            }
-            list = list.push(row);
-        }
+        let selected = filtered.get(self.selected).copied();
 
         let placeholder = if self.search_mode {
             "搜索剪贴板历史"
@@ -132,7 +178,11 @@ impl App {
             .size(15)
             .padding([8, 10])
             .style(prompt_style);
-        let header = row![search, text(format!("{shown} 项")).size(12).color(MUTED)]
+        let position = match selected {
+            Some(_) => format!("{} / {shown} 项", self.selected + 1),
+            None => format!("{shown} 项"),
+        };
+        let header = row![search, text(position).size(12).color(MUTED)]
             .align_y(iced::Alignment::Center)
             .spacing(12)
             .padding([10, 12]);
@@ -151,14 +201,9 @@ impl App {
                     .center_y(Length::Fill),
             );
         } else {
-            col = col.push(
-                scrollable(list)
-                    .id(self.list_id.clone())
-                    .height(Length::Fill)
-                    .width(Length::Fill)
-                    .on_scroll(Message::Scrolled)
-                    .style(scroll_style),
-            );
+            col = col.push(responsive(move |size| {
+                self.history_list(&filtered[..shown], cur.as_deref(), size.height)
+            }));
         }
 
         if self.confirm_delete {
@@ -173,7 +218,7 @@ impl App {
         // 底部预览窗格：文本多行截断；图片条目直接渲染（iced image widget）。
         // 三种分支（文本/图片/缺失提示）外层一律定高 PREVIEW_HEIGHT——高度随
         // 内容变化会让上方 Fill 列表重排，切换条目时整窗闪烁跳动
-        let Some(clip) = filtered.get(self.selected) else {
+        let Some(clip) = selected else {
             return container(col)
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -216,6 +261,7 @@ impl App {
             col = col.push(
                 container(
                     scrollable(text(self.preview_text(clip)).size(12))
+                        .id(self.preview_id.clone())
                         .width(Length::Fill)
                         .height(Length::Fill)
                         .style(scroll_style),
@@ -227,14 +273,14 @@ impl App {
             );
         }
 
-        col = col.push(rule::horizontal(1.0).style(rule_style)).push(
-            container(
-                text("↑↓ 选择    Enter 复制    Ctrl-P 固定    Ctrl-X 删除")
-                    .size(12)
-                    .color(MUTED),
-            )
-            .padding([6, 12]),
-        );
+        let tips = if self.enable_preview {
+            "Tab 搜索或列表    ↑↓ / PgUp / PgDn 选择    Enter 复制\nCtrl-P 固定    Ctrl-X 删除    Shift+PgUp/PgDn 滚动文本预览"
+        } else {
+            "Tab 搜索或列表    ↑↓ / PgUp / PgDn 选择    Enter 复制\nCtrl-P 固定    Ctrl-X 删除"
+        };
+        col = col
+            .push(rule::horizontal(1.0).style(rule_style))
+            .push(container(text(tips).size(12).color(MUTED)).padding([6, 12]));
 
         container(col)
             .width(Length::Fill)
@@ -279,5 +325,28 @@ impl App {
             .iter()
             .find(|(cid, _)| *cid == clip.id)
             .map(|(_, h)| h.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_window_covers_partial_rows_without_laying_out_all_history() {
+        let height = ROW_PITCH * 12.0;
+        assert_eq!(history_window(300, 0.0, height), 0..15);
+        assert_eq!(
+            history_window(300, ROW_PITCH * 100.0 + 1.0, height),
+            97..116
+        );
+    }
+
+    #[test]
+    fn history_window_clamps_after_search_or_resize() {
+        let height = ROW_PITCH * 4.0;
+        assert_eq!(history_window(20, 7000.0, height), 12..20);
+        assert_eq!(history_window(3, 7000.0, height), 0..3);
+        assert!(history_window(0, 7000.0, height).is_empty());
     }
 }

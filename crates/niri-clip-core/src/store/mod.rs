@@ -40,23 +40,52 @@ pub struct InsertedImage {
 
 /// 连接（含旧库搬迁 + schema 迁移）。backup.rs（导出/回灌）同用此唯一入口
 pub(crate) fn connect() -> Result<Connection> {
+    use crate::migrate;
+
     let path = Config::db_path();
-    crate::migrate::migrate_legacy_db(&path)?;
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
-        tighten_dir_perms(p);
-    }
-    let conn = Connection::open(&path).context("open sqlite")?;
+    let existing = if path.try_exists()? {
+        let conn = open_connection(&path)?;
+        if migrate::schema_version(&conn)? == migrate::SCHEMA_VERSION {
+            configure_connection(&conn, &path)?;
+            return Ok(conn);
+        }
+        Some(conn)
+    } else {
+        None
+    };
+
+    let _migration = crate::single_instance::InstanceGuard::acquire("migration")?;
+    tighten_dir_perms(&Config::state_dir());
+    let mut conn = match existing {
+        Some(conn) => conn,
+        None => {
+            migrate::migrate_legacy_db(&path)?;
+            open_connection(&path)?
+        }
+    };
+    configure_connection(&conn, &path)?;
+    migrate::migrate_schema(&mut conn)?;
+    Ok(conn)
+}
+
+fn open_connection(path: &Path) -> Result<Connection> {
+    let conn = Connection::open(path).context("open sqlite")?;
     conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS))?;
+    Ok(conn)
+}
+
+fn configure_connection(conn: &Connection, path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tighten_dir_perms(parent);
+    }
+    tighten_file_perms(path);
     conn.execute_batch(
         "
         PRAGMA journal_mode=WAL;
         PRAGMA synchronous=NORMAL;
         ",
     )?;
-    tighten_file_perms(&path);
-    crate::migrate::migrate_schema(&conn)?;
-    Ok(conn)
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -105,27 +134,16 @@ pub fn image_content_key(mime: &str, bytes: &[u8]) -> String {
 }
 
 pub fn should_ignore(text: &str, cfg: &Config) -> bool {
-    if text.chars().count() < cfg.min_store_length {
-        return true;
-    }
-    // 编译产物随 Config::load 缓存（见 config.rs ignore_re）；None = 模式非法，不过滤
-    if let Some(re) = &cfg.ignore_re {
-        if re.is_match(text) {
-            return true;
-        }
-    }
-    false
+    text.chars().count() < cfg.min_store_length
+        || cfg.ignore_re.as_ref().is_none_or(|re| re.is_match(text))
 }
 
 // =====================================================================
 // v0.5：当前项指针（current pointer）
 //
-// state/current 单行文件记录"最后一次被成功捕获的内容 hash"。语义：
-// ▶ 标识 = 你最后一次复制的东西 ≈ Ctrl+V 会粘出的内容。
-// - 仅在捕获成功时刷新（新入库 / 去重刷 ts）；被 ignore_regex 过滤、
-//   超过体积上限、空载荷均不写 → "当前剪贴板不在历史中"由指针与列表
-//   不匹配自然表达，不会撒谎。
-// - list() 依此把当前项排到第 1 行（星标之上），fzf/fuzzel 行首打 ▶。
+// state/current 保存最近一项被捕获或复制的历史指纹。捕获入口观察到剪贴板
+// 变更但未保留该内容时清除指针，避免 delete-current 作用于此前的历史项。
+// list() 依此把当前项排到第 1 行（星标之上），选择器以 ▶ 标记。
 // =====================================================================
 
 fn current_pointer_path() -> PathBuf {
@@ -143,8 +161,34 @@ pub fn current_hash() -> Option<String> {
 /// 刷新当前项指针（供捕获路径与 TUI copy 路径调用）。
 /// 指针属辅助功能，写失败不阻断捕获，仅记 stderr。
 pub fn touch_current(hash: &str) {
-    if let Err(e) = std::fs::write(current_pointer_path(), hash) {
+    let result = crate::single_instance::InstanceGuard::acquire("current").and_then(|_guard| {
+        std::fs::write(current_pointer_path(), hash).context("write current file")
+    });
+    if let Err(e) = result {
         eprintln!("[niri-clip] write current pointer failed: {e}");
+    }
+}
+
+pub(crate) fn current_revision() -> Option<std::fs::Metadata> {
+    std::fs::metadata(current_pointer_path()).ok()
+}
+
+/// A rejected capture must not erase a marker set by a newer capture or copy.
+pub(crate) fn clear_current_if_unchanged(previous: Option<std::fs::Metadata>) {
+    use std::os::unix::fs::MetadataExt;
+
+    let Some(previous) = previous else {
+        return;
+    };
+    let revision = |m: &std::fs::Metadata| (m.dev(), m.ino(), m.ctime(), m.ctime_nsec());
+    let result = crate::single_instance::InstanceGuard::acquire("current").and_then(|_guard| {
+        if current_revision().is_some_and(|m| revision(&m) == revision(&previous)) {
+            std::fs::remove_file(current_pointer_path())?;
+        }
+        Ok(())
+    });
+    if let Err(error) = result {
+        eprintln!("[niri-clip] clear current pointer failed: {error}");
     }
 }
 
@@ -156,7 +200,7 @@ pub fn insert(text: String, mime: Option<String>) -> Result<bool> {
 
 /// 去重写入的**共用骨架**（文本/图片两条路径共用，任务 2.6 / C6）：
 /// `BEGIN IMMEDIATE` → 按 hash 查重 → 已存在则刷新 `ts`、否则 INSERT →
-/// 提交 → 刷新当前项指针。
+/// 提交。调用方负责决定是否刷新普通剪贴板的当前项。
 ///
 /// `BEGIN IMMEDIATE` 的必要性见 `insert_with` 的注释（多进程并发下
 /// "先查后插"必须原子化）。`on_new_row` 在**事务内**对新插入的行执行额外工作
@@ -185,8 +229,6 @@ where
     if let Some(id) = exists {
         tx.execute("UPDATE clips SET ts=?1 WHERE id=?2", params![ts, id])?;
         tx.commit()?;
-        // 重复捕获同样代表"剪贴板变成了这个内容"：刷新指针
-        touch_current(hash);
         return Ok((false, None));
     }
     tx.execute(
@@ -196,24 +238,37 @@ where
     let id = tx.last_insert_rowid();
     let extra = on_new_row(&tx, id)?;
     tx.commit()?;
-    touch_current(hash);
     Ok((true, Some(extra)))
 }
 
 /// 同 insert，但复用调用方已加载的配置（捕获热路径上 Config::load 的
 /// 同步读盘 + TOML 解析是每次捕获都要付的成本，能省则省）
 pub fn insert_with(text: String, mime: Option<String>, cfg: &Config) -> Result<bool> {
+    Ok(insert_text_with(&text, mime, cfg, true)?.unwrap_or(false))
+}
+
+/// `None` 表示跳过。重复捕获返回 `Some(false)`，已有历史项仍是当前内容。
+pub(crate) fn insert_text_with(
+    text: &str,
+    mime: Option<String>,
+    cfg: &Config,
+    mark_current: bool,
+) -> Result<Option<bool>> {
     // 统一空白语义：所有捕获路径（watch 管道 / try_system_capture / native
     // 轮询）必须在同一 hash 口径下去重。此前仅 try_system_capture 做 trim，
     // 同一次剪贴板变化的竞态双触发会以"原文版 + trim 版"两份入库（真实库
     // 可见 ts 仅差 40ms、长度差首尾空白的成对条目），TUI Enter 复制后即
     // 表现为多出一条"带 ↵/空格"的孪生记录。
-    let text = text.trim().to_string();
+    let text = text.trim();
     if text.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
-    if should_ignore(&text, cfg) {
-        return Ok(false);
+    anyhow::ensure!(
+        cfg.ignore_re.is_some(),
+        "ignore_regex 编译失败，已跳过文本捕获；请检查 config.toml"
+    );
+    if should_ignore(text, cfg) {
+        return Ok(None);
     }
     // v0.5：单条体积上限。守卫放 store 层（单一真相源）——除 daemon 三个捕获
     // 路径外，migrate 等所有调用方同样受限；daemon 侧另有 Read::take 有界读
@@ -224,10 +279,10 @@ pub fn insert_with(text: String, mime: Option<String>, cfg: &Config) -> Result<b
             text.len(),
             cfg.max_clip_bytes
         );
-        return Ok(false);
+        return Ok(None);
     }
     let mut conn = connect()?;
-    let hash = hash_text(&text);
+    let hash = hash_text(text);
     let ts = Utc::now().timestamp_millis();
     let mime = mime.unwrap_or_else(|| "text/plain".to_string());
     let size = text.len() as i64;
@@ -235,12 +290,15 @@ pub fn insert_with(text: String, mime: Option<String>, cfg: &Config) -> Result<b
     // 检查 + 插入的原子性由 upsert_clip 的 BEGIN IMMEDIATE 保证：否则多进程
     // 并发时（典型：fzf 选中旧条目 -> wl-copy 写回 -> daemon 捕获同一 hash）
     // 双双通过检查后一方撞 UNIQUE 报错并被静默吞掉
-    let (inserted, _) = upsert_clip(&mut conn, &hash, &text, &mime, ts, size, |_, _| Ok(()))?;
+    let (inserted, _) = upsert_clip(&mut conn, &hash, text, &mime, ts, size, |_, _| Ok(()))?;
 
-    if inserted {
-        enforce_max_items(&conn, cfg.max_items)?;
+    if mark_current {
+        touch_current(&hash);
     }
-    Ok(inserted)
+    if inserted {
+        enforce_max_items(&mut conn, cfg.max_items)?;
+    }
+    Ok(Some(inserted))
 }
 
 /// v0.4：入库图片剪贴板。
@@ -256,6 +314,15 @@ pub fn insert_image(mime: &str, bytes: &[u8]) -> Result<Option<InsertedImage>> {
 
 /// 同 insert_image，但复用调用方已加载的配置（见 insert_with）
 pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Option<InsertedImage>> {
+    insert_captured_image(mime, bytes, cfg, true)
+}
+
+pub(crate) fn insert_captured_image(
+    mime: &str,
+    bytes: &[u8],
+    cfg: &Config,
+    mark_current: bool,
+) -> Result<Option<InsertedImage>> {
     // v0.5：图片单张体积上限（截图通常 1–3MB，默认 10MiB 给足余量）
     if bytes.len() > cfg.max_image_bytes {
         eprintln!(
@@ -270,10 +337,6 @@ pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Optio
     let ts = Utc::now().timestamp_millis();
     let placeholder = format!("[image {} {} bytes]", mime, bytes.len());
 
-    let dir = Config::images_dir();
-    std::fs::create_dir_all(&dir)?;
-    tighten_dir_perms(&dir);
-
     // 骨架（去重/提交/刷指针）与文本路径共用；差异只在 `on_new_row`——
     // 数据文件写入必须落在**同一事务窗口内**：先落 `.tmp-` 再原子 rename 到最终
     // 路径，任何一步失败即随 tx 回滚行，不再出现"有行无图"的永久残缺状态
@@ -285,37 +348,63 @@ pub fn insert_image_with(mime: &str, bytes: &[u8], cfg: &Config) -> Result<Optio
         mime,
         ts,
         bytes.len() as i64,
-        |tx, id| -> Result<InsertedImage> {
-            let path = dir.join(format!("{id}.bin"));
-            let tmp = dir.join(format!(".tmp-{id}.bin"));
-            std::fs::write(&tmp, bytes)
-                .with_context(|| format!("write image cache {}", tmp.display()))?;
-            std::fs::rename(&tmp, &path)
-                .with_context(|| format!("publish image cache {}", path.display()))?;
-            tighten_file_perms(&path);
-            tx.execute(
-                "UPDATE clips SET image_path=?1 WHERE id=?2",
-                params![path.to_string_lossy(), id],
-            )?;
-            Ok(InsertedImage { id, path })
-        },
+        |tx, id| write_image_payload(tx, id, bytes),
     )?;
 
+    if mark_current {
+        touch_current(&hash);
+    }
     if inserted {
-        enforce_max_items(&conn, cfg.max_items)?;
+        enforce_max_items(&mut conn, cfg.max_items)?;
     }
     Ok(extra)
+}
+
+/// The caller holds the SQLite writer reservation until it commits the row.
+/// Startup cleanup takes the same reservation before inspecting these files.
+pub(crate) fn write_image_payload(
+    tx: &rusqlite::Transaction<'_>,
+    id: i64,
+    bytes: &[u8],
+) -> Result<InsertedImage> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let dir = Config::images_dir();
+    std::fs::create_dir_all(&dir)?;
+    tighten_dir_perms(&dir);
+    let path = dir.join(format!("{id}.bin"));
+    let path_text = path.to_str().context("图片路径必须是 UTF-8")?;
+    let tmp = dir.join(format!(".tmp-{id}.bin"));
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => (),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => {
+            return Err(e).with_context(|| format!("remove old image data {}", tmp.display()))
+        }
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .with_context(|| format!("open image data {}", tmp.display()))?;
+    file.write_all(bytes)?;
+    // Make the file and its final directory entry durable before committing the row.
+    file.sync_all()?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("publish image data {}", path.display()))?;
+    std::fs::File::open(&dir)?.sync_all()?;
+    tx.execute(
+        "UPDATE clips SET image_path=?1 WHERE id=?2",
+        params![path_text, id],
+    )?;
+    Ok(InsertedImage { id, path })
 }
 
 /// 执行 `DELETE ... RETURNING image_path` 并返回被删行的数据文件路径
 /// （任务 2.6 / C7）。
 ///
-/// 只收集路径、**不删文件**：删除时机由调用方决定——`prune_before` 必须在
-/// commit 之后删（事务回滚时行还在，文件不能先没），而 `enforce_max_items`
-/// 处于自动提交语义下可立即删。此前两处各写一遍同样的收尸逻辑。
-///
-/// 注：`gc_images` 不适用本助手——它需要按行累计字节数逐条淘汰，是**有意**
-/// 的逐行删除（见其注释），与这里"一条 DELETE 批量删"的形态不同。
+/// 调用方必须在提交删除事务后再删除文件，回滚时原行仍需其载荷。
 fn delete_rows_image_paths(
     conn: &Connection,
     sql: &str,
@@ -335,28 +424,51 @@ fn delete_rows_image_paths(
 /// 上限裁剪（文本/图片共用）。pub(crate)：import（backup.rs）结束后按当前
 /// 配置执行一次，与捕获路径同一上限语义。
 ///
-/// **对当前项的保护是隐式的**：这里只排除 `pinned`，不显式排除 `current` 指针
-/// 指向的行（写法与 `gc_images`/`prune_before` 不同）。这不是遗漏——当前项指针
-/// 只在捕获成功时刷新，而捕获同时会刷新该行 `ts`（新入库 INSERT，或去重时
-/// UPDATE ts），故当前项恒为最新 ts，不满足"按 ts 最旧优先淘汰"的前提。
-/// 该不变式由 `max_items_eviction_never_drops_the_current_item` 单测锁定；
-/// 若将来把"指针刷新"与"ts 更新"解耦，必须先把这里改成显式排除当前项。
-pub(crate) fn enforce_max_items(conn: &Connection, max_items: usize) -> Result<()> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
-    if count > max_items as i64 {
-        let to_del = count - max_items as i64;
-        // RETURNING 带出被淘汰条目的数据文件路径，行删文件也删（否则
-        // images/ 只进不出，截图类负载下 state 目录会无限膨胀）
-        let paths = delete_rows_image_paths(
-            conn,
-            "DELETE FROM clips WHERE id IN (SELECT id FROM clips WHERE pinned=0 ORDER BY ts ASC LIMIT ?1) RETURNING image_path",
-            &[&to_del],
-        )?;
-        for p in paths {
-            let _ = std::fs::remove_file(p);
-        }
+/// 取消固定会刷新排序时间，当前项因此可能比普通历史更旧。仅在需要裁剪时
+/// 读取当前项指针，避免按时间裁剪掉仍在剪贴板中的条目。
+fn enforce_max_items(conn: &mut Connection, max_items: usize) -> Result<()> {
+    // The common path stays read-only when the history is below its limit.
+    let count: usize = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
+    if count > max_items {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let paths = trim_history(&tx, max_items)?;
+        tx.commit()?;
+        remove_image_files(&paths);
     }
     Ok(())
+}
+
+pub(crate) fn trim_history(
+    tx: &rusqlite::Transaction<'_>,
+    max_items: usize,
+) -> Result<Vec<String>> {
+    let conn: &Connection = tx;
+    let count: i64 = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
+    let max_items = i64::try_from(max_items).unwrap_or(i64::MAX);
+    if count > max_items {
+        let to_del = count - max_items;
+        // RETURNING 带出被淘汰条目的数据文件路径，行删文件也删（否则
+        // images/ 只进不出，截图类负载下 state 目录会无限膨胀）
+        let cur = if max_items == 0 {
+            String::new()
+        } else {
+            current_hash().unwrap_or_default()
+        };
+        return delete_rows_image_paths(
+            conn,
+            "DELETE FROM clips WHERE id IN (
+                 SELECT id FROM clips WHERE pinned=0 AND hash IS NOT ?2 ORDER BY ts ASC, id ASC LIMIT ?1
+             ) RETURNING image_path",
+            &[&to_del, &cur],
+        );
+    }
+    Ok(Vec::new())
+}
+
+pub(crate) fn remove_image_files(paths: &[String]) {
+    for path in paths {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// 孤儿清扫：回收 images/ 下不被任何 clips.image_path 引用的数据文件。
@@ -364,13 +476,19 @@ pub(crate) fn enforce_max_items(conn: &Connection, max_items: usize) -> Result<(
 /// insert_image 在 rename 成功但 UPDATE 失败窗口内留下的无主文件。
 /// `.tmp-` 前缀为入库中途崩溃的临时文件，一并清理。daemon 启动时调用一次。
 pub fn prune_orphan_images() -> Result<usize> {
-    let conn = connect()?;
+    prune_orphan_images_with(&mut connect()?)
+}
+
+fn prune_orphan_images_with(conn: &mut Connection) -> Result<usize> {
     let dir = Config::images_dir();
     if !dir.exists() {
         return Ok(0);
     }
+    // A writer may already have published a file that readers cannot see in SQL yet.
+    // Wait for that transaction and exclude new writes throughout the scan.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let referenced: std::collections::HashSet<String> = {
-        let mut stmt = conn.prepare("SELECT image_path FROM clips WHERE image_path IS NOT NULL")?;
+        let mut stmt = tx.prepare("SELECT image_path FROM clips WHERE image_path IS NOT NULL")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut set = std::collections::HashSet::new();
         for r in rows {
@@ -381,17 +499,21 @@ pub fn prune_orphan_images() -> Result<usize> {
     let mut n = 0;
     for entry in std::fs::read_dir(&dir)?.flatten() {
         let p = entry.path();
-        let name = p
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        if !name.starts_with(".tmp-") && referenced.contains(&p.to_string_lossy().to_string()) {
+        let name = entry.file_name();
+        let owned = name.to_str().and_then(|name| name.strip_suffix(".bin"));
+        let Some(stem) = owned else { continue };
+        let id = stem
+            .strip_prefix(".tmp-import-")
+            .or_else(|| stem.strip_prefix(".tmp-"))
+            .unwrap_or(stem);
+        if id.parse::<i64>().is_err() || referenced.contains(p.to_string_lossy().as_ref()) {
             continue;
         }
         if std::fs::remove_file(&p).is_ok() {
             n += 1;
         }
     }
+    tx.commit()?;
     Ok(n)
 }
 
@@ -405,11 +527,12 @@ pub fn gc_images(max_bytes: u64) -> Result<usize> {
     if max_bytes == 0 {
         return Ok(0);
     }
-    let conn = connect()?;
+    let mut conn = connect()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let cur_hash = current_hash().unwrap_or_default();
     // size 列对图片条目即数据文件字节数（见 insert_image_with），
     // SUM 即 images/ 目录总量
-    let total: i64 = conn.query_row(
+    let total: i64 = tx.query_row(
         "SELECT COALESCE(SUM(size),0) FROM clips WHERE image_path IS NOT NULL",
         [],
         |r| r.get(0),
@@ -418,12 +541,12 @@ pub fn gc_images(max_bytes: u64) -> Result<usize> {
     if need <= 0 {
         return Ok(0);
     }
-    let mut n = 0usize;
+    let mut paths = Vec::new();
     while need > 0 {
         // 逐条淘汰最旧的可淘汰图片行（ts ASC, id ASC：同毫秒内先入先出）。
         // 候选数远小于库规模，逐条成本可忽略；批量 DELETE 需按字节累计，
         // 复杂度不划算。可淘汰集合为空时提前收手（全受保护时宁超配额不丢数据）
-        let victim: Option<(i64, Option<String>, i64)> = conn
+        let victim: Option<(i64, String, i64)> = tx
             .query_row(
                 "SELECT id, image_path, size FROM clips
                  WHERE image_path IS NOT NULL AND pinned=0 AND hash != ?1
@@ -431,18 +554,17 @@ pub fn gc_images(max_bytes: u64) -> Result<usize> {
                 params![cur_hash],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .ok();
+            .optional()?;
         let Some((id, path, size)) = victim else {
             break;
         };
-        conn.execute("DELETE FROM clips WHERE id=?1", params![id])?;
-        if let Some(p) = path {
-            let _ = std::fs::remove_file(p);
-        }
+        tx.execute("DELETE FROM clips WHERE id=?1", params![id])?;
+        paths.push(path);
         need -= size as i128;
-        n += 1;
     }
-    Ok(n)
+    tx.commit()?;
+    remove_image_files(&paths);
+    Ok(paths.len())
 }
 
 // =====================================================================
@@ -593,9 +715,7 @@ pub fn prune_before(cutoff_ms: i64, dry_run: bool) -> Result<PruneOutcome> {
     // （prune_orphan_images 只兜底"有文件无行"，反向残缺无清扫）。commit 后
     // 删除失败的残留与既有口径一致，同样由孤儿清扫兜底
     let images_deleted = image_files.len();
-    for p in image_files {
-        let _ = std::fs::remove_file(p);
-    }
+    remove_image_files(&image_files);
     Ok(PruneOutcome {
         deleted: deleted as usize,
         images_deleted,
@@ -631,7 +751,11 @@ fn row_to_clip(r: &rusqlite::Row<'_>) -> rusqlite::Result<Clip> {
 }
 
 pub fn list(limit: usize) -> Result<Vec<Clip>> {
-    let cfg = Config::load();
+    list_with_pinning(limit, crate::config::SelectorConfig::load().pinned_on_top)
+}
+
+/// 已加载菜单配置的调用方可直接使用同一次读取的排序设置。
+pub fn list_with_pinning(limit: usize, pinned_on_top: bool) -> Result<Vec<Clip>> {
     let conn = connect()?;
     // 当前项永远第 1 行（星标之上）：第 1 行 = Ctrl+V 会粘出的内容。
     // 无指针时绑空串（hash 列不存在空值），过滤退化为不过滤。
@@ -655,7 +779,7 @@ pub fn list(limit: usize) -> Result<Vec<Clip>> {
     // 其余条目按 pinned/ts 排序取 N 条：排序键为纯列名，pinned_on_top 走
     // idx_pinned_ts、否则走 idx_ts（v5），两分支均为索引有序扫描。
     // hash UNIQUE，!= 过滤恰好剔除当前项
-    let order = if cfg.pinned_on_top {
+    let order = if pinned_on_top {
         "pinned DESC, ts DESC, id DESC"
     } else {
         "ts DESC, id DESC"
@@ -725,29 +849,22 @@ pub fn search(query: &str, limit: usize) -> Result<Vec<Clip>> {
 
 pub fn delete(id: i64) -> Result<()> {
     let conn = connect()?;
-    let img: Option<String> = conn
-        .query_row(
-            "SELECT image_path FROM clips WHERE id=?1",
-            params![id],
-            |r| r.get(0),
-        )
-        .ok();
-    conn.execute("DELETE FROM clips WHERE id=?1", params![id])?;
-    // 行删文件也删；文件清理失败不阻断（残留由 prune_orphan_images 兜底）
-    if let Some(p) = img {
-        let _ = std::fs::remove_file(p);
-    }
+    let paths = delete_rows_image_paths(
+        &conn,
+        "DELETE FROM clips WHERE id=?1 RETURNING image_path",
+        &[&id],
+    )?;
+    remove_image_files(&paths);
     Ok(())
 }
 
 pub fn wipe() -> Result<()> {
-    let conn = connect()?;
-    conn.execute("DELETE FROM clips", [])?;
-    // 全库清空后 images/ 下不再有任何引用者，整个目录内容可安全清空
-    if let Ok(rd) = std::fs::read_dir(Config::images_dir()) {
-        for e in rd.flatten() {
-            let _ = std::fs::remove_file(e.path());
-        }
+    let mut conn = connect()?;
+    let paths = delete_rows_image_paths(&conn, "DELETE FROM clips RETURNING image_path", &[])?;
+    remove_image_files(&paths);
+    // A capture may commit a new row after the wipe. Only remove unreferenced files.
+    if let Err(e) = prune_orphan_images_with(&mut conn) {
+        eprintln!("[niri-clip wipe] image cleanup failed: {e:#}");
     }
     Ok(())
 }
@@ -813,9 +930,7 @@ pub fn wipe_sensitive(dry_run: bool) -> Result<WipeOutcome> {
     }
     tx.commit()?;
     let images_deleted = image_files.len();
-    for p in image_files {
-        let _ = std::fs::remove_file(p);
-    }
+    remove_image_files(&image_files);
     Ok(WipeOutcome {
         deleted: ids.len(),
         images_deleted,
@@ -824,12 +939,26 @@ pub fn wipe_sensitive(dry_run: bool) -> Result<WipeOutcome> {
 
 pub fn toggle_pin(id: i64) -> Result<bool> {
     let conn = connect()?;
-    let cur: i64 = conn.query_row("SELECT pinned FROM clips WHERE id=?1", params![id], |r| {
-        r.get(0)
-    })?;
-    let new = if cur == 0 { 1 } else { 0 };
-    conn.execute("UPDATE clips SET pinned=?1 WHERE id=?2", params![new, id])?;
-    Ok(new == 1)
+    // 同一条 UPDATE 翻转状态并更新排序，避免并发时先读后写丢失一次切换。
+    // idx_pinned_ts 可直接取普通历史最新时间。同毫秒操作也要排到它前面。
+    let mut stmt = conn.prepare(
+        "UPDATE clips SET
+            ts = CASE WHEN pinned <> 0 THEN MAX(?2, NULLIF(COALESCE((
+                SELECT MAX(ts) FROM clips WHERE pinned = 0
+            ), 0), ?3) + 1) ELSE ts END,
+            pinned = (pinned = 0)
+         WHERE id = ?1
+         RETURNING pinned",
+    )?;
+    // NULLIF 让无法递增的时间戳触发 NOT NULL 约束，避免 SQLite 溢出时存入浮点数。
+    let mut rows = stmt.query(params![id, Utc::now().timestamp_millis(), i64::MAX])?;
+    let pinned = rows
+        .next()?
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)?
+        .get(0)?;
+    // 推进到 SQLITE_DONE，让隐式事务提交失败通过 Result 返回。
+    let _ = rows.next()?;
+    Ok(pinned)
 }
 
 pub fn is_pinned(id: i64) -> Result<bool> {
@@ -871,38 +1000,33 @@ pub fn get(id: i64) -> Result<Clip> {
 /// 此前一律写 text，把占位文本顶进剪贴板（还顺带毁掉当前真实的截图），
 /// 粘贴出来的是一行字而不是图。
 pub fn copy_to_clipboard(id: i64) -> Result<()> {
+    use std::process::{Command, Stdio};
+
     let clip = get(id)?;
+    let mut command = Command::new("wl-copy");
+    // wl-copy 会 fork 守护进程常驻服务剪贴板，不得持有调用方终端 fd。
+    command.stdout(Stdio::null()).stderr(Stdio::null());
     if clip.mime.starts_with("image/") {
         let path = clip
             .image_path
             .as_deref()
             .context("图片条目缺少数据文件路径")?;
         let file = std::fs::File::open(path).with_context(|| format!("open {path}"))?;
-        let mut wl = std::process::Command::new("wl-copy")
+        command
             .arg(format!("--type={}", clip.mime))
             // wl-copy 直接读 fd，无需内存中转 stdin 管道
-            .stdin(std::process::Stdio::from(file))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("wl-copy")?;
-        wl.wait()?;
-        touch_current(&clip.hash);
-        return Ok(());
+            .stdin(Stdio::from(file));
+    } else {
+        command.stdin(Stdio::piped());
     }
-    let mut wl = std::process::Command::new("wl-copy")
-        .stdin(std::process::Stdio::piped())
-        // wl-copy 会 fork 守护进程常驻服务剪贴板，不得持有调用方终端 fd
-        // （详见 tui.rs 同款注释），重定向 null 释放 pty
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("wl-copy")?;
-    wl.stdin
-        .as_mut()
-        .expect("piped stdin")
-        .write_all(clip.text.as_bytes())?;
-    wl.wait()?;
+    let mut child = command.spawn().context("start wl-copy")?;
+    let written = child
+        .stdin
+        .take()
+        .map_or(Ok(()), |mut stdin| stdin.write_all(clip.text.as_bytes()));
+    let status = child.wait().context("wait for wl-copy")?;
+    anyhow::ensure!(status.success(), "wl-copy failed: {status}");
+    written.context("write to wl-copy")?;
     touch_current(&clip.hash);
     Ok(())
 }

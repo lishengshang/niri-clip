@@ -1,0 +1,38 @@
+# Maintainer: lishengshang <3490017805@qq.com>
+pkgname=niri-clip-bin
+pkgver=0.7.0
+pkgrel=1
+pkgdesc="niri-clip 剪贴板历史管理器的预编译 CLI"
+arch=('x86_64')
+url="https://github.com/lishengshang/niri-clip"
+license=('MIT')
+depends=('glibc' 'libgcc' 'wl-clipboard' 'fzf>=0.71' 'libnotify')
+optdepends=(
+  'fuzzel: 后备选择器（无 fzf 环境自动回退）'
+  'kitty: kitty icat 图片预览'
+  'chafa: 图形终端图片预览'
+  'cliphist: 可选, 一次性迁移旧数据'
+)
+provides=("niri-clip=$pkgver")
+conflicts=('niri-clip' 'niri-clip-git')
+options=('!strip' '!debug')
+_archive="niri-clip-v$pkgver-x86_64-unknown-linux-gnu"
+source=("$url/releases/download/v$pkgver/$_archive.tar.gz")
+# Release 资产可用后，在独立的 AUR 配方副本中核对 SHA256SUMS，再写入摘要并生成 .SRCINFO。
+sha256sums=()
+
+package() {
+  cd "$srcdir/$_archive"
+  install -Dm755 niri-clip "$pkgdir/usr/bin/niri-clip"
+  install -Dm644 config/config.toml.example "$pkgdir/usr/share/doc/niri-clip/config.toml.example"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 assets/niri-clip.kdl "$pkgdir/usr/share/doc/niri-clip/niri-clip.kdl.example"
+  install -Dm644 assets/niri-clip.service "$pkgdir/usr/lib/systemd/user/niri-clip.service"
+  sed -i 's|^ExecStart=%h/\.cargo/bin/niri-clip |ExecStart=/usr/bin/niri-clip |' \
+    "$pkgdir/usr/lib/systemd/user/niri-clip.service"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/niri-clip/README.md"
+  install -Dm644 niri-clip.1 "$pkgdir/usr/share/man/man1/niri-clip.1"
+  install -Dm644 completions/niri-clip.bash "$pkgdir/usr/share/bash-completion/completions/niri-clip"
+  install -Dm644 completions/_niri-clip "$pkgdir/usr/share/zsh/site-functions/_niri-clip"
+  install -Dm644 completions/niri-clip.fish "$pkgdir/usr/share/fish/vendor_completions.d/niri-clip.fish"
+}

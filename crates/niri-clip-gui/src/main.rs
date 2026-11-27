@@ -15,12 +15,15 @@ use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::time::{Duration, Instant};
 
+mod executor;
 mod image_cache;
 mod instance;
+mod position;
 mod search;
 mod theme;
 mod update;
 mod view;
+mod warm;
 
 use instance::ensure_single_instance;
 use search::{fuzzy_flags, fuzzy_score};
@@ -29,10 +32,8 @@ use theme::*;
 use iced::widget::{
     container, image, mouse_area, operation, row, rule, scrollable, space, text, text_input,
 };
-use iced::{
-    keyboard, mouse, Background, Border, Element, Font, Length, Shadow, Subscription, Task,
-};
-use niri_clip_core::{config, confirm, preview, store};
+use iced::{event, keyboard, mouse, Background, Border, Element, Font, Length, Subscription, Task};
+use niri_clip_core::{config::SelectorConfig, confirm, preview, store};
 
 /// 主字体：JetBrainsMono Nerd Font（真机已装）。
 /// 不用 Font::MONOSPACE（fontconfig 解析到 Noto Sans Mono）：❯▶◆⏎ 等符号
@@ -53,9 +54,14 @@ enum Message {
     /// 全局键盘路由：仅处理导航/动作键，普通字符交给 widget
     Key(keyboard::Key, keyboard::Modifiers),
     /// 复制当前选中条目；Enter 复制后关闭窗口，Ctrl-Y 连续复制不退出
-    Copy { exit: bool },
+    Copy {
+        exit: bool,
+    },
     /// 后台复制完成
-    CopyFinished { exit: bool, ok: bool },
+    CopyFinished {
+        exit: bool,
+        ok: bool,
+    },
     /// 后台 pin/delete 完成，带回重拉后的列表（None = worker 异常，放弃）
     ListReloaded(Option<Vec<store::Clip>>),
     /// 删除/外部变更后的重载：与 ListReloaded 不同——不主动滚动（选中按
@@ -64,6 +70,7 @@ enum Message {
     /// 窗口重新聚焦：打开期间 daemon 可能捕获了新内容，重拉列表
     /// （走 DeleteReloaded 路径：不滚动，选中按 id 重定位）
     Refocus,
+    CloseRequested,
     /// 鼠标悬停行：跟随选中（高亮预览）
     Hover(usize),
     /// 鼠标真实移动（物理事件，仅订阅层派发）：恢复悬停跟随。
@@ -85,8 +92,6 @@ enum Message {
         id: i64,
         handle: Option<image::Handle>,
     },
-    /// 启动后触发一次：让首屏选中的图片也走后台解码路径
-    Tick,
 }
 
 // 键入、搜索结果和列表重载都可能携带剪贴板正文。调试日志只记录事件名。
@@ -101,13 +106,13 @@ impl std::fmt::Debug for Message {
             Self::ListReloaded(_) => "ListReloaded",
             Self::DeleteReloaded(_) => "DeleteReloaded",
             Self::Refocus => "Refocus",
+            Self::CloseRequested => "CloseRequested",
             Self::Hover(_) => "Hover",
             Self::MouseMove => "MouseMove",
             Self::Pick(_) => "Pick",
             Self::PickStay(_) => "PickStay",
             Self::Scrolled(_) => "Scrolled",
             Self::ImageReady { .. } => "ImageReady",
-            Self::Tick => "Tick",
         })
     }
 }
@@ -118,8 +123,7 @@ fn vspace(h: f32) -> space::Space {
     space::Space::new().height(Length::Fixed(h))
 }
 
-/// 把阻塞任务丢到后台线程执行（iced 默认执行器为 thread-pool，
-/// Task::perform 的 future 里阻塞仅占一个 worker，UI 线程不受影响）。
+/// SQLite、复制和图片解码使用按需创建的阻塞线程，键盘事件订阅始终可运行。
 /// worker panic 时回传 `on_panic`——由调用方指定兜底消息，保证语义正确
 /// （Copy 任务 panic 必须走 CopyFinished{ok:false} 触发失败通知，而非被
 /// ListReloaded(None) 静默吞掉）。
@@ -130,10 +134,10 @@ fn run_bg<T, F>(
 ) -> Task<Message>
 where
     T: Send + 'static,
-    F: FnOnce() -> T + Send + std::panic::UnwindSafe + 'static,
+    F: FnOnce() -> T + Send + 'static,
 {
     Task::perform(
-        async move { std::panic::catch_unwind(f) },
+        async move { tokio::task::spawn_blocking(f).await },
         move |result| match result {
             Ok(v) => wrap(v),
             Err(_) => on_panic,
@@ -203,12 +207,14 @@ fn compute_filtered(
 }
 
 struct App {
+    position: Option<position::PositionMemory>,
+    warm_window: Option<iced::window::Id>,
+    closing: bool,
     search_id: iced::widget::Id,
     /// 行列表 scrollable 的 Id：键盘导航时 scroll_to 跟随选中
     list_id: iced::widget::Id,
-    /// 搜索模式（fzf 语义：/ 或 Ctrl-F 才进入，Esc 退出）。未进入时输入框
-    /// 不持有焦点——光标不闪烁 → 窗口零强制重绘待机（闪烁的最后来源）。
-    /// 退出时轮换 search_id 使旧 widget 状态连同焦点一起丢弃
+    preview_id: iced::widget::Id,
+    /// 搜索会话可以保留查询并把焦点交回列表，Esc 才结束会话。
     search_mode: bool,
     clips: Vec<store::Clip>,
     /// clips 更替代数：每次整表重载 +1，作为过滤缓存的失效键之一
@@ -243,8 +249,9 @@ struct App {
     notify_enabled: bool,
     /// 滚动视口实测半高（on_scroll 回填，resize 自适应），初始为估算值
     viewport_half: f32,
+    viewport_offset: f32,
     /// 鼠标悬停跟随开关：键盘导航时关闭——列表在静止指针下滑动会
-    /// 逐行触发 on_enter，悬停跟随会反复抢走选中态（界面闪烁根因）
+    /// 逐行触发悬停事件，悬停跟随会反复抢走选中态（界面闪烁根因）
     mouse_follow: bool,
     /// 当前项指针 TTL 缓存：(读取时刻, 值)。▶ 标记的文件读收敛到
     /// 至多 2 次/秒（TTL 内的滞后对 ▶ 展示无感知影响）
@@ -260,17 +267,26 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
-        let cfg = config::Config::load();
-        let clips = store::list(Self::load_limit()).unwrap_or_default();
-        Self::with_history(cfg, clips)
+    fn boot(cfg: SelectorConfig) -> (Self, Task<Message>) {
+        let position = position::PositionMemory::open(cfg.remember_window_position);
+        let clips =
+            store::list_with_pinning(Self::load_limit(), cfg.pinned_on_top).unwrap_or_default();
+        let mut app = Self::with_history(cfg, clips);
+        app.position = position;
+        app.refresh_cur();
+        let decode = app.ensure_image_decode();
+        (app, decode)
     }
 
-    fn with_history(cfg: config::Config, clips: Vec<store::Clip>) -> Self {
+    fn with_history(cfg: SelectorConfig, clips: Vec<store::Clip>) -> Self {
         let first_id = clips.first().map(|c| c.id);
         Self {
+            position: None,
+            warm_window: None,
+            closing: false,
             search_id: iced::widget::Id::unique(),
             list_id: iced::widget::Id::unique(),
+            preview_id: iced::widget::Id::unique(),
             // 搜索默认关（fzf 语义：/ 才进入）：启动时不聚焦输入框，光标
             // 不闪烁，窗口零重绘待机
             search_mode: false,
@@ -291,6 +307,7 @@ impl App {
             enable_preview: cfg.enable_preview,
             notify_enabled: cfg.notify_enabled,
             viewport_half: VIEWPORT_HALF,
+            viewport_offset: 0.0,
             mouse_follow: false,
             cur_cache: RefCell::new(None),
             image_cache: RefCell::new(Vec::new()),
@@ -427,8 +444,38 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        iced::event::listen_with(|event, _status, _id| match event {
-            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+        event::listen_with(|event, status, _| Self::input_event(event, status))
+    }
+
+    fn input_event(event: iced::Event, status: event::Status) -> Option<Message> {
+        match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key,
+                modifiers,
+                repeat,
+                ..
+            }) => {
+                use keyboard::key::Named;
+
+                let captured = status == event::Status::Captured;
+                match key.as_ref() {
+                    // 搜索框消费了剪切时，不再把同一次按键交给删除。
+                    // 长按产生的重复事件也不能充当第二次确认。
+                    keyboard::Key::Character("x")
+                        if modifiers.control() && (captured || repeat) =>
+                    {
+                        return None;
+                    }
+                    keyboard::Key::Named(Named::Tab) if repeat => return None,
+                    // 保留输入框对文本与光标移动的处理。
+                    keyboard::Key::Character("/")
+                    | keyboard::Key::Named(Named::Home | Named::End)
+                        if captured =>
+                    {
+                        return None;
+                    }
+                    _ => {}
+                }
                 Some(Message::Key(key, modifiers))
             }
             // 悬停跟随只由物理指针移动恢复（见 Message::MouseMove 注释）
@@ -436,8 +483,11 @@ impl App {
             // 重新聚焦即重拉列表：窗口开着的时候 daemon 照常捕获，
             // 不刷新则列表陈旧（看不到新条目、▶ 指针滞后）
             iced::Event::Window(iced::window::Event::Focused) => Some(Message::Refocus),
+            iced::Event::Window(iced::window::Event::CloseRequested) => {
+                Some(Message::CloseRequested)
+            }
             _ => None,
-        })
+        }
     }
 }
 
@@ -446,7 +496,8 @@ impl App {
 /// 行定高：Rich 文本 14px × 行高 1.3 ≈ 18.2 + 上下 padding 8，凑整 27。
 /// 分界线 1px → 行距（pitch）恒定 28，键盘导航的 scroll_to 据此精确计算
 const ROW_HEIGHT: f32 = 27.0;
-const ROW_PITCH: f32 = ROW_HEIGHT + 1.0;
+const ROW_SEPARATOR: f32 = 1.0;
+const ROW_PITCH: f32 = ROW_HEIGHT + ROW_SEPARATOR;
 /// 视口半高初始估算（675 - 头行/提示符/预览窗格），on_scroll 回填实测值
 const VIEWPORT_HALF: f32 = 240.0;
 /// 保留最近解码的预览缩略图。
@@ -460,41 +511,51 @@ fn theme_dark(_state: &App) -> iced::Theme {
 
 fn main() -> iced::Result {
     // 单实例守卫必须存活到进程结束（drop 即释放 flock）
-    let _instance = ensure_single_instance();
+    let instance = ensure_single_instance();
+    // 提前初始化 iced 的共享字体库，与 Wayland 和历史初始化并行。
+    // 工作线程完成后退出；若未能启动，iced 会在首次排版时照常初始化。
+    let _ = std::thread::Builder::new().spawn(|| {
+        let _ = iced::advanced::graphics::text::font_system();
+    });
+    let cfg = SelectorConfig::load();
+    if cfg.gui_idle_timeout_secs > 0 {
+        if let Some(guard) = &instance {
+            match niri_clip_core::gui_activation::Endpoint::bind(guard) {
+                Ok((_endpoint, listener)) => return warm::run(cfg, listener),
+                Err(e) => eprintln!("[niri-clip gui] standby unavailable: {e}"),
+            }
+        }
+    }
     // 常规 xdg 窗口：受 niri window-rule 约束（悬浮/位置/边框由用户
     // rule.kdl 约定，app-id = "niri-clip-gui"），winit 原生 IME
-    iced::application(
-        || {
-            let app = App::new();
-            // 搜索默认关（/ 才进入）：启动不聚焦输入框——光标不闪烁，窗口
-            // 零强制重绘待机。Tick 触发首屏选中图片的后台解码派发
-            // （ensure_image_decode 挂在 update 尾部，启动后需一条消息引出）
-            let tick = Task::perform(async {}, move |_| Message::Tick);
-            (app, tick)
-        },
-        App::update,
-        App::view,
-    )
-    .title("niri-clip")
-    // 深色主题（光标/默认控件色）+ JetBrainsMono NF：符号字形齐全无 tofu
-    .theme(theme_dark)
-    .default_font(UI_FONT)
-    .subscription(App::subscription)
-    .window(iced::window::Settings {
+    iced::application(move || App::boot(cfg.clone()), App::update, App::view)
+        .executor::<executor::GuiExecutor>()
+        .title("niri-clip")
+        // 深色主题（光标/默认控件色）+ JetBrainsMono NF：符号字形齐全无 tofu
+        .theme(theme_dark)
+        .default_font(UI_FONT)
+        .subscription(App::subscription)
+        .window(window_settings())
+        .run()
+}
+
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
         size: iced::Size::new(500.0, 675.0),
         resizable: true,
+        exit_on_close_request: false,
         platform_specific: iced::window::settings::PlatformSpecific {
             application_id: String::from("niri-clip-gui"),
             ..Default::default()
         },
         ..Default::default()
-    })
-    .run()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use niri_clip_core::config::Config;
 
     fn clip(id: i64, text: &str) -> store::Clip {
         store::Clip {
@@ -567,7 +628,7 @@ mod tests {
 
     #[test]
     fn completed_search_replaces_the_window_cache_and_updates_selection() {
-        let mut app = App::with_history(config::Config::default(), vec![clip(1, "recent")]);
+        let mut app = App::with_history(Config::default().into(), vec![clip(1, "recent")]);
         let _ = app.handle_message(Message::Query(" older ".into()));
         assert!(app.filtered().is_empty());
         let _ = app.handle_message(Message::SearchDone {
@@ -582,7 +643,7 @@ mod tests {
 
     #[test]
     fn rapid_input_only_dispatches_the_latest_waiting_query() {
-        let mut app = App::with_history(config::Config::default(), vec![]);
+        let mut app = App::with_history(Config::default().into(), vec![]);
         let _ = app.handle_message(Message::Query("a".into()));
         app.query = "ab".into();
         assert_eq!(app.request_search().units(), 0);
@@ -607,11 +668,11 @@ mod tests {
                 ..clip(id, "image")
             })
             .collect();
-        let cfg = config::Config {
+        let cfg = Config {
             enable_image_preview: true,
             ..Default::default()
         };
-        let mut app = App::with_history(cfg, clips);
+        let mut app = App::with_history(cfg.into(), clips);
         assert_eq!(app.ensure_image_decode().units(), 1);
         app.set_selection(1);
         assert_eq!(app.ensure_image_decode().units(), 0);
@@ -622,6 +683,62 @@ mod tests {
         });
         assert_eq!(app.ensure_image_decode().units(), 1);
         assert_eq!(app.selected_id, Some(3));
+    }
+
+    #[test]
+    fn ctrl_x_only_reaches_delete_for_a_fresh_unclaimed_press() {
+        let route = |status, repeat| {
+            let key = keyboard::Key::Character("x".into());
+            App::input_event(
+                iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    modified_key: key.clone(),
+                    key,
+                    physical_key: keyboard::key::Physical::Code(keyboard::key::Code::KeyX),
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::CTRL,
+                    text: None,
+                    repeat,
+                }),
+                status,
+            )
+        };
+        assert!(route(event::Status::Captured, false).is_none());
+        assert!(route(event::Status::Ignored, true).is_none());
+        assert!(matches!(
+            route(event::Status::Ignored, false),
+            Some(Message::Key(_, _))
+        ));
+    }
+
+    #[test]
+    fn preview_scroll_preserves_selection_while_page_navigation_changes_it() {
+        use keyboard::key::Named;
+
+        let clips = (1..=40).map(|id| clip(id, "synthetic")).collect();
+        let mut app = App::with_history(Config::default().into(), clips);
+        app.viewport_half = 2.0 * ROW_PITCH;
+
+        let _ = app.on_key(
+            keyboard::Key::Named(Named::PageDown),
+            keyboard::Modifiers::empty(),
+        );
+        assert_eq!(app.selected_id, Some(5));
+        let scroll = app.on_key(
+            keyboard::Key::Named(Named::PageDown),
+            keyboard::Modifiers::SHIFT,
+        );
+        assert_eq!(scroll.units(), 1);
+        assert_eq!(app.selected_id, Some(5));
+        let _ = app.on_key(
+            keyboard::Key::Named(Named::End),
+            keyboard::Modifiers::empty(),
+        );
+        assert_eq!(app.selected_id, Some(40));
+        let _ = app.on_key(
+            keyboard::Key::Named(Named::Home),
+            keyboard::Modifiers::empty(),
+        );
+        assert_eq!(app.selected_id, Some(1));
     }
 
     #[test]

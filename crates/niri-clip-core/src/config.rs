@@ -22,6 +22,12 @@ pub struct Config {
     pub tui_backend: String,
     #[serde(default = "default_true")]
     pub enable_preview: bool,
+    /// 关闭原生浮窗时保存位置，在同一 niri 输出上恢复。
+    #[serde(default = "default_true")]
+    pub remember_window_position: bool,
+    /// 原生窗口关闭后的无窗口待机秒数，0 表示立即退出。
+    #[serde(default)]
+    pub gui_idle_timeout_secs: u64,
     /// v0.4.1：事件模式下每次捕获子进程的超时秒数（防止病态读挂起长期占用）
     #[serde(default = "default_capture_timeout")]
     pub capture_timeout_secs: u64,
@@ -43,11 +49,47 @@ pub struct Config {
     #[serde(default)]
     pub capture_primary: bool,
     /// ignore_regex 的编译产物：每条入库热路径都要过一遍过滤，不能在
-    /// should_ignore 里反复 Regex::new。编译失败为 None（同旧行为：不过滤）。
+    /// should_ignore 里反复 Regex::new。编译失败为 None，捕获拒绝保存文本。
     /// 注意：直接改字段赋值 ignore_regex 时需同步重编译（代码内无此用法）
     #[serde(skip)]
     #[serde(default)]
     pub ignore_re: Option<Regex>,
+}
+
+/// 菜单需要的配置。沿用完整 TOML 的校验和默认值，打开窗口时无需编译捕获过滤器。
+#[derive(Debug, Clone)]
+pub struct SelectorConfig {
+    pub tui_backend: String,
+    pub max_items: usize,
+    pub pinned_on_top: bool,
+    pub preview_width: usize,
+    pub enable_preview: bool,
+    pub enable_image_preview: bool,
+    pub notify_enabled: bool,
+    pub remember_window_position: bool,
+    pub gui_idle_timeout_secs: u64,
+}
+
+impl SelectorConfig {
+    pub fn load() -> Self {
+        Config::load_fields().into()
+    }
+}
+
+impl From<Config> for SelectorConfig {
+    fn from(cfg: Config) -> Self {
+        Self {
+            tui_backend: cfg.tui_backend,
+            max_items: cfg.max_items,
+            pinned_on_top: cfg.pinned_on_top,
+            preview_width: cfg.preview_width,
+            enable_preview: cfg.enable_preview,
+            enable_image_preview: cfg.enable_image_preview,
+            notify_enabled: cfg.notify_enabled,
+            remember_window_position: cfg.remember_window_position,
+            gui_idle_timeout_secs: cfg.gui_idle_timeout_secs,
+        }
+    }
 }
 
 /// 内置默认值——**唯一来源**：serde 的各 `default_*` 与 `Default::default()`
@@ -114,17 +156,24 @@ fn default_max_image_total_bytes() -> usize {
 
 impl Default for Config {
     fn default() -> Self {
-        let ignore_regex = defaults::IGNORE_REGEX.to_string();
+        Self::default_fields().compile_filter()
+    }
+}
+
+impl Config {
+    fn default_fields() -> Self {
         Self {
             max_items: defaults::MAX_ITEMS,
             preview_width: defaults::PREVIEW_WIDTH,
             min_store_length: defaults::MIN_STORE_LENGTH,
             enable_image_preview: defaults::ENABLE_IMAGE_PREVIEW,
-            ignore_re: Regex::new(&ignore_regex).ok(),
-            ignore_regex,
+            ignore_re: None,
+            ignore_regex: default_regex(),
             pinned_on_top: defaults::PINNED_ON_TOP,
             tui_backend: defaults::TUI_BACKEND.to_string(),
             enable_preview: defaults::ENABLE_PREVIEW,
+            remember_window_position: true,
+            gui_idle_timeout_secs: 0,
             capture_timeout_secs: defaults::CAPTURE_TIMEOUT_SECS,
             max_clip_bytes: defaults::MAX_CLIP_BYTES,
             max_image_bytes: defaults::MAX_IMAGE_BYTES,
@@ -133,15 +182,17 @@ impl Default for Config {
             notify_enabled: defaults::NOTIFY_ENABLED,
         }
     }
-}
 
-impl Config {
     pub fn load() -> Self {
-        match Self::load_checked() {
+        Self::load_fields().compile_filter()
+    }
+
+    fn load_fields() -> Self {
+        match Self::read_fields() {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[niri-clip] config load error: {e:#}, using default");
-                Self::default()
+                Self::default_fields()
             }
         }
     }
@@ -149,16 +200,22 @@ impl Config {
     /// 与 [`Config::load`] 同源，但把读取/解析错误上抛，供 `doctor` 区分
     /// “没有配置文件”和“配置损坏后静默回退默认值”。
     pub fn load_checked() -> Result<Self> {
+        Self::read_fields().map(Self::compile_filter)
+    }
+
+    fn compile_filter(mut self) -> Self {
+        self.ignore_re = Regex::new(&self.ignore_regex).ok();
+        self
+    }
+
+    fn read_fields() -> Result<Self> {
         let path = Self::path();
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok(Self::default_fields());
         }
         let s =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        let mut c: Config =
-            toml::from_str(&s).with_context(|| format!("parse {}", path.display()))?;
-        c.ignore_re = Regex::new(&c.ignore_regex).ok();
-        Ok(c)
+        toml::from_str(&s).with_context(|| format!("parse {}", path.display()))
     }
 
     pub fn path() -> PathBuf {
@@ -305,19 +362,26 @@ mod tests {
         std::fs::create_dir_all(cfg_dir.join("niri-clip")).unwrap();
         std::fs::write(
             cfg_dir.join("niri-clip/config.toml"),
-            "max_items = 42\nignore_regex = \"topsecret\"\n",
+            "max_items = 42\nignore_regex = \"topsecret\"\ntui_backend = \"fzf\"\n\
+             pinned_on_top = false\ngui_idle_timeout_secs = 12\n",
         )
         .unwrap();
         std::env::set_var("XDG_CONFIG_HOME", &cfg_dir);
         let checked = Config::load_checked().expect("合法 TOML 应可解析");
         let cfg = Config::load();
+        let menu = SelectorConfig::load();
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(checked.max_items, 42);
         assert_eq!(cfg.max_items, 42);
+        assert_eq!(menu.max_items, 42);
+        assert_eq!(menu.tui_backend, "fzf");
+        assert_eq!(menu.gui_idle_timeout_secs, 12);
+        assert!(!menu.pinned_on_top);
         // 未写的字段回落默认值
         assert_eq!(cfg.preview_width, 100);
+        assert_eq!(menu.preview_width, cfg.preview_width);
         // 自定义正则已编译且生效
         assert!(cfg.ignore_re.is_some());
         assert!(cfg.ignore_re.as_ref().unwrap().is_match("topsecret-data"));
@@ -330,8 +394,8 @@ mod tests {
     /// 缺失即断言失败（防止它被静默删除后本测试空转）
     #[test]
     fn example_config_matches_defaults_and_parses() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../config/config.toml.example");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/config.toml.example");
         assert!(
             path.exists(),
             "config/config.toml.example 必须存在: {}",
@@ -346,6 +410,7 @@ mod tests {
         assert_eq!(parsed.min_store_length, d.min_store_length);
         assert_eq!(parsed.enable_image_preview, d.enable_image_preview);
         assert_eq!(parsed.ignore_regex, d.ignore_regex);
+        assert_eq!(parsed.gui_idle_timeout_secs, d.gui_idle_timeout_secs);
         assert_eq!(parsed.pinned_on_top, d.pinned_on_top);
         assert_eq!(parsed.tui_backend, d.tui_backend);
         assert_eq!(parsed.notify_enabled, d.notify_enabled);
@@ -379,19 +444,27 @@ mod tests {
             "doctor 必须能区分“配置损坏”与“没有配置”"
         );
         let cfg = Config::load();
+        // 捕获字段类型错误也要沿用整份配置回退的语义。
+        std::fs::write(
+            Config::path(),
+            "tui_backend = 'native'\nmax_clip_bytes = 'bad'",
+        )
+        .unwrap();
+        let menu = SelectorConfig::load();
         std::env::remove_var("XDG_CONFIG_HOME");
         let _ = std::fs::remove_dir_all(&root);
 
         assert_eq!(cfg.max_items, 750, "解析失败应回退默认值");
+        assert_eq!(menu.tui_backend, defaults::TUI_BACKEND);
     }
 
     #[test]
-    fn load_invalid_regex_means_no_filter() {
+    fn invalid_regex_rejects_text() {
         let _g = ENV_LOCK.lock().unwrap();
         let root = std::env::temp_dir().join(format!("niri-clip-cfg-re-{}", std::process::id()));
         let cfg_dir = root.join("config");
         std::fs::create_dir_all(cfg_dir.join("niri-clip")).unwrap();
-        // 非法正则：编译失败 → ignore_re=None（过滤关闭），而不是整个配置崩掉
+        // 正则错误只影响捕获，其他已解析的配置仍然有效。
         std::fs::write(
             cfg_dir.join("niri-clip/config.toml"),
             "ignore_regex = \"([unclosed\"\n",
@@ -403,7 +476,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         assert!(cfg.ignore_re.is_none(), "非法正则应得 None");
-        assert!(!crate::store::should_ignore("password", &cfg));
+        assert!(crate::store::should_ignore("password", &cfg));
     }
 
     #[test]
@@ -448,6 +521,11 @@ mod tests {
         assert_eq!(from_serde.pinned_on_top, d.pinned_on_top);
         assert_eq!(from_serde.tui_backend, d.tui_backend);
         assert_eq!(from_serde.enable_preview, d.enable_preview);
+        assert_eq!(
+            from_serde.remember_window_position,
+            d.remember_window_position
+        );
+        assert_eq!(from_serde.gui_idle_timeout_secs, d.gui_idle_timeout_secs);
         assert_eq!(from_serde.capture_timeout_secs, d.capture_timeout_secs);
         assert_eq!(from_serde.max_clip_bytes, d.max_clip_bytes);
         assert_eq!(from_serde.max_image_bytes, d.max_image_bytes);

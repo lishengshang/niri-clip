@@ -15,14 +15,17 @@ use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{params, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::Path;
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::Config;
 use crate::store::{
-    enforce_max_items, hash_text, image_content_key, tighten_dir_perms, tighten_file_perms,
+    hash_text, image_content_key, remove_image_files, trim_history, write_image_payload,
 };
 
 /// 格式标识（header 行）。不识别即拒绝；version 高于本实现则提示升级
@@ -74,10 +77,131 @@ struct ExportEntry {
     image_base64: Option<String>,
 }
 
+pub(crate) struct BackupFile(PathBuf);
+
+impl BackupFile {
+    pub(crate) fn create(destination: &Path) -> Result<(Self, File)> {
+        match destination.symlink_metadata() {
+            Ok(_) => anyhow::bail!("备份目标已存在，不做覆盖：{}", destination.display()),
+            Err(e) if e.kind() == ErrorKind::NotFound => (),
+            Err(e) => return Err(e).with_context(|| format!("检查 {}", destination.display())),
+        }
+        Self::temporary(destination)
+    }
+
+    pub(crate) fn temporary(destination: &Path) -> Result<(Self, File)> {
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let name = format!(".niri-clip-backup-{}-{sequence}", std::process::id());
+            let temporary = parent.join(name);
+            if temporary.file_name() == destination.file_name() {
+                continue;
+            }
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)
+            {
+                Ok(file) => {
+                    let backup = Self(temporary);
+                    if file.metadata()?.permissions().mode() & 0o777 != 0o600 {
+                        file.set_permissions(fs::Permissions::from_mode(0o600))
+                            .context("备份位置不支持 0600 文件权限")?;
+                        anyhow::ensure!(
+                            file.metadata()?.permissions().mode() & 0o777 == 0o600,
+                            "备份位置不支持 0600 文件权限"
+                        );
+                    }
+                    return Ok((backup, file));
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e).with_context(|| format!("创建 {}", temporary.display())),
+            }
+        }
+    }
+
+    pub(crate) fn vacuum_from(&self, conn: &Connection) -> Result<()> {
+        let path = std::path::absolute(&self.0)?;
+        let name = path.to_str().context("SQLite 备份路径必须是 UTF-8")?;
+        conn.execute("VACUUM INTO ?1", [name])
+            .with_context(|| format!("VACUUM INTO {}", self.0.display()))?;
+        Ok(())
+    }
+
+    pub(crate) fn publish(self, destination: &Path) -> Result<()> {
+        File::open(&self.0)?.sync_all()?;
+        // Refuse an existing database, backup, or link created during the export.
+        publish_new_file(&self.0, destination)
+            .with_context(|| format!("写入备份 {}", destination.display()))
+    }
+
+    /// The migration owns a fixed snapshot name. Preserve the previous copy until
+    /// SQLite has finished writing its replacement.
+    pub(crate) fn replace(self, destination: &Path) -> Result<()> {
+        File::open(&self.0)?.sync_all()?;
+        fs::rename(&self.0, destination)
+            .with_context(|| format!("替换迁移快照 {}", destination.display()))
+    }
+}
+
+fn publish_new_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let from = CString::new(source.as_os_str().as_bytes())?;
+        let to = CString::new(destination.as_os_str().as_bytes())?;
+        // SAFETY: both path strings are NUL-terminated and valid for the call.
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+        ) {
+            return Err(error);
+        }
+    }
+    fs::hard_link(source, destination)
+}
+
+impl Drop for BackupFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 /// 全量导出为 NDJSON。`out = None` 写 stdout（可管道 `| gzip`），
 /// `Some(path)` 写文件（0600——内容是全量剪贴板明文）。全表导出不受
 /// max_items / MENU_LIMIT 限制。
 pub fn export_json_file(out: Option<&Path>) -> Result<ExportOutcome> {
+    let backup = out.map(BackupFile::create).transpose()?;
+    let (temporary, writer): (Option<BackupFile>, Box<dyn Write>) = match backup {
+        Some((temporary, file)) => (Some(temporary), Box::new(file)),
+        None => (None, Box::new(std::io::stdout().lock())),
+    };
     let mut conn = crate::store::connect()?;
     let user_version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     // deferred 读事务：COUNT 与全表扫描取同一快照，daemon 并发写不会让
@@ -85,20 +209,7 @@ pub fn export_json_file(out: Option<&Path>) -> Result<ExportOutcome> {
     let tx = conn.transaction()?;
     let count: i64 = tx.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))?;
 
-    let mut w: Box<dyn Write> = match out {
-        None => Box::new(BufWriter::new(std::io::stdout().lock())),
-        Some(p) => {
-            if let Some(parent) = p.parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent)?;
-                    tighten_dir_perms(parent);
-                }
-            }
-            let f = std::fs::File::create(p).with_context(|| format!("create {}", p.display()))?;
-            tighten_file_perms(p);
-            Box::new(BufWriter::new(f))
-        }
-    };
+    let mut w = BufWriter::new(writer);
 
     serde_json::to_writer(
         &mut w,
@@ -168,6 +279,9 @@ pub fn export_json_file(out: Option<&Path>) -> Result<ExportOutcome> {
     w.flush()?;
     drop(stmt);
     tx.commit()?; // 释放读快照
+    if let (Some(temporary), Some(destination)) = (temporary, out) {
+        temporary.publish(destination)?;
+    }
     Ok(ExportOutcome {
         count: n,
         images,
@@ -180,20 +294,11 @@ pub fn export_json_file(out: Option<&Path>) -> Result<ExportOutcome> {
 /// 物理快照保真但绑 schema 版本）。目标已存在直接报错（VACUUM INTO 要求
 /// 目标不存在；备份命令绝不静默覆盖，重打快照请先手动删除旧份）
 pub fn export_sqlite(path: &Path) -> Result<()> {
-    if path.exists() {
-        anyhow::bail!("快照目标已存在，不做覆盖：{}", path.display());
-    }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-            tighten_dir_perms(parent);
-        }
-    }
+    let (temporary, file) = BackupFile::create(path)?;
+    drop(file);
     let conn = crate::store::connect()?;
-    conn.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()])
-        .with_context(|| format!("VACUUM INTO {}", path.display()))?;
-    tighten_file_perms(path);
-    Ok(())
+    temporary.vacuum_from(&conn)?;
+    temporary.publish(path)
 }
 
 #[derive(Deserialize)]
@@ -302,22 +407,7 @@ fn insert_entry(tx: &rusqlite::Transaction, e: ValidEntry) -> Result<()> {
                     bytes.len() as i64
                 ],
             )?;
-            let id = tx.last_insert_rowid();
-            // 数据文件写入与 insert_image_with 同一模式：.tmp- 先落再原子
-            // rename，失败即整事务回滚，不留"有行无图"残缺；异常残留由
-            // prune_orphan_images 兜底（.tmp- 前缀在其清扫范围）
-            let dir = Config::images_dir();
-            std::fs::create_dir_all(&dir)?;
-            tighten_dir_perms(&dir);
-            let path = dir.join(format!("{id}.bin"));
-            let tmp = dir.join(format!(".tmp-import-{id}.bin"));
-            std::fs::write(&tmp, &bytes).with_context(|| format!("write {}", tmp.display()))?;
-            std::fs::rename(&tmp, &path).with_context(|| format!("publish {}", path.display()))?;
-            tighten_file_perms(&path);
-            tx.execute(
-                "UPDATE clips SET image_path=?1 WHERE id=?2",
-                params![path.to_string_lossy(), id],
-            )?;
+            write_image_payload(tx, tx.last_insert_rowid(), &bytes)?;
         }
     }
     Ok(())
@@ -325,7 +415,7 @@ fn insert_entry(tx: &rusqlite::Transaction, e: ValidEntry) -> Result<()> {
 
 /// 从 NDJSON 备份回灌合并。hash 幂等（已存在跳过，不刷新 ts）；每条重算
 /// hash 完整性校验，损坏跳过并警告。实际写入在单个 BEGIN IMMEDIATE 事务内
-/// 原子提交；不触碰 ▶ 指针；结束按当前配置执行一次 enforce_max_items
+/// 原子提交；不触碰 ▶ 指针；结束按当前配置执行一次历史裁剪
 /// （与捕获路径同一上限语义，pinned 保护自然沿用）。
 /// dry_run 只校验 + 统计，不动任何数据（对齐 prune --dry-run 风格）。
 pub fn import_file(path: &Path, dry_run: bool) -> Result<ImportOutcome> {
@@ -350,14 +440,28 @@ pub fn import_file(path: &Path, dry_run: bool) -> Result<ImportOutcome> {
     }
 
     let mut out = ImportOutcome::default();
-    let cfg = Config::load();
     let warn = |msg: String| {
         eprintln!("[niri-clip import] 跳过无效条目：{msg}");
     };
 
     if dry_run {
-        let conn = crate::store::connect()?;
-        let mut stmt = conn.prepare("SELECT 1 FROM clips WHERE hash=?1")?;
+        let conn = open_existing_history()?;
+        let snapshot = conn
+            .as_ref()
+            .map(Connection::unchecked_transaction)
+            .transpose()?;
+        let mut history = None;
+        if let Some(tx) = snapshot.as_ref() {
+            let has_clips: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='clips' AND type='table')",
+                [],
+                |r| r.get(0),
+            )?;
+            if has_clips {
+                let version: u32 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
+                history = Some((tx, version < 4));
+            }
+        }
         // 同文件重复 hash 与实际执行同口径：实际路径第二条因已入本事务计
         // exists，dry-run 侧用 seen 集合收敛，保证预览统计可对照
         let mut seen = std::collections::HashSet::new();
@@ -368,9 +472,11 @@ pub fn import_file(path: &Path, dry_run: bool) -> Result<ImportOutcome> {
             }
             match parse_validate(&line) {
                 Ok(e) => {
-                    let h = entry_hash(&e).to_string();
-                    let hit: Option<i64> = stmt.query_row(params![h.as_str()], |r| r.get(0)).ok();
-                    if hit.is_some() || !seen.insert(h) {
+                    let hit = match history {
+                        Some((tx, legacy_hash)) => entry_exists(tx, &e, legacy_hash)?,
+                        None => false,
+                    };
+                    if hit || !seen.insert(entry_hash(&e).to_owned()) {
                         out.exists += 1;
                     } else {
                         out.imported += 1;
@@ -386,6 +492,7 @@ pub fn import_file(path: &Path, dry_run: bool) -> Result<ImportOutcome> {
     }
 
     // 实际写入：单事务原子提交（中途硬错误整体回滚，valid 条目不半途而废）
+    let cfg = Config::load();
     let mut conn = crate::store::connect()?;
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     for line in lines {
@@ -396,14 +503,7 @@ pub fn import_file(path: &Path, dry_run: bool) -> Result<ImportOutcome> {
         match parse_validate(&line) {
             Ok(e) => {
                 // 同文件内重复 hash 也在此收敛：上一条已入本事务，查询可见
-                let hit: Option<i64> = tx
-                    .query_row(
-                        "SELECT 1 FROM clips WHERE hash=?1",
-                        params![entry_hash(&e)],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                if hit.is_some() {
+                if entry_exists(&tx, &e, false)? {
                     out.exists += 1;
                     continue;
                 }
@@ -416,10 +516,38 @@ pub fn import_file(path: &Path, dry_run: bool) -> Result<ImportOutcome> {
             }
         }
     }
-    // Deref 到 &Connection：裁剪是导入的一部分，随整事务原子生效
-    enforce_max_items(&tx, cfg.max_items)?;
+    let paths = trim_history(&tx, cfg.max_items)?;
     tx.commit()?;
+    remove_image_files(&paths);
     Ok(out)
+}
+
+fn open_existing_history() -> Result<Option<Connection>> {
+    for path in [Config::db_path(), Config::legacy_db_path()] {
+        if path.try_exists()? {
+            let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .with_context(|| format!("只读打开 {}", path.display()))?;
+            conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+            return Ok(Some(conn));
+        }
+    }
+    Ok(None)
+}
+
+fn entry_exists(conn: &Connection, entry: &ValidEntry, legacy_hash: bool) -> Result<bool> {
+    // Pre-v4 text hashes will be replaced by blake3(text) during the real import.
+    // Use text equality to predict that migration without modifying the old database.
+    let (sql, value) = match entry {
+        ValidEntry::Text { text, .. } if legacy_hash => (
+            "SELECT EXISTS(SELECT 1 FROM clips WHERE text=?1 AND (hash IS NULL OR hash NOT LIKE 'img:%'))",
+            text.as_str(),
+        ),
+        _ => (
+            "SELECT EXISTS(SELECT 1 FROM clips WHERE hash=?1)",
+            entry_hash(entry),
+        ),
+    };
+    Ok(conn.prepare_cached(sql)?.query_row([value], |r| r.get(0))?)
 }
 
 fn entry_hash(e: &ValidEntry) -> &str {

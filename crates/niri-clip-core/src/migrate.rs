@@ -5,13 +5,20 @@
 //!
 //! 变更 schema 必须在此新增版本号与迁移步骤（禁止原地改旧步骤）。
 
-use anyhow::{anyhow, Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use anyhow::{Context, Result};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::backup::BackupFile;
 use crate::config::Config;
-use crate::store::{hash_text, tighten_dir_perms, tighten_file_perms};
+use crate::store::hash_text;
+
+pub(crate) const SCHEMA_VERSION: i64 = 6;
+
+pub(crate) fn schema_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+}
 
 /// v0.4：数据库从 ~/.cache 迁往 ~/.local/state（XDG state 规范——
 /// 剪贴板历史属于应持久的状态数据，放在 ~/.cache 会被系统清理工具误删）。
@@ -19,31 +26,20 @@ use crate::store::{hash_text, tighten_dir_perms, tighten_file_perms};
 /// 旧库保留作为备份不动。
 pub(crate) fn migrate_legacy_db(new_path: &Path) -> Result<()> {
     let legacy = Config::legacy_db_path();
-    if legacy == new_path || !legacy.exists() || new_path.exists() {
+    if legacy == new_path || !legacy.try_exists()? || new_path.try_exists()? {
         return Ok(());
-    }
-    if let Some(p) = new_path.parent() {
-        std::fs::create_dir_all(p)?;
-        tighten_dir_perms(p);
     }
     let src = Connection::open_with_flags(&legacy, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .context("open legacy niri-clip db")?;
-    let res = src.execute("VACUUM INTO ?1", [new_path.to_string_lossy().as_ref()]);
-    match res {
-        Ok(_) => eprintln!(
-            "[niri-clip] 已迁移历史数据库到 {}（原 {} 保留备份）",
-            new_path.display(),
-            legacy.display()
-        ),
-        Err(e) => {
-            // 多进程同时首次启动时的 TOCTOU：对方已迁移成功则继续
-            if new_path.exists() {
-                eprintln!("[niri-clip] 旧库已由其他实例完成迁移");
-            } else {
-                return Err(anyhow!("migrate db {:?} -> {:?}: {e}", legacy, new_path));
-            }
-        }
-    }
+    let (snapshot, file) = BackupFile::create(new_path)?;
+    drop(file);
+    snapshot.vacuum_from(&src)?;
+    snapshot.publish(new_path)?;
+    eprintln!(
+        "[niri-clip] 已迁移历史数据库到 {}（原 {} 保留备份）",
+        new_path.display(),
+        legacy.display()
+    );
     Ok(())
 }
 
@@ -57,10 +53,38 @@ pub(crate) fn migrate_legacy_db(new_path: &Path) -> Result<()> {
 /// 版本 3 -> 4（任务 2.2）：文本 hash 统一为 blake3（见 migrate_blake3）
 /// 版本 4 -> 5（任务 2.7）：补 idx_ts（ts DESC, id DESC），list() 非
 /// pinned_on_top 分支的 ts 排序从 TEMP B-TREE 降为索引有序扫描
-pub(crate) fn migrate_schema(conn: &Connection) -> Result<()> {
-    let ver: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+/// 版本 5 -> 6：修复旧版本并发回填可能留下的损坏 FTS 索引。
+/// 调用方跨整个迁移持有文件锁，包括不能在 SQL 事务内执行的快照。
+pub(crate) fn migrate_schema(conn: &mut Connection) -> Result<()> {
+    let ver = schema_version(conn)?;
+    if ver == SCHEMA_VERSION {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        ver < SCHEMA_VERSION,
+        "数据库版本 {ver} 需要更新的 niri-clip"
+    );
+    if ver < 4 {
+        migrate_to_v3(conn, ver)?;
+        migrate_blake3(conn)?;
+    }
+
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if ver < 5 {
+        tx.execute_batch("CREATE INDEX IF NOT EXISTS idx_ts ON clips(ts DESC, id DESC)")?;
+    }
+    if ver >= 4 {
+        tx.execute("INSERT INTO clips_fts(clips_fts) VALUES('rebuild')", [])?;
+    }
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_to_v3(conn: &mut Connection, ver: i64) -> Result<()> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if ver < 1 {
-        conn.execute_batch(
+        tx.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS clips (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,26 +100,23 @@ pub(crate) fn migrate_schema(conn: &Connection) -> Result<()> {
             DROP TABLE IF EXISTS clips_fts;
             ",
         )?;
-        conn.execute_batch("PRAGMA user_version=1;")?;
     }
     if ver < 2 {
-        let has_col: i64 = conn.query_row(
+        let has_col: i64 = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info('clips') WHERE name='image_path'",
             [],
             |r| r.get(0),
         )?;
         if has_col == 0 {
-            conn.execute_batch("ALTER TABLE clips ADD COLUMN image_path TEXT;")?;
+            tx.execute_batch("ALTER TABLE clips ADD COLUMN image_path TEXT;")?;
         }
-        conn.execute_batch("PRAGMA user_version=2;")?;
     }
     if ver < 3 {
-        conn.execute_batch(
+        tx.execute_batch(
             "
             CREATE VIRTUAL TABLE IF NOT EXISTS clips_fts USING fts5(
                 text, content='clips', content_rowid='id', tokenize='trigram'
             );
-            INSERT INTO clips_fts(rowid, text) SELECT id, text FROM clips;
             CREATE TRIGGER IF NOT EXISTS clips_fts_ai AFTER INSERT ON clips BEGIN
                 INSERT INTO clips_fts(rowid, text) VALUES (new.id, new.text);
             END;
@@ -110,22 +131,12 @@ pub(crate) fn migrate_schema(conn: &Connection) -> Result<()> {
             END;
             ",
         )?;
-        conn.execute_batch("PRAGMA user_version=3;")?;
     }
-    if ver < 4 {
-        migrate_blake3(conn)?;
-    }
-    if ver < 5 {
-        // 2.7：list() 的 pinned_on_top=false 分支按 ts 排序，原 idx_pinned_ts
-        // 以 pinned 为首键帮不上忙——补一条 ts 序索引让该分支也能有序扫描。
-        // 纯增索引不动行，存量库升级无损
-        conn.execute_batch(
-            "
-            CREATE INDEX IF NOT EXISTS idx_ts ON clips(ts DESC, id DESC);
-            PRAGMA user_version=5;
-            ",
-        )?;
-    }
+    // Rebuild is safe if a prior release already started the v3 backfill.
+    // Commit the index and its schema stamp together before taking the v3 snapshot.
+    tx.execute("INSERT INTO clips_fts(clips_fts) VALUES('rebuild')", [])?;
+    tx.pragma_update(None, "user_version", 3)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -281,14 +292,8 @@ fn blake3_snapshot_path() -> PathBuf {
 
 fn snapshot_before_blake3(conn: &Connection) -> Result<()> {
     let snap = blake3_snapshot_path();
-    if let Some(p) = snap.parent() {
-        std::fs::create_dir_all(p)?;
-        tighten_dir_perms(p);
-    }
-    // VACUUM INTO 要求目标不存在：先清掉上一次的快照
-    let _ = std::fs::remove_file(&snap);
-    conn.execute("VACUUM INTO ?1", [snap.to_string_lossy().as_ref()])
-        .with_context(|| format!("snapshot db to {}", snap.display()))?;
-    tighten_file_perms(&snap);
-    Ok(())
+    let (snapshot, file) = BackupFile::temporary(&snap)?;
+    drop(file);
+    snapshot.vacuum_from(conn)?;
+    snapshot.replace(&snap)
 }

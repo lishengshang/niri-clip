@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Config;
 
-/// 单实例守卫。**必须存活到进程退出**——drop 即释放锁（RAII）。
+/// 锁守卫。单实例守卫贯穿进程生命周期，短时任务持有到操作结束。
 pub struct InstanceGuard {
     _file: std::fs::File,
     path: PathBuf,
@@ -26,6 +26,15 @@ impl InstanceGuard {
     /// 返回 `Ok(None)` 表示已被其它实例占用——**这不是错误**，调用方按各自
     /// 语义处理（daemon：提示并退出；GUI：聚焦已开窗口后退出）。
     pub fn try_acquire(name: &str) -> Result<Option<Self>> {
+        Self::lock(name, true)
+    }
+
+    /// 等待短时操作释放锁，例如 schema 迁移或更新当前项。
+    pub(crate) fn acquire(name: &str) -> Result<Self> {
+        Self::lock(name, false)?.context("blocking flock did not acquire the lock")
+    }
+
+    fn lock(name: &str, nonblocking: bool) -> Result<Option<Self>> {
         let dir = Config::state_dir();
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{name}.lock"));
@@ -38,10 +47,19 @@ impl InstanceGuard {
         #[cfg(unix)]
         {
             use std::os::fd::AsRawFd;
-            // SAFETY: 对自身打开的 fd 执行 flock；语义由内核保证。
-            // LOCK_NB = 不阻塞，占用即立即返回非 0
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-                return Ok(None);
+            let operation = if nonblocking {
+                libc::LOCK_EX | libc::LOCK_NB
+            } else {
+                libc::LOCK_EX
+            };
+            // SAFETY: flock is called with an owned, live file descriptor.
+            while unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+                let error = std::io::Error::last_os_error();
+                match error.kind() {
+                    std::io::ErrorKind::Interrupted => continue,
+                    std::io::ErrorKind::WouldBlock if nonblocking => return Ok(None),
+                    _ => return Err(error).with_context(|| format!("lock {}", path.display())),
+                }
             }
         }
         Ok(Some(Self { _file: file, path }))

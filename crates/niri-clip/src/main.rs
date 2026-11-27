@@ -10,7 +10,12 @@ mod doctor;
 mod tui;
 
 #[derive(Parser)]
-#[command(name = "niri-clip", version, about = "niri / Wayland 剪贴板历史管理器")]
+#[command(
+    name = "niri-clip",
+    version,
+    about = "niri / Wayland 剪贴板历史管理器",
+    after_help = "直接运行 niri-clip 打开选择器。运行 niri-clip <子命令> --help 查看子命令用法。"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -24,7 +29,7 @@ enum Commands {
     Tui,
     /// 从标准输入捕获文本或图片
     Store,
-    /// 安装 systemd user 单元到 ~/.config/systemd/user/（随后 enable --now 即可托管）
+    /// 写入 systemd 用户单元（使用 Cargo 默认安装路径 ~/.cargo/bin/niri-clip）
     InstallService,
     /// 列出历史 (供 fzf reload 调用)
     #[command(name = "list-raw")]
@@ -51,9 +56,8 @@ enum Commands {
         #[arg(long)]
         fzf: bool,
     },
-    /// 快速删除当前项（▶ 最后一次复制的内容，任务 3.3）：无需定位选中行，
-    /// Mod+V 打开后一把 Ctrl-D 即可清掉刚复制进来的敏感内容。确认语义同
-    /// delete（星标需二次确认，ADR-005）；--fzf 由 fzf 绑定调用
+    /// 删除历史中标有 ▶ 的条目。该标记跟踪普通剪贴板。
+    /// fzf 中可用 Ctrl-D。固定条目需二次确认。
     DeleteCurrent {
         #[arg(long)]
         fzf: bool,
@@ -84,7 +88,7 @@ enum Commands {
     /// 全量导出历史为 NDJSON（首行元数据 + 每行一个条目，图片内嵌 base64；
     /// hash 幂等合并键，格式见 ADR-004）
     Export {
-        /// 输出文件路径；`-` 写 stdout（可管道 `| gzip`）
+        /// 新文件路径（拒绝覆盖）；`-` 写 stdout（可管道 `| gzip`）
         path: String,
         /// 额外用 VACUUM INTO 产出完整 db.sqlite 物理快照（已存在则报错）
         #[arg(long)]
@@ -94,7 +98,7 @@ enum Commands {
     Import {
         /// 备份文件路径（niri-clip export 产物）
         path: String,
-        /// 只校验并统计，不写入
+        /// 只校验并统计，不创建、升级或写入历史库
         #[arg(long)]
         dry_run: bool,
     },
@@ -108,6 +112,39 @@ enum Commands {
     Completions { shell: Shell },
     /// 输出 man page 到 stdout（打包安装用：> niri-clip.1）
     Man,
+}
+
+fn render_man() -> Result<Vec<u8>> {
+    use std::io::Write as _;
+
+    let command = Cli::command();
+    let program = command.get_name().replace('-', r"\-");
+    let subpage_prefix = format!(r"{program}\-");
+    let mut source = Vec::new();
+    clap_mangen::Man::new(command).render(&mut source)?;
+
+    // clap_mangen emits references to separate subcommand pages. Keep the generated
+    // descriptions and show the command invocations on our single installed page.
+    let mut output = Vec::with_capacity(source.len());
+    let mut in_subcommands = false;
+    for line in std::str::from_utf8(&source)?.lines() {
+        if line.starts_with(".SH ") {
+            in_subcommands = line == ".SH SUBCOMMANDS";
+        }
+
+        let subcommand = if in_subcommands {
+            line.strip_prefix(&subpage_prefix)
+                .and_then(|name| name.strip_suffix("(1)"))
+        } else {
+            None
+        };
+        if let Some(name) = subcommand {
+            writeln!(output, r"\fB{program} {name}\fR")?;
+        } else {
+            writeln!(output, "{line}")?;
+        }
+    }
+    Ok(output)
 }
 
 /// println! 的 EPIPE 安全版：stdout 管道被下游截断（`niri-clip status | head`）
@@ -388,9 +425,7 @@ fn main() -> Result<()> {
             let _ = std::io::stdout().write_all(&buf);
         }
         Some(Commands::Man) => {
-            let mut buf = Vec::new();
-            clap_mangen::Man::new(Cli::command()).render(&mut buf)?;
-            let _ = std::io::stdout().write_all(&buf);
+            let _ = std::io::stdout().write_all(&render_man()?);
         }
         None => {
             tui::run()?;

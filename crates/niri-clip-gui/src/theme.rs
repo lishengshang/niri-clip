@@ -1,10 +1,10 @@
 //! 配色常量与全部控件样式函数。
 //!
 //! 视觉语言对齐 fzf 默认深色风格（与 layer-shell 旧版一脉相承）：
-//! 深底 + accent 蓝键位 + hl 红命中高亮 + 圆角面板 + 垂直偏移阴影。
+//! 深底 + accent 蓝键位 + hl 红命中高亮 + 圆角面板。
 
 use iced::widget::{container, rule, scrollable, text_input};
-use iced::{border, Background, Border, Color, Shadow, Vector};
+use iced::{border, Background, Border, Color};
 
 // 配色对齐 fzf 默认深色风格（与 layer-shell 旧版一致的视觉语言）
 pub const BG: Color = Color {
@@ -52,6 +52,13 @@ pub const HL: Color = Color {
     b: 0.478,
     a: 1.0,
 };
+/// 选中行使用更亮的匹配色，避免红色小字在蓝底上变淡。
+pub const HL_SELECTED: Color = Color {
+    r: 1.0,
+    g: 0.69,
+    b: 0.69,
+    a: 1.0,
+};
 pub const ACCENT: Color = Color {
     r: 0.48,
     g: 0.64,
@@ -82,18 +89,6 @@ pub const RADIUS_PANEL: border::Radius = border::Radius {
     top_right: 6.0,
     bottom_right: 6.0,
     bottom_left: 6.0,
-};
-
-/// 选中行微阴影
-pub const SHADOW_ROW: Shadow = Shadow {
-    color: Color {
-        a: 0.30,
-        r: 0.0,
-        g: 0.0,
-        b: 0.0,
-    },
-    offset: Vector { x: 0.0, y: 1.0 },
-    blur_radius: 5.0,
 };
 
 pub fn prompt_style(_theme: &iced::Theme, status: text_input::Status) -> text_input::Style {

@@ -1,6 +1,6 @@
 # niri-clip 长期开发路线图
 
-> 更新日期：2026-11-21 · 工作区版本：v0.7.0
+> 更新日期：2026-11-27 · 工作区版本：v0.7.0
 > 时间估算假设：单人维护者，每周 8–12 有效工时；所有时间节点为**相对量**，按实际投入动态校准。
 > 实测数值（依赖闭包/编译时间/基准）的唯一真相源为 `ARCHITECTURE.md` §9，本文不重复记数。
 
@@ -18,7 +18,7 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 | 一万条历史中取 300 条 | <11 ms | 达标 |
 | 一万条历史中 FTS 排序取 300 条 | <50 ms | 达标 |
 | CLI release 编译 | <120 s | 历史测量达标 |
-| 依赖 | 新增依赖审查用途与闭包 | 本轮沿用已有库 |
+| 依赖 | 新增依赖审查用途与闭包 | GUI 复用 Tokio 的 Unix socket 监听，引入传递依赖 `socket2`。包数与大小见架构 §9 |
 | 菜单载入 | 最多 300 条 | 两种前端共用 `store::MENU_LIMIT` |
 
 复现命令及测量环境见[架构 §9](ARCHITECTURE.md#performance)。
@@ -56,7 +56,7 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 ✅ Phase 2   v0.6          搜索与数据治理（FTS5/blake3 统一/GC）    已交付（v0.6.0）；2.7 已于 v0.7 前补交付
 ✅ Phase 3   v0.7          安全与隐私强化                         已交付（v0.7.0）
   Phase 4   v1.0          Production 正式发布（进行中，4.9 ✅）    约 3–4 周
-  Phase 5   v1.x          生态与集成（原生UI核心已交付/waybar/OSC52） v1.0 后持续
+  Phase 5   v1.x          生态与集成（原生 UI 后续/OSC52）           v1.0 后持续
   Phase 6   v2.0+         长期愿景（加密/跨合成器/原生UI增强）     远期
 ```
 
@@ -159,13 +159,13 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 
 | # | 任务 | 要点 | 验收标准 |
 |---|---|---|---|
-| 4.1 | 🟡 图片剪贴板 | PNG、JPEG、WebP 从 stdin 识别并入库，GUI 预览，复制原始字节 | 集成测试覆盖三格式、去重与限额。嵌套 niri 已验证图片捕获、GUI 预览及复制回读，另验证 PRIMARY 文本。待用户在日常 niri 会话验收截图和重粘贴 |
-| 4.2 | AUR 三包齐备 | `niri-clip`（release）、`niri-clip-git`、`niri-clip-bin`（预编译）。**决策（2026-08-28）：AUR 首次发布随 epic（原生 UI）合并后的首个版本一起**；主包构建 `-p niri-clip`（不含 gui 依赖链，makedepends 不需要 libxkbcommon），`niri-clip-gui` 待 M5.4 单独分包；`sqlite` 非运行依赖（rusqlite bundled）已移除 | 三包 CI 自动 bump + 安装冒烟 |
-| 4.3 | crates.io 发布 | `cargo publish`，检查 package metadata 完整 | `cargo install niri-clip` 可用 |
+| 4.1 | ✅ 图片剪贴板 | PNG、JPEG、WebP 从 stdin 识别并入库，GUI 预览，复制原始字节 | 集成测试覆盖三格式、去重与限额。日常 niri 会话已验证截图捕获、预览和重粘贴，复制前后 PNG 的 SHA-256 一致。嵌套 niri 另验证了 PRIMARY 文本 |
+| 4.2 | 🟡 AUR 三包齐备 | 仓库提供 `niri-clip`、`niri-clip-git`、`niri-clip-bin` 及独立 `niri-clip-gui` 配方。主包仅构建 CLI，源码构建锁定依赖。当前验证配方与安装树，AUR 上架待账号就绪 | 按发布归档填入摘要，生成各包 `.SRCINFO`，上架后验证安装 |
+| 4.3 | 🟡 crates.io 发布 | core 归档包含服务模板和配置样例，已在独立目录验证构建和测试 | 待按依赖顺序发布，验证从 registry 安装 |
 | 4.4 | waybar 模块 | JSON 输出（历史条数/最新条目/daemon 状态），`niri-clip waybar` | waybar wiki 配置示例可用 |
-| 4.5 | 🟡 文档完善 | README 已整理安装、快捷键、数据位置并附合成数据实图。架构文档已更新性能口径，Unreleased 已按变更类型整理 | 待校对 man 页，并由新用户从源码安装到首次复制 |
-| 4.6 | CI 深化 | 增加：release 自动打包（GitHub Releases + SHA256）、AUR 机器人、benchmark 趋势 | tag 即全渠道发布，人工只做审核 |
-| 4.7 | 兼容性矩阵验证 | fzf 版本门控（<0.71 回退 fuzzel）、主流终端（foot/alacritty/kitty）、niri 最新 stable | 矩阵清单归档并勾验 |
+| 4.5 | 🟡 文档完善 | 已校对生成的 man 页，README 补充了启动捕获的两种方式。干净 XDG 环境下已从源码安装，由 niri 启动捕获和原生窗口，选中合成历史并通过剪贴板回读 | 待新用户在自己的 niri 会话中按 README 独立走完首次复制 |
+| 4.6 | 🟡 CI 深化 | 分支 CI 提供预览包，版本 tag 在门禁通过后发布 GitHub Release 和 SHA-256 清单 | GitHub 发布产物需验证下载与校验。AUR 和 crates.io 另行验收，基准趋势待接入 |
+| 4.7 | ✅ 兼容性矩阵验证 | niri 26.04 嵌套会话中，fzf 0.75.0 分别在 foot、Alacritty、kitty 内通过选择和复制回读。fzf 0.70.0 直接回退 fuzzel 1.15.0 并通过回读 | 合成数据验证，覆盖无控制终端的启动路径 |
 | 4.8 | 版本语义承诺 | 发布 v1.0.0，宣布 SemVer + 配置格式向后兼容承诺 | CHANGELOG 声明 |
 | 4.9 | ✅ 运维体检 `doctor` | 已交付 `niri-clip doctor`：配置/数据库、daemon flock、systemd 单元/自启/沙箱、niri `spawn-at-startup` 与 binds（展开一层 include）、后端与依赖（fzf≥0.71/chafa/wl-clipboard/notify-send）；`[ok]/[info]/[warn]/[fail]` + 修复提示，失败退出码非零。README 已写明 daemon 与 niri 两处 spawn 二选一 | 全新环境按 doctor 输出 5 分钟完成接入 ✅（假 PATH 集成测试 + 真机 0 失败） |
 
@@ -179,7 +179,9 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 
 | 候选项 | 说明 | 前置 |
 |---|---|---|
-| **原生 UI 后续** | 已交付原生窗口、操作语义和后端选择，选型见 [ADR-001](ADR-001.md)。下一项为日常桌面按键到窗口可交互的延迟，目标 ≤50 ms。嵌套 niri 的窗口映射基线见[架构 §9](ARCHITECTURE.md#performance)。其余验收包括 niri stable / sway 兼容性和各次 minor 发布的文档核对 | 依赖的 `niri-clip-core` 已交付 |
+| ✅ 原生浮窗位置记忆 | 同一 niri 输出重开时恢复位置，首次打开与换输出沿用规则。独立会话覆盖 Esc、复制并退出和合成器关闭 | 原生浮窗 |
+| ✅ 可选短时待机 | 默认关闭即退出。待机重开读取最新历史、恢复位置，期限届满会退出进程。已验收新进程、待机内重开和自然超时三种行为。[冷热延迟与待机占用](ARCHITECTURE.md#gui-standby) | 原生浮窗 |
+| **原生 UI 后续** | 已交付原生窗口、操作语义和后端选择，见 [ADR-001](ADR-001.md)。配置读取优化已降低 CLI 取数时间与 GUI 首字符时的内存。日常快捷键的配对差值仍有波动，空库待机重开中位数已达标，冷启动及满菜单待机重开继续跟踪。[配对复测](ARCHITECTURE.md#selector-config)。其余验收包括 niri stable / sway 兼容性和各次 minor 发布的文档核对 | 依赖的 `niri-clip-core` 已交付 |
 | OSC52 远程剪贴板 | SSH/终端场景同步历史 | 1.1（selection 抽象） |
 | 历史内容动作插件化 | 自定义 action（URL 直接打开等） | 2.4 导出格式稳定 |
 | 多选批量删除（TUI/GUI） | fzf `--multi` + GUI 多选；同类均有（clipse 多选、cliphist 2025 已支持多行 delete），批量清理大历史的刚需 | 无 |

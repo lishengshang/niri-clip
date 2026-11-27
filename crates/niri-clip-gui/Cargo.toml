@@ -10,7 +10,8 @@ repository.workspace = true
 [dependencies]
 niri-clip-core.workspace = true
 anyhow.workspace = true
-iced.workspace = true
+iced = { workspace = true, features = ["advanced"] }
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
