@@ -181,6 +181,8 @@ CREATE INDEX idx_ts ON clips(ts DESC, id DESC);   -- v5（任务 2.7）：list()
 - systemd 单元内置 22 项沙箱指令（AF_UNIX + 自身 state 最小面）；指令取舍、
   实测评分与强化档见 `SECURITY-AUDIT.md` §③（该文是沙箱细节的唯一出处）
 
+GitHub CI 在分支推送时产出 Linux x86_64 的 CLI 和 GUI 预览包。推送版本 tag 后，CI 重新跑格式、Clippy、测试、冒烟和基准门禁，核对 tag 与 Cargo 版本、提交和 SHA-256，再上传归档与 `SHA256SUMS` 并发布 Release。打包 runner 使用 Ubuntu 24.04。AUR 与 crates.io 各自单独发布。 [CI 配置](../.github/workflows/ci.yml)
+
 ## 7. 与 cliphist 关系
 
 **完全独立**：`v1.0` 不再双写，`cliphist` 仅作为 `migrate` 源。旧版 `Mod+Shift+V` 可保留为 `cliphist` 独立入口，但默认 `niri-clip` 不感知。

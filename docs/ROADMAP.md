@@ -164,7 +164,7 @@ niri-clip 面向 niri / Wayland 桌面，提供本地剪贴板历史、搜索和
 | 4.3 | 🟡 crates.io 发布 | core 归档包含服务模板和配置样例，已在独立目录验证构建和测试 | 待按依赖顺序发布，验证从 registry 安装 |
 | 4.4 | waybar 模块 | JSON 输出（历史条数/最新条目/daemon 状态），`niri-clip waybar` | waybar wiki 配置示例可用 |
 | 4.5 | 🟡 文档完善 | 已校对生成的 man 页，README 补充了启动捕获的两种方式。干净 XDG 环境下已从源码安装，由 niri 启动捕获和原生窗口，选中合成历史并通过剪贴板回读 | 待新用户在自己的 niri 会话中按 README 独立走完首次复制 |
-| 4.6 | CI 深化 | 增加：release 自动打包（GitHub Releases + SHA256）、AUR 机器人、benchmark 趋势 | tag 即全渠道发布，人工只做审核 |
+| 4.6 | 🟡 CI 深化 | 分支 CI 提供预览包，版本 tag 在门禁通过后发布 GitHub Release 和 SHA-256 清单 | GitHub 发布产物需验证下载与校验。AUR 和 crates.io 另行验收，基准趋势待接入 |
 | 4.7 | ✅ 兼容性矩阵验证 | niri 26.04 嵌套会话中，fzf 0.75.0 分别在 foot、Alacritty、kitty 内通过选择和复制回读。fzf 0.70.0 直接回退 fuzzel 1.15.0 并通过回读 | 合成数据验证，覆盖无控制终端的启动路径 |
 | 4.8 | 版本语义承诺 | 发布 v1.0.0，宣布 SemVer + 配置格式向后兼容承诺 | CHANGELOG 声明 |
 | 4.9 | ✅ 运维体检 `doctor` | 已交付 `niri-clip doctor`：配置/数据库、daemon flock、systemd 单元/自启/沙箱、niri `spawn-at-startup` 与 binds（展开一层 include）、后端与依赖（fzf≥0.71/chafa/wl-clipboard/notify-send）；`[ok]/[info]/[warn]/[fail]` + 修复提示，失败退出码非零。README 已写明 daemon 与 niri 两处 spawn 二选一 | 全新环境按 doctor 输出 5 分钟完成接入 ✅（假 PATH 集成测试 + 真机 0 失败） |
